@@ -7,16 +7,35 @@ const { addNote, sendEmail, setTicketPending } = require('./services/freshdeskSe
 const app = express();
 app.use(express.json());
 
+// ─── In-memory cookie store ───────────────────────────────────────────────────
+// Updated automatically by TA Cookie Sync userscript on every TA page load
+let taCookie = null;
+
 // ─── Health check ────────────────────────────────────────────────────────────
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
+app.get('/health', (req, res) => res.json({ status: 'ok', cookieStored: !!taCookie }));
+
+// ─── Cookie sync (called by TA Cookie Sync userscript) ───────────────────────
+app.post('/update-cookie', (req, res) => {
+  const { cookie } = req.body;
+  if (!cookie) return res.status(400).json({ error: 'cookie is required' });
+  taCookie = cookie;
+  console.log('🍪 TA cookie updated');
+  res.json({ success: true });
+});
 
 // ─── Step 1: Fetch booking + Gemini + post note ──────────────────────────────
-// Returns all data to the agent for review. Does NOT send email yet.
+// Returns all data to agent for review. Does NOT send email yet.
 app.post('/new-booking', async (req, res) => {
-  const { bookingId, cookie, freshdeskTicketId } = req.body;
+  const { bookingId, freshdeskTicketId } = req.body;
 
-  if (!bookingId || !cookie || !freshdeskTicketId) {
-    return res.status(400).json({ error: 'bookingId, cookie, and freshdeskTicketId are required' });
+  if (!bookingId || !freshdeskTicketId) {
+    return res.status(400).json({ error: 'bookingId and freshdeskTicketId are required' });
+  }
+
+  if (!taCookie) {
+    return res.status(400).json({
+      error: 'No TravelAdvantage cookie stored. Open any TravelAdvantage admin page first to sync it.'
+    });
   }
 
   console.log(`\n📦 New booking flow — bookingId=${bookingId} ticketId=${freshdeskTicketId}`);
@@ -24,7 +43,7 @@ app.post('/new-booking', async (req, res) => {
   try {
     // ── Step 1: Fetch booking details from TravelAdvantage ─────────────────
     console.log('⏳ Step 1: Fetching booking details from TravelAdvantage...');
-    const booking = await fetchBookingDetails(bookingId, cookie);
+    const booking = await fetchBookingDetails(bookingId, taCookie);
     console.log('✅ Booking fetched:', booking.hotelName);
 
     // ── Step 2: Find hotel email via Gemini ────────────────────────────────
@@ -83,7 +102,6 @@ app.post('/send-hotel-email', async (req, res) => {
   console.log(`\n✉️  Sending hotel email — ticketId=${freshdeskTicketId} to=${hotelEmail}`);
 
   try {
-    // ── Send email to hotel ────────────────────────────────────────────────
     const emailBody = buildEmailHtml(booking);
     await sendEmail(
       freshdeskTicketId,
@@ -93,7 +111,6 @@ app.post('/send-hotel-email', async (req, res) => {
     );
     console.log('✅ Email sent to', hotelEmail);
 
-    // ── Set ticket to Pending ──────────────────────────────────────────────
     await setTicketPending(freshdeskTicketId);
     console.log('✅ Ticket set to Pending');
 
