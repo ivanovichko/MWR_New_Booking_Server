@@ -1,7 +1,7 @@
 const fetch = require('node-fetch');
 
 function getBaseUrl() {
-  return `https://${process.env.FRESHDESK_DOMAIN}/api/v1`;
+  return `https://${process.env.FRESHDESK_DOMAIN}/api/v2`;
 }
 
 function getAuthHeader() {
