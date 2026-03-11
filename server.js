@@ -1,53 +1,29 @@
 require('dotenv').config();
 const express = require('express');
-const { fetchBookingDetails } = require('./services/bookingService');
 const { findHotelEmail } = require('./services/geminiService');
 const { addNote, sendEmail, setTicketPending } = require('./services/freshdeskService');
 
 const app = express();
 app.use(express.json());
 
-// ─── In-memory cookie store ───────────────────────────────────────────────────
-// Updated automatically by TA Cookie Sync userscript on every TA page load
-let taCookie = null;
-
 // ─── Health check ────────────────────────────────────────────────────────────
-app.get('/health', (req, res) => res.json({ status: 'ok', cookieStored: !!taCookie }));
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
-// ─── Cookie sync (called by TA Cookie Sync userscript) ───────────────────────
-app.post('/update-cookie', (req, res) => {
-  const { cookie } = req.body;
-  if (!cookie) return res.status(400).json({ error: 'cookie is required' });
-  taCookie = cookie;
-  console.log('🍪 TA cookie updated');
-  res.json({ success: true });
-});
-
-// ─── Step 1: Fetch booking + Gemini + post note ──────────────────────────────
+// ─── Step 1: Gemini email search + post Freshdesk note ───────────────────────
+// Booking data is pre-parsed by the userscript (TA auth handled by browser).
 // Returns all data to agent for review. Does NOT send email yet.
 app.post('/new-booking', async (req, res) => {
-  const { bookingId, freshdeskTicketId } = req.body;
+  const { booking, freshdeskTicketId } = req.body;
 
-  if (!bookingId || !freshdeskTicketId) {
-    return res.status(400).json({ error: 'bookingId and freshdeskTicketId are required' });
+  if (!booking || !freshdeskTicketId) {
+    return res.status(400).json({ error: 'booking and freshdeskTicketId are required' });
   }
 
-  if (!taCookie) {
-    return res.status(400).json({
-      error: 'No TravelAdvantage cookie stored. Open any TravelAdvantage admin page first to sync it.'
-    });
-  }
-
-  console.log(`\n📦 New booking flow — bookingId=${bookingId} ticketId=${freshdeskTicketId}`);
+  console.log(`\n📦 New booking — hotel=${booking.hotelName} ticketId=${freshdeskTicketId}`);
 
   try {
-    // ── Step 1: Fetch booking details from TravelAdvantage ─────────────────
-    console.log('⏳ Step 1: Fetching booking details from TravelAdvantage...');
-    const booking = await fetchBookingDetails(bookingId, taCookie);
-    console.log('✅ Booking fetched:', booking.hotelName);
-
-    // ── Step 2: Find hotel email via Gemini ────────────────────────────────
-    console.log('⏳ Step 2: Searching for hotel email via Gemini...');
+    // ── Find hotel email via Gemini ────────────────────────────────────────
+    console.log('⏳ Searching for hotel email via Gemini...');
     const geminiResult = await findHotelEmail(
       booking.hotelName,
       booking.hotelAddress,
@@ -55,34 +31,18 @@ app.post('/new-booking', async (req, res) => {
     );
     console.log(`✅ Gemini result: ${geminiResult.email} (${geminiResult.confidence})`);
 
-    // ── Step 3: Post internal note to Freshdesk ────────────────────────────
-    console.log('⏳ Step 3: Adding internal note to Freshdesk ticket...');
-    const noteBody = buildNoteHtml(booking, geminiResult);
-    await addNote(freshdeskTicketId, noteBody);
+    // ── Post internal note to Freshdesk ───────────────────────────────────
+    console.log('⏳ Adding internal note to Freshdesk ticket...');
+    await addNote(freshdeskTicketId, buildNoteHtml(booking, geminiResult));
     console.log('✅ Note added — awaiting agent confirmation to send email');
 
-    // ── Return to agent for confirmation ───────────────────────────────────
     res.json({
       success: true,
-      booking: {
-        hotelName: booking.hotelName,
-        hotelAddress: booking.hotelAddress,
-        guestName: booking.guestName,
-        checkIn: booking.checkIn,
-        checkOut: booking.checkOut,
-        roomType: booking.roomType,
-        boardCode: booking.boardCode,
-        adults: booking.adults,
-        children: booking.children,
-        vendorConfirmationNumber: booking.vendorConfirmationNumber,
-        internalBookingId: booking.internalBookingId,
-        estimatedArrivalTime: booking.estimatedArrivalTime,
-        specialRequests: booking.specialRequests,
-      },
-      hotelEmail: geminiResult.email,
-      emailSource: geminiResult.source,
+      booking,
+      hotelEmail:      geminiResult.email,
+      emailSource:     geminiResult.source,
       emailConfidence: geminiResult.confidence,
-      emailNotes: geminiResult.notes,
+      emailNotes:      geminiResult.notes,
     });
 
   } catch (err) {
