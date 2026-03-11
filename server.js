@@ -10,7 +10,8 @@ app.use(express.json());
 // ─── Health check ────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
-// ─── Main endpoint ────────────────────────────────────────────────────────────
+// ─── Step 1: Fetch booking + Gemini + post note ──────────────────────────────
+// Returns all data to the agent for review. Does NOT send email yet.
 app.post('/new-booking', async (req, res) => {
   const { bookingId, cookie, freshdeskTicketId } = req.body;
 
@@ -39,45 +40,67 @@ app.post('/new-booking', async (req, res) => {
     console.log('⏳ Step 3: Adding internal note to Freshdesk ticket...');
     const noteBody = buildNoteHtml(booking, geminiResult);
     await addNote(freshdeskTicketId, noteBody);
-    console.log('✅ Note added');
+    console.log('✅ Note added — awaiting agent confirmation to send email');
 
-    // ── Step 4: Send email to hotel (only if confidence is high/medium) ─────
-    let emailSent = false;
-    if (geminiResult.email && geminiResult.confidence !== 'low') {
-      console.log('⏳ Step 4: Sending email to hotel...');
-      const emailBody = buildEmailHtml(booking);
-      await sendEmail(
-        freshdeskTicketId,
-        geminiResult.email,
-        `Prepaid Reservation Confirmation — ${booking.guestName} / ${booking.checkIn}`,
-        emailBody
-      );
-      emailSent = true;
-      console.log('✅ Email sent to', geminiResult.email);
-    } else {
-      console.warn('⚠️  Skipping email send — confidence too low or no email found');
-    }
-
-    // ── Step 5: Set ticket to Pending ──────────────────────────────────────
-    console.log('⏳ Step 5: Setting ticket to Pending...');
-    await setTicketPending(freshdeskTicketId);
-    console.log('✅ Ticket set to Pending');
-
-    // ── Done ───────────────────────────────────────────────────────────────
+    // ── Return to agent for confirmation ───────────────────────────────────
     res.json({
       success: true,
-      hotelName: booking.hotelName,
+      booking: {
+        hotelName: booking.hotelName,
+        hotelAddress: booking.hotelAddress,
+        guestName: booking.guestName,
+        checkIn: booking.checkIn,
+        checkOut: booking.checkOut,
+        roomType: booking.roomType,
+        boardCode: booking.boardCode,
+        adults: booking.adults,
+        children: booking.children,
+        vendorConfirmationNumber: booking.vendorConfirmationNumber,
+        internalBookingId: booking.internalBookingId,
+        estimatedArrivalTime: booking.estimatedArrivalTime,
+        specialRequests: booking.specialRequests,
+      },
       hotelEmail: geminiResult.email,
       emailSource: geminiResult.source,
       emailConfidence: geminiResult.confidence,
-      emailSent,
-      warning: !emailSent
-        ? 'Email not sent automatically — confidence too low. Please send manually.'
-        : null,
+      emailNotes: geminiResult.notes,
     });
 
   } catch (err) {
     console.error('❌ Error in /new-booking:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Step 2: Agent confirmed — send email + set ticket pending ────────────────
+app.post('/send-hotel-email', async (req, res) => {
+  const { freshdeskTicketId, hotelEmail, booking } = req.body;
+
+  if (!freshdeskTicketId || !hotelEmail || !booking) {
+    return res.status(400).json({ error: 'freshdeskTicketId, hotelEmail, and booking are required' });
+  }
+
+  console.log(`\n✉️  Sending hotel email — ticketId=${freshdeskTicketId} to=${hotelEmail}`);
+
+  try {
+    // ── Send email to hotel ────────────────────────────────────────────────
+    const emailBody = buildEmailHtml(booking);
+    await sendEmail(
+      freshdeskTicketId,
+      hotelEmail,
+      `Prepaid Reservation Confirmation — ${booking.guestName} / ${booking.checkIn}`,
+      emailBody
+    );
+    console.log('✅ Email sent to', hotelEmail);
+
+    // ── Set ticket to Pending ──────────────────────────────────────────────
+    await setTicketPending(freshdeskTicketId);
+    console.log('✅ Ticket set to Pending');
+
+    res.json({ success: true, emailSent: true, hotelEmail });
+
+  } catch (err) {
+    console.error('❌ Error in /send-hotel-email:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
