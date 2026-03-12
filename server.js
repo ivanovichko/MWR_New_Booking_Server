@@ -1,48 +1,43 @@
 require('dotenv').config();
 const express = require('express');
-const { findHotelEmail } = require('./services/geminiService');
+const { parseDataRow, parseBookingHtml } = require('./services/parserService');
+const { parseUserHtml }                  = require('./services/userService');
+const { buildNoteHtml }                  = require('./services/noteBuilder');
+const { findHotelEmail }                 = require('./services/geminiService');
 const { addNote, sendEmail, setTicketPending } = require('./services/freshdeskService');
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '5mb' }));
 
-// ─── Health check ────────────────────────────────────────────────────────────
+// ─── Health check ─────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
-// ─── Step 1: Gemini email search + post Freshdesk note ───────────────────────
-// Booking data is pre-parsed by the userscript (TA auth handled by browser).
-// Returns all data to agent for review. Does NOT send email yet.
+// ─── Parse + build note (no Freshdesk write yet) ──────────────────────────────
+// Receives raw HTML pages and DataTables row from userscript.
+// Returns formatted note HTML for agent preview.
 app.post('/new-booking', async (req, res) => {
-  const { booking, freshdeskTicketId } = req.body;
+  const { dataRow, bookingHtml, userHtml, freshdeskTicketId } = req.body;
 
-  if (!booking || !freshdeskTicketId) {
-    return res.status(400).json({ error: 'booking and freshdeskTicketId are required' });
+  if (!dataRow || !bookingHtml || !userHtml || !freshdeskTicketId) {
+    return res.status(400).json({ error: 'dataRow, bookingHtml, userHtml, and freshdeskTicketId are required' });
   }
 
-  console.log(`\n📦 New booking — hotel=${booking.hotelName} ticketId=${freshdeskTicketId}`);
+  console.log(`\n📦 New booking — ticketId=${freshdeskTicketId}`);
 
   try {
-    // ── Find hotel email via Gemini ────────────────────────────────────────
-    console.log('⏳ Searching for hotel email via Gemini...');
-    const geminiResult = await findHotelEmail(
-      booking.hotelName,
-      booking.hotelAddress,
-      booking.hotelCountry
-    );
-    console.log(`✅ Gemini result: ${geminiResult.email} (${geminiResult.confidence})`);
+    const booking     = parseDataRow(dataRow);
+    const { cleanHtml } = parseBookingHtml(bookingHtml);
+    const user        = parseUserHtml(userHtml);
 
-    // ── Post internal note to Freshdesk ───────────────────────────────────
-    console.log('⏳ Adding internal note to Freshdesk ticket...');
-    await addNote(freshdeskTicketId, buildNoteHtml(booking, geminiResult));
-    console.log('✅ Note added — awaiting agent confirmation to send email');
+    console.log(`✅ Parsed: ${booking.productType} — ${booking.guestName} — ${booking.supplierName}`);
+
+    const noteHtml = buildNoteHtml(booking, cleanHtml, user);
 
     res.json({
-      success: true,
+      success:     true,
+      noteHtml,
       booking,
-      hotelEmail:      geminiResult.email,
-      emailSource:     geminiResult.source,
-      emailConfidence: geminiResult.confidence,
-      emailNotes:      geminiResult.notes,
+      productType: booking.productType,
     });
 
   } catch (err) {
@@ -51,7 +46,45 @@ app.post('/new-booking', async (req, res) => {
   }
 });
 
-// ─── Step 2: Agent confirmed — send email + set ticket pending ────────────────
+// ─── Post note to Freshdesk (agent confirmed) ─────────────────────────────────
+app.post('/post-note', async (req, res) => {
+  const { freshdeskTicketId, noteHtml } = req.body;
+
+  if (!freshdeskTicketId || !noteHtml) {
+    return res.status(400).json({ error: 'freshdeskTicketId and noteHtml are required' });
+  }
+
+  try {
+    await addNote(freshdeskTicketId, noteHtml);
+    console.log(`✅ Note posted to ticket ${freshdeskTicketId}`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Error in /post-note:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Find hotel email via Groq (hotels only) ──────────────────────────────────
+app.post('/find-hotel-email', async (req, res) => {
+  const { hotelName, hotelAddress, hotelCountry } = req.body;
+
+  if (!hotelName) {
+    return res.status(400).json({ error: 'hotelName is required' });
+  }
+
+  console.log(`\n🔍 Hotel email search — ${hotelName}`);
+
+  try {
+    const result = await findHotelEmail(hotelName, hotelAddress, hotelCountry);
+    console.log(`✅ Groq result: ${result.email} (${result.confidence})`);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('❌ Error in /find-hotel-email:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Send hotel email + set ticket pending (agent confirmed) ──────────────────
 app.post('/send-hotel-email', async (req, res) => {
   const { freshdeskTicketId, hotelEmail, booking } = req.body;
 
@@ -62,7 +95,7 @@ app.post('/send-hotel-email', async (req, res) => {
   console.log(`\n✉️  Sending hotel email — ticketId=${freshdeskTicketId} to=${hotelEmail}`);
 
   try {
-    const emailBody = buildEmailHtml(booking);
+    const emailBody = buildHotelEmailHtml(booking);
     await sendEmail(
       freshdeskTicketId,
       hotelEmail,
@@ -75,32 +108,24 @@ app.post('/send-hotel-email', async (req, res) => {
     console.log('✅ Ticket set to Pending');
 
     res.json({ success: true, emailSent: true, hotelEmail });
-
   } catch (err) {
     console.error('❌ Error in /send-hotel-email:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ─── Email template builder ───────────────────────────────────────────────────
-function buildEmailHtml(booking) {
+// ─── Hotel confirmation email builder ─────────────────────────────────────────
+function buildHotelEmailHtml(booking) {
   const lines = [
-    `<strong>Hotel:</strong> ${booking.hotelName}`,
-    `<strong>Guest Name(s):</strong> ${booking.guestName}`,
-    `<strong>Check-in:</strong> ${booking.checkIn}`,
-    `<strong>Check-out:</strong> ${booking.checkOut}`,
-    `<strong>Room Details:</strong> ${booking.roomType}${booking.boardCode ? ' | ' + booking.boardCode : ''}`,
-    `<strong>Adults:</strong> ${booking.adults} &nbsp; <strong>Children:</strong> ${booking.children || 0}`,
-    `<strong>Vendor Confirmation Number:</strong> ${booking.vendorConfirmationNumber}`,
-    `<strong>Reservation:</strong> ${booking.internalBookingId}`,
-  ];
-
-  if (booking.estimatedArrivalTime) {
-    lines.push(`<strong>Estimated Time of Arrival:</strong> ${booking.estimatedArrivalTime}`);
-  }
-  if (booking.specialRequests) {
-    lines.push(`<strong>Special Requests:</strong> ${booking.specialRequests}`);
-  }
+    `<strong>Hotel:</strong> ${booking.supplierName || booking.locationTo || '—'}`,
+    `<strong>Guest Name(s):</strong> ${booking.guestName || '—'}`,
+    `<strong>Check-in:</strong> ${booking.checkIn || '—'}`,
+    `<strong>Check-out:</strong> ${booking.checkOut || '—'}`,
+    booking.supplierRoomType ? `<strong>Room Type:</strong> ${booking.supplierRoomType}` : null,
+    booking.mwrRoomType      ? `<strong>MWR Room Type:</strong> ${booking.mwrRoomType}` : null,
+    `<strong>Vendor Confirmation Number:</strong> ${booking.supplierId || '—'}`,
+    `<strong>Reservation:</strong> ${booking.internalBookingId || '—'}`,
+  ].filter(Boolean);
 
   return `
 <p>Hi, dear hotel team,</p>
@@ -110,35 +135,6 @@ function buildEmailHtml(booking) {
 <p>Kindly double-check and confirm the reservation, including the room and bed type, and please make a note of the customer arrival time or special requests (if listed).</p>
 <p>Please let me know if you need any additional information from my end.</p>
 <p>Thanks and looking forward to your reply</p>
-  `.trim();
-}
-
-// ─── Internal note builder ────────────────────────────────────────────────────
-function buildNoteHtml(booking, geminiResult) {
-  return `
-<p><strong>📦 New Booking Flow — Auto-generated note</strong></p>
-<hr>
-<p>
-  <strong>Hotel:</strong> ${booking.hotelName}<br>
-  <strong>Address:</strong> ${booking.hotelAddress}<br>
-  <strong>Guest:</strong> ${booking.guestName}<br>
-  <strong>Check-in:</strong> ${booking.checkIn}<br>
-  <strong>Check-out:</strong> ${booking.checkOut}<br>
-  <strong>Room:</strong> ${booking.roomType} | ${booking.boardCode}<br>
-  <strong>Adults:</strong> ${booking.adults} / <strong>Children:</strong> ${booking.children || 0}<br>
-  <strong>Vendor Confirmation:</strong> ${booking.vendorConfirmationNumber}<br>
-  <strong>Internal Booking ID:</strong> ${booking.internalBookingId}<br>
-  ${booking.estimatedArrivalTime ? `<strong>Arrival Time:</strong> ${booking.estimatedArrivalTime}<br>` : ''}
-  ${booking.specialRequests ? `<strong>Special Requests:</strong> ${booking.specialRequests}<br>` : ''}
-</p>
-<hr>
-<p>
-  <strong>🤖 Hotel email lookup (Gemini)</strong><br>
-  <strong>Email:</strong> ${geminiResult.email || 'Not found'}<br>
-  <strong>Source:</strong> ${geminiResult.source || 'N/A'}<br>
-  <strong>Confidence:</strong> ${geminiResult.confidence}<br>
-  <strong>Notes:</strong> ${geminiResult.notes || 'N/A'}
-</p>
   `.trim();
 }
 
