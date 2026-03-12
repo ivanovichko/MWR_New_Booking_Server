@@ -121,8 +121,18 @@ function parseBookingHtml(html) {
     if (cutting) el.remove();
   });
 
+  // ── Extract hotel name from rendered text ────────────────────────────────
+  let hotelName = null;
+  const bodyText = body.textContent || '';
+  const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  const hotelIdx = lines.indexOf('Hotel');
+  if (hotelIdx !== -1 && hotelIdx + 1 < lines.length) {
+    hotelName = lines[hotelIdx + 1];
+  }
+
   return {
     cleanHtml: body.innerHTML.trim(),
+    hotelName,
   };
 }
 

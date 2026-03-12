@@ -26,10 +26,10 @@ app.post('/new-booking', async (req, res) => {
   console.log(`\n📦 New booking — ticketId=${freshdeskTicketId}`);
 
   try {
-    const booking     = parseDataRow(dataRow);
-    const { cleanHtml } = parseBookingHtml(bookingHtml);
-    const user        = parseUserHtml(userHtml);
-    const supplier    = lookupSupplier(booking.supplierName);
+    const booking              = parseDataRow(dataRow);
+    const { cleanHtml, hotelName } = parseBookingHtml(bookingHtml);
+    const user                 = parseUserHtml(userHtml);
+    const supplier             = lookupSupplier(booking.supplierName);
 
     console.log(`✅ Parsed: ${booking.productType} — ${booking.guestName} — ${booking.supplierName}`);
     if (supplier) console.log(`📬 Supplier contact found: ${supplier.email || supplier.contactUrl}`);
@@ -40,6 +40,7 @@ app.post('/new-booking', async (req, res) => {
       success:     true,
       noteHtml,
       booking,
+      hotelName,
       productType: booking.productType,
     });
 
