@@ -3,6 +3,7 @@ const express = require('express');
 const { parseDataRow, parseBookingHtml } = require('./services/parserService');
 const { parseUserHtml }                  = require('./services/userService');
 const { buildNoteHtml }                  = require('./services/noteBuilder');
+const { lookupSupplier }                 = require('./services/supplierService');
 const { findHotelEmail }                 = require('./services/geminiService');
 const { addNote, sendEmail, setTicketPending } = require('./services/freshdeskService');
 
@@ -28,10 +29,12 @@ app.post('/new-booking', async (req, res) => {
     const booking     = parseDataRow(dataRow);
     const { cleanHtml } = parseBookingHtml(bookingHtml);
     const user        = parseUserHtml(userHtml);
+    const supplier    = lookupSupplier(booking.supplierName);
 
     console.log(`✅ Parsed: ${booking.productType} — ${booking.guestName} — ${booking.supplierName}`);
+    if (supplier) console.log(`📬 Supplier contact found: ${supplier.email || supplier.contactUrl}`);
 
-    const noteHtml = buildNoteHtml(booking, cleanHtml, user);
+    const noteHtml = buildNoteHtml(booking, cleanHtml, user, supplier);
 
     res.json({
       success:     true,
