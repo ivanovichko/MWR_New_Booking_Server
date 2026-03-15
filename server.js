@@ -6,7 +6,7 @@ const { parseUserHtml }                  = require('./services/userService');
 const { buildNoteHtml }                  = require('./services/noteBuilder');
 const { lookupSupplier }                 = require('./services/supplierService');
 const { findHotelEmail }                 = require('./services/geminiService');
-const { addNote, sendEmail, setTicketPending } = require('./services/freshdeskService');
+const { addNote, sendEmail, setTicketPending, tagTicket, searchDuplicates } = require('./services/freshdeskService');
 const { initDb, getCachedBooking, cacheBooking, storeSession } = require('./services/dbService');
 const { prewarm, fetchAndCacheBooking }  = require('./services/prewarmService');
 
@@ -303,6 +303,47 @@ USA: +1 857 763 2085<br>
 <p>Thanks and looking forward to your reply</p>
 ${signature}`.trim();
 }
+
+// ─── Tag ticket + set type ────────────────────────────────────────────────────
+app.post('/tag-ticket', async (req, res) => {
+  const { freshdeskTicketId, tags, type } = req.body;
+  if (!freshdeskTicketId || !tags) {
+    return res.status(400).json({ error: 'freshdeskTicketId and tags are required' });
+  }
+  try {
+    await tagTicket(freshdeskTicketId, tags, type);
+    console.log(`🏷️  Tagged ticket ${freshdeskTicketId}: ${tags.join(', ')}`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Error in /tag-ticket:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Check for duplicate tickets ─────────────────────────────────────────────
+app.post('/check-duplicates', async (req, res) => {
+  const { vendorConf, internalId, freshdeskTicketId } = req.body;
+  try {
+    const [byVendor, byInternal] = await Promise.all([
+      vendorConf ? searchDuplicates(vendorConf, freshdeskTicketId) : [],
+      internalId ? searchDuplicates(internalId, freshdeskTicketId) : [],
+    ]);
+
+    // Merge and deduplicate by ticket id
+    const seen = new Set();
+    const duplicates = [...byVendor, ...byInternal].filter(t => {
+      if (seen.has(t.id)) return false;
+      seen.add(t.id);
+      return true;
+    });
+
+    console.log(`🔍 Duplicate check for ${vendorConf}/${internalId}: ${duplicates.length} found`);
+    res.json({ success: true, duplicates });
+  } catch (err) {
+    console.error('❌ Error in /check-duplicates:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;

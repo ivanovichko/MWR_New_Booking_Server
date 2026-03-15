@@ -81,4 +81,56 @@ async function setTicketPending(ticketId) {
   return response.json();
 }
 
-module.exports = { addNote, sendEmail, setTicketPending };
+/**
+ * Generic ticket update — pass any fields to update.
+ */
+async function updateTicket(ticketId, fields) {
+  const response = await fetch(`${getBaseUrl()}/tickets/${ticketId}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': getAuthHeader(),
+    },
+    body: JSON.stringify(fields),
+  });
+
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Freshdesk updateTicket failed ${response.status}: ${err}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * Sets tags and type on a ticket in one call.
+ * Replaces ALL existing tags.
+ */
+async function tagTicket(ticketId, tags, type) {
+  const fields = { tags };
+  if (type) fields.type = type;
+  return updateTicket(ticketId, fields);
+}
+
+/**
+ * Search for tickets containing a reference number.
+ * Returns array of matching tickets (excluding the current ticket).
+ */
+async function searchDuplicates(ref, excludeTicketId) {
+  if (!ref) return [];
+
+  const query = encodeURIComponent(`"${ref}"`);
+  const url = `${getBaseUrl().replace('/api/v2', '')}/api/v2/search/tickets?query=${query}`;
+
+  const response = await fetch(url, {
+    headers: { 'Authorization': getAuthHeader() },
+  });
+
+  if (!response.ok) return [];
+
+  const data = await response.json();
+  const results = data.results || [];
+  return results.filter(t => String(t.id) !== String(excludeTicketId));
+}
+
+module.exports = { addNote, sendEmail, setTicketPending, updateTicket, tagTicket, searchDuplicates };
