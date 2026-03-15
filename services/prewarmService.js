@@ -16,7 +16,7 @@ async function fetchLowPriorityTickets() {
 
   // Priority 1=low, 2=medium, 3=high, 4=urgent
   // Fetch open + pending, low priority, assigned to agent
-  const url = `https://${domain}/api/v2/tickets?priority=1&assignee_id=${agentId}&per_page=100&include=description`;
+  const url = `https://${domain}/api/v2/tickets?priority=1&responder_id=${agentId}&per_page=100&include=description`;
 
   const res = await fetch(url, {
     headers: {
@@ -25,7 +25,10 @@ async function fetchLowPriorityTickets() {
     },
   });
 
-  if (!res.ok) throw new Error(`Freshdesk ticket fetch failed: ${res.status}`);
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Freshdesk ticket fetch failed: ${res.status} — ${body}`);
+  }
   return res.json();
 }
 
