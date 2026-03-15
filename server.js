@@ -50,23 +50,48 @@ app.post('/ta-login/otp', async (req, res) => {
   }
 });
 
-// ─── Prewarm: fetch all LOW tickets + cache bookings ─────────────────────────
-// SSE endpoint so we can stream progress to the userscript popup
-app.get('/prewarm', async (req, res) => {
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
+// ─── Prewarm: polling-based progress ─────────────────────────────────────────
+// In-memory job store (single job at a time is fine)
+const prewarmJob = { running: false, log: [], done: false, error: null, results: null };
 
-  const send = (msg) => res.write(`data: ${JSON.stringify({ msg })}\n\n`);
-
-  try {
-    const results = await prewarm(send);
-    res.write(`data: ${JSON.stringify({ done: true, results })}\n\n`);
-  } catch (err) {
-    res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
+app.post('/prewarm/start', async (req, res) => {
+  if (prewarmJob.running) {
+    return res.json({ success: true, message: 'Already running' });
   }
-  res.end();
+
+  // Reset
+  prewarmJob.running = true;
+  prewarmJob.done    = false;
+  prewarmJob.error   = null;
+  prewarmJob.results = null;
+  prewarmJob.log     = [];
+
+  res.json({ success: true, message: 'Prewarm started' });
+
+  // Run async in background
+  prewarm((msg) => prewarmJob.log.push(msg))
+    .then(results => {
+      prewarmJob.results = results;
+      prewarmJob.done    = true;
+      prewarmJob.running = false;
+    })
+    .catch(err => {
+      prewarmJob.error   = err.message;
+      prewarmJob.done    = true;
+      prewarmJob.running = false;
+    });
 });
+
+app.get('/prewarm/status', (req, res) => {
+  res.json({
+    running: prewarmJob.running,
+    done:    prewarmJob.done,
+    error:   prewarmJob.error,
+    log:     prewarmJob.log,
+    results: prewarmJob.results,
+  });
+});
+
 
 // ─── Cached booking lookup ────────────────────────────────────────────────────
 app.get('/booking/:id', async (req, res) => {
