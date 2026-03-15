@@ -1,17 +1,117 @@
 require('dotenv').config();
 const express = require('express');
+const path    = require('path');
 const { parseDataRow, parseBookingHtml } = require('./services/parserService');
 const { parseUserHtml }                  = require('./services/userService');
 const { buildNoteHtml }                  = require('./services/noteBuilder');
 const { lookupSupplier }                 = require('./services/supplierService');
 const { findHotelEmail }                 = require('./services/geminiService');
 const { addNote, sendEmail, setTicketPending } = require('./services/freshdeskService');
+const { initDb, getCachedBooking, cacheBooking } = require('./services/dbService');
+const { initiateLogin, submitOtp }       = require('./services/taAuthService');
+const { prewarm, fetchAndCacheBooking }  = require('./services/prewarmService');
 
 const app = express();
 app.use(express.json({ limit: '5mb' }));
+app.use(express.static(path.join(__dirname)));
+
+// ─── Init DB on startup ───────────────────────────────────────────────────────
+initDb().catch(err => console.error('❌ DB init failed:', err.message));
 
 // ─── Health check ─────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
+
+// ─── Auth page ────────────────────────────────────────────────────────────────
+app.get('/auth', (req, res) => res.sendFile(path.join(__dirname, 'auth.html')));
+
+// ─── TA Login: step 1 — send credentials ──────────────────────────────────────
+app.post('/ta-login/initiate', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ error: 'email and password required' });
+  try {
+    await initiateLogin(email, password);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ TA login initiate:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── TA Login: step 2 — submit OTP ───────────────────────────────────────────
+app.post('/ta-login/otp', async (req, res) => {
+  const { otp } = req.body;
+  if (!otp) return res.status(400).json({ error: 'otp required' });
+  try {
+    await submitOtp(otp);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ TA OTP:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Prewarm: fetch all LOW tickets + cache bookings ─────────────────────────
+// SSE endpoint so we can stream progress to the userscript popup
+app.get('/prewarm', async (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+
+  const send = (msg) => res.write(`data: ${JSON.stringify({ msg })}\n\n`);
+
+  try {
+    const results = await prewarm(send);
+    res.write(`data: ${JSON.stringify({ done: true, results })}\n\n`);
+  } catch (err) {
+    res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
+  }
+  res.end();
+});
+
+// ─── Cached booking lookup ────────────────────────────────────────────────────
+app.get('/booking/:id', async (req, res) => {
+  const bookingId = req.params.id;
+  console.log(`\n🔍 Booking lookup — ${bookingId}`);
+
+  try {
+    let cached = await getCachedBooking(bookingId);
+    let fromCache = true;
+
+    if (!cached) {
+      console.log(`⚠️  Cache miss — live fetching ${bookingId}`);
+      fromCache = false;
+      await fetchAndCacheBooking(bookingId);
+      cached = await getCachedBooking(bookingId);
+    }
+
+    if (!cached) return res.status(404).json({ error: `Booking ${bookingId} not found` });
+
+    const parsed  = cached.parsed;
+    const booking = parsed.booking;
+    const details = parsed.details;
+    const user    = parsed.user;
+    const supplier = lookupSupplier(booking.supplierName);
+    const { cleanHtml } = parseBookingHtml(cached.booking_html);
+    const noteHtml = buildNoteHtml(booking, cleanHtml, user, supplier);
+
+    res.json({
+      success: true,
+      fromCache,
+      fetchedAt: cached.fetched_at,
+      booking,
+      details,
+      user,
+      noteHtml,
+      hotelName:   details?.hotelName,
+      productType: booking.productType,
+    });
+
+  } catch (err) {
+    console.error('❌ Booking lookup error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 // ─── Parse + build note (no Freshdesk write yet) ──────────────────────────────
 // Receives raw HTML pages and DataTables row from userscript.
@@ -36,14 +136,16 @@ app.post('/new-booking', async (req, res) => {
 
     const noteHtml = buildNoteHtml(booking, cleanHtml, user, supplier);
 
+    // Cache for future lookups (fire and forget)
+    if (booking.internalBookingId) {
+      cacheBooking({
+        bookingId: booking.internalBookingId,
+        dataRow, bookingHtml, userHtml,
+        parsed: { booking, details, user },
+      }).catch(e => console.warn('⚠️ Cache write failed:', e.message));
+    }
+
     res.json({
-      success:     true,
-      noteHtml,
-      booking,
-      details,
-      hotelName:   details.hotelName,
-      productType: booking.productType,
-    });
 
   } catch (err) {
     console.error('❌ Error in /new-booking:', err.message);
