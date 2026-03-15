@@ -61,6 +61,7 @@ async function submitOtp(otp) {
 async function taGet(url) {
   const cookie = await getSession();
   if (!cookie) throw new Error('No TA session — please authenticate first via /auth');
+  console.log(`🍪 taGet ${url.slice(0, 80)} — cookie length: ${cookie.length}`);
 
   const res = await fetch(url, {
     headers: {
@@ -69,6 +70,7 @@ async function taGet(url) {
     },
   });
 
+  console.log(`🌐 taGet response: ${res.status} ${res.url?.slice(0, 80)}`);
   if (res.status === 401 || res.status === 403) {
     throw new Error('TA session expired — please re-authenticate via /auth');
   }
@@ -80,6 +82,7 @@ async function taGet(url) {
 async function taPost(url, body) {
   const cookie = await getSession();
   if (!cookie) throw new Error('No TA session — please authenticate first via /auth');
+  console.log(`🍪 taPost ${url.slice(0, 80)} — cookie length: ${cookie.length}`);
 
   const res = await fetch(url, {
     method: 'POST',
@@ -92,11 +95,14 @@ async function taPost(url, body) {
     body,
   });
 
+  console.log(`🌐 taPost response: ${res.status}`);
   if (res.status === 401 || res.status === 403) {
     throw new Error('TA session expired — please re-authenticate via /auth');
   }
 
-  return res.json();
+  const text = await res.text();
+  try { return JSON.parse(text); }
+  catch { console.error('taPost non-JSON response:', text.slice(0, 200)); throw new Error('TA returned non-JSON response — session may be expired'); }
 }
 
 module.exports = { initiateLogin, submitOtp, taGet, taPost };

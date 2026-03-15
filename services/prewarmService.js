@@ -40,7 +40,10 @@ async function fetchLowPriorityTickets() {
     page++;
   }
 
-  return agentId ? allTickets.filter(t => String(t.responder_id) === String(agentId)) : allTickets;
+  const filtered = agentId ? allTickets.filter(t => String(t.responder_id) === String(agentId)) : allTickets;
+  console.log(`📋 Total low priority tickets: ${allTickets.length}, after agent filter: ${filtered.length}, agentId: ${agentId}`);
+  if (allTickets.length > 0) console.log(`📋 Sample responder_ids: ${allTickets.slice(0,3).map(t => t.responder_id).join(', ')}`);
+  return filtered;
 }
 
 // ─── Extract booking ID from ticket using Groq ───────────────────────────────
