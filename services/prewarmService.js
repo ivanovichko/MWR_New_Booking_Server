@@ -16,7 +16,9 @@ async function fetchLowPriorityTickets() {
 
   // Priority 1=low, 2=medium, 3=high, 4=urgent
   // Fetch open + pending, low priority, assigned to agent
-  const url = `https://${domain}/api/v2/tickets?priority=1&responder_id=${agentId}&per_page=100&include=description`;
+  // Freshdesk requires the search endpoint for combined filters
+  const query = encodeURIComponent(`"priority:1 AND responder_id:${agentId}"`);
+  const url = `https://${domain}/api/v2/search/tickets?query=${query}&per_page=30&include=description`;
 
   const res = await fetch(url, {
     headers: {
@@ -29,7 +31,8 @@ async function fetchLowPriorityTickets() {
     const body = await res.text();
     throw new Error(`Freshdesk ticket fetch failed: ${res.status} — ${body}`);
   }
-  return res.json();
+  const data = await res.json();
+  return data.results || data;
 }
 
 // ─── Extract booking ID from ticket using Groq ───────────────────────────────
