@@ -146,6 +146,13 @@ app.post('/new-booking', async (req, res) => {
     }
 
     res.json({
+      success:     true,
+      noteHtml,
+      booking,
+      details,
+      hotelName:   details.hotelName,
+      productType: booking.productType,
+    });
 
   } catch (err) {
     console.error('❌ Error in /new-booking:', err.message);
