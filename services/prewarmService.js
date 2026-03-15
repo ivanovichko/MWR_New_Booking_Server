@@ -36,7 +36,7 @@ async function fetchLowPriorityTickets() {
     if (!results.length) break;
 
     allTickets = allTickets.concat(results);
-    if (results.length < 30) break;
+    if (results.length < 30 || page >= 10) break;
     page++;
   }
 
