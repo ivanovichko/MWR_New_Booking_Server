@@ -3,121 +3,80 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>TA Auth — MWR Server</title>
+  <title>TA Session — MWR Server</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: system-ui, sans-serif; background: #f0f2f5; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
-    .card { background: #fff; border-radius: 12px; padding: 36px 40px; width: 100%; max-width: 420px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
+    .card { background: #fff; border-radius: 12px; padding: 36px 40px; width: 100%; max-width: 480px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
     h2 { font-size: 20px; color: #1a1a1a; margin-bottom: 6px; }
-    p.sub { font-size: 13px; color: #666; margin-bottom: 28px; }
+    p.sub { font-size: 13px; color: #666; margin-bottom: 24px; line-height: 1.6; }
     label { display: block; font-size: 13px; font-weight: 600; color: #444; margin-bottom: 5px; }
-    input { width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; margin-bottom: 14px; }
-    input:focus { outline: none; border-color: #007bff; }
-    button { width: 100%; padding: 11px; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; }
-    .btn-primary { background: #007bff; color: #fff; }
-    .btn-primary:hover { background: #0056d2; }
-    .btn-primary:disabled { background: #aaa; cursor: not-allowed; }
+    input, textarea { width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; margin-bottom: 14px; font-family: monospace; }
+    textarea { height: 80px; resize: vertical; }
+    input:focus, textarea:focus { outline: none; border-color: #007bff; }
+    button { width: 100%; padding: 11px; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; background: #007bff; color: #fff; }
+    button:hover { background: #0056d2; }
+    button:disabled { background: #aaa; cursor: not-allowed; }
     .status { margin-top: 16px; padding: 10px 14px; border-radius: 6px; font-size: 13px; display: none; }
     .status.success { background: #d4edda; color: #155724; display: block; }
     .status.error   { background: #f8d7da; color: #721c24; display: block; }
     .status.info    { background: #d1ecf1; color: #0c5460; display: block; }
-    .step { display: none; }
-    .step.active { display: block; }
     hr { border: none; border-top: 1px solid #eee; margin: 24px 0; }
+    .steps { background: #f8f9fa; border-radius: 8px; padding: 14px 16px; margin-bottom: 24px; font-size: 12px; color: #555; line-height: 2; }
+    .steps strong { color: #333; }
+    code { background: #e9ecef; padding: 1px 5px; border-radius: 3px; font-family: monospace; font-size: 12px; }
   </style>
 </head>
 <body>
 <div class="card">
-  <h2>🔐 TravelAdvantage Auth</h2>
-  <p class="sub">Authenticate the server to access TravelAdvantage on your behalf.</p>
-  <hr>
+  <h2>🔑 TravelAdvantage Session</h2>
+  <p class="sub">Paste your TA session cookie to authorize the server. Valid for ~3 days.</p>
 
-  <!-- Step 1: Credentials -->
-  <div class="step active" id="step1">
-    <label>Email</label>
-    <input type="email" id="email" placeholder="your@email.com">
-    <label>Password</label>
-    <input type="password" id="password" placeholder="••••••••">
-    <button class="btn-primary" id="loginBtn" onclick="doLogin()">Send OTP →</button>
-    <div class="status" id="status1"></div>
+  <div class="steps">
+    <strong>How to get the cookie:</strong><br>
+    1. Open <code>traveladvantage.com/admin</code> and log in<br>
+    2. Press <code>F12</code> → Application → Cookies → traveladvantage.com<br>
+    3. Find the <code>traveladvantage</code> cookie<br>
+    4. Copy the <strong>Value</strong> and paste it below
   </div>
 
-  <!-- Step 2: OTP -->
-  <div class="step" id="step2">
-    <p style="font-size:13px;color:#444;margin-bottom:16px;">Check your email for the OTP code and enter it below.</p>
-    <label>OTP Code</label>
-    <input type="text" id="otp" placeholder="123456" maxlength="8">
-    <button class="btn-primary" id="otpBtn" onclick="doOtp()">Verify & Save Session →</button>
-    <div class="status" id="status2"></div>
-  </div>
-
-  <!-- Step 3: Done -->
-  <div class="step" id="step3">
-    <div class="status success">✅ Authenticated! Server session is active. You can close this page.</div>
-  </div>
+  <label>Cookie Value</label>
+  <textarea id="cookieValue" placeholder="nddt7c6jsdj6hpengqosthtr2dfocj0o"></textarea>
+  <button id="saveBtn" onclick="saveSession()">Save Session →</button>
+  <div class="status" id="status"></div>
 </div>
 
 <script>
-  function showStatus(id, msg, type) {
-    const el = document.getElementById(id);
+  function showStatus(msg, type) {
+    const el = document.getElementById('status');
     el.textContent = msg;
     el.className = `status ${type}`;
   }
 
-  function setStep(n) {
-    document.querySelectorAll('.step').forEach((s, i) => {
-      s.classList.toggle('active', i + 1 === n);
-    });
-  }
+  async function saveSession() {
+    const value = document.getElementById('cookieValue').value.trim();
+    if (!value) return showStatus('Please paste the cookie value.', 'error');
 
-  async function doLogin() {
-    const email    = document.getElementById('email').value.trim();
-    const password = document.getElementById('password').value;
-    if (!email || !password) return showStatus('status1', 'Please fill in both fields.', 'error');
-
-    const btn = document.getElementById('loginBtn');
+    const btn = document.getElementById('saveBtn');
     btn.disabled = true;
-    btn.textContent = 'Sending...';
-    showStatus('status1', 'Contacting TravelAdvantage...', 'info');
+    btn.textContent = 'Saving...';
+    showStatus('Saving session...', 'info');
 
     try {
-      const res  = await fetch('/ta-login/initiate', {
+      const res  = await fetch('/ta-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ cookie: `traveladvantage=${value}` }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Login failed');
-      setStep(2);
+      if (!res.ok) throw new Error(data.error || 'Failed to save');
+      showStatus('✅ Session saved! Server is now authorized.', 'success');
+      document.getElementById('cookieValue').value = '';
     } catch (err) {
-      showStatus('status1', `❌ ${err.message}`, 'error');
+      showStatus(`❌ ${err.message}`, 'error');
+    } finally {
       btn.disabled = false;
-      btn.textContent = 'Send OTP →';
-    }
-  }
-
-  async function doOtp() {
-    const otp = document.getElementById('otp').value.trim();
-    if (!otp) return showStatus('status2', 'Please enter the OTP.', 'error');
-
-    const btn = document.getElementById('otpBtn');
-    btn.disabled = true;
-    btn.textContent = 'Verifying...';
-    showStatus('status2', 'Verifying OTP...', 'info');
-
-    try {
-      const res  = await fetch('/ta-login/otp', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ otp }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'OTP failed');
-      setStep(3);
-    } catch (err) {
-      showStatus('status2', `❌ ${err.message}`, 'error');
-      btn.disabled = false;
-      btn.textContent = 'Verify & Save Session →';
+      btn.textContent = 'Save Session →';
     }
   }
 </script>

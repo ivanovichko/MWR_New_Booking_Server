@@ -7,8 +7,7 @@ const { buildNoteHtml }                  = require('./services/noteBuilder');
 const { lookupSupplier }                 = require('./services/supplierService');
 const { findHotelEmail }                 = require('./services/geminiService');
 const { addNote, sendEmail, setTicketPending } = require('./services/freshdeskService');
-const { initDb, getCachedBooking, cacheBooking } = require('./services/dbService');
-const { initiateLogin, submitOtp }       = require('./services/taAuthService');
+const { initDb, getCachedBooking, cacheBooking, storeSession } = require('./services/dbService');
 const { prewarm, fetchAndCacheBooking }  = require('./services/prewarmService');
 
 const app = express();
@@ -24,28 +23,16 @@ app.get('/health', (req, res) => res.json({ status: 'ok' }));
 // ─── Auth page ────────────────────────────────────────────────────────────────
 app.get('/auth', (req, res) => res.sendFile(path.join(__dirname, 'auth.html')));
 
-// ─── TA Login: step 1 — send credentials ──────────────────────────────────────
-app.post('/ta-login/initiate', async (req, res) => {
-  const { email, password } = req.body;
-  if (!email || !password) return res.status(400).json({ error: 'email and password required' });
+// ─── TA Session: manually paste cookie value ──────────────────────────────────
+app.post('/ta-session', async (req, res) => {
+  const { cookie } = req.body;
+  if (!cookie) return res.status(400).json({ error: 'cookie is required' });
   try {
-    await initiateLogin(email, password);
+    await storeSession(cookie);
+    console.log(`✅ TA session stored (length: ${cookie.length})`);
     res.json({ success: true });
   } catch (err) {
-    console.error('❌ TA login initiate:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── TA Login: step 2 — submit OTP ───────────────────────────────────────────
-app.post('/ta-login/otp', async (req, res) => {
-  const { otp } = req.body;
-  if (!otp) return res.status(400).json({ error: 'otp required' });
-  try {
-    await submitOtp(otp);
-    res.json({ success: true });
-  } catch (err) {
-    console.error('❌ TA OTP:', err.message);
+    console.error('❌ Session store error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });

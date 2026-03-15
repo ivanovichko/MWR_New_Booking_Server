@@ -22,8 +22,7 @@ async function fetchLowPriorityTickets() {
   let page = 1;
 
   while (true) {
-    const query = encodeURIComponent('"priority:1"');
-    const url = `https://${domain}/api/v2/search/tickets?query=${query}&page=${page}`;
+    const url = `https://${domain}/api/v2/tickets?filter=assigned_to_me&per_page=100&page=${page}`;
     const res = await fetch(url, { headers });
 
     if (!res.ok) {
@@ -31,18 +30,17 @@ async function fetchLowPriorityTickets() {
       throw new Error(`Freshdesk ticket fetch failed: ${res.status} — ${body}`);
     }
 
-    const data = await res.json();
-    const results = data.results || data;
+    const results = await res.json();
     if (!results.length) break;
 
     allTickets = allTickets.concat(results);
-    if (results.length < 30 || page >= 10) break;
+    if (results.length < 100) break;
     page++;
   }
 
-  const filtered = agentId ? allTickets.filter(t => String(t.responder_id) === String(agentId)) : allTickets;
-  console.log(`📋 Total low priority tickets: ${allTickets.length}, after agent filter: ${filtered.length}, agentId: ${agentId}`);
-  if (allTickets.length > 0) console.log(`📋 Sample responder_ids: ${allTickets.slice(0,3).map(t => t.responder_id).join(', ')}`);
+  // Filter to LOW priority (1) in code
+  const filtered = allTickets.filter(t => t.priority === 1);
+  console.log(`📋 Total assigned tickets: ${allTickets.length}, LOW priority: ${filtered.length}`);
   return filtered;
 }
 
