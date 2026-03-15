@@ -14,28 +14,33 @@ async function fetchLowPriorityTickets() {
 
   if (!agentId) throw new Error('FRESHDESK_AGENT_ID not set in environment');
 
-  // Priority 1=low, 2=medium, 3=high, 4=urgent
-  // Fetch open + pending, low priority, assigned to agent
-  // Freshdesk requires the search endpoint for combined filters
-  // Freshdesk search only supports limited fields — fetch low priority and filter by agent in code
-  const query = encodeURIComponent('"priority:1"');
-  const url = `https://${domain}/api/v2/search/tickets?query=${query}`;
+  const headers = {
+    'Authorization': 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64'),
+  };
 
-  const res = await fetch(url, {
-    headers: {
-      'Authorization': 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64'),
-      'Content-Type': 'application/json',
-    },
-  });
+  let allTickets = [];
+  let page = 1;
 
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Freshdesk ticket fetch failed: ${res.status} — ${body}`);
+  while (true) {
+    const query = encodeURIComponent('"priority:1"');
+    const url = `https://${domain}/api/v2/search/tickets?query=${query}&page=${page}`;
+    const res = await fetch(url, { headers });
+
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`Freshdesk ticket fetch failed: ${res.status} — ${body}`);
+    }
+
+    const data = await res.json();
+    const results = data.results || data;
+    if (!results.length) break;
+
+    allTickets = allTickets.concat(results);
+    if (results.length < 30) break;
+    page++;
   }
-  const data = await res.json();
-  const all = data.results || data;
-  // Filter by agent in code since search API doesn't support responder_id
-  return agentId ? all.filter(t => String(t.responder_id) === String(agentId)) : all;
+
+  return agentId ? allTickets.filter(t => String(t.responder_id) === String(agentId)) : allTickets;
 }
 
 // ─── Extract booking ID from ticket using Groq ───────────────────────────────
@@ -46,19 +51,24 @@ async function extractBookingId(ticket) {
   const content = [
     ticket.subject || '',
     ticket.description_text || ticket.description || '',
-  ].join('\n').slice(0, 2000); // cap to avoid token waste
+  ].join('\n').slice(0, 2000);
 
-  const prompt = `Extract the TravelAdvantage booking ID from this support ticket. 
-Booking IDs are typically numeric (e.g. 352528) or alphanumeric (e.g. MWRLMA022644127).
-Also write a one-line summary (max 10 words) of the issue.
+  const prompt = `Extract the booking or reservation reference number from this travel support ticket.
+
+RULES:
+- Extract ANY booking reference: TravelAdvantage IDs, supplier confirmation numbers, file numbers, order numbers, reservation numbers, voucher references — all are valid
+- Examples of valid references: MWRLMA032625243, XN3GJM, 72221376, 53948866, 352528, 9086256618297
+- If multiple references exist, pick the most prominent one (usually in the subject or at the top of the ticket)
+- Do NOT return email addresses, phone numbers, prices, or dates
+- If no reference can be found, return null
 
 Ticket:
 ${content}
 
 Return ONLY a JSON object, no markdown:
 {
-  "bookingId": "the booking ID or null if not found",
-  "summary": "one-line issue summary"
+  "bookingId": "the reference number or null if not found",
+  "summary": "one-line issue summary (max 10 words)"
 }`;
 
   const res = await fetch(GROQ_API_URL, {
@@ -84,7 +94,7 @@ Return ONLY a JSON object, no markdown:
   }
 }
 
-// ─── Build DataTables POST params (same as userscript) ───────────────────────
+// ─── Build DataTables POST params ─────────────────────────────────────────────
 function buildDataTableParams(bookingId) {
   const params = new URLSearchParams({
     draw: '1', start: '0', length: '10',
@@ -112,7 +122,6 @@ function extractHref(str) {
 
 // ─── Fetch and cache a single booking ────────────────────────────────────────
 async function fetchAndCacheBooking(bookingId) {
-  // Try active first, fall back to cancelled
   let dataRow = null;
   for (const status of [0, 3]) {
     const url = `https://traveladvantage.com/admin/bookings/bookingsList/All/${status}/All/null/null/All/${bookingId}`;
@@ -159,7 +168,7 @@ async function prewarm(onProgress) {
 
   for (const ticket of tickets) {
     try {
-      // Search endpoint may not include description — fetch full ticket if needed
+      // Fetch full ticket if description missing
       let fullTicket = ticket;
       if (!ticket.description_text && !ticket.description) {
         const domain = process.env.FRESHDESK_DOMAIN;
@@ -169,6 +178,7 @@ async function prewarm(onProgress) {
         });
         if (res.ok) fullTicket = await res.json();
       }
+
       progress(`🔍 Reading ticket #${ticket.id}: ${ticket.subject?.slice(0, 50)}`);
       const { bookingId, summary } = await extractBookingId(fullTicket);
 
@@ -191,7 +201,6 @@ async function prewarm(onProgress) {
       results.push({ ticketId: ticket.id, status: 'error', error: err.message });
     }
 
-    // Small delay to avoid hammering TA
     await new Promise(r => setTimeout(r, 500));
   }
 
