@@ -18,7 +18,7 @@ async function fetchLowPriorityTickets() {
   // Fetch open + pending, low priority, assigned to agent
   // Freshdesk requires the search endpoint for combined filters
   const query = encodeURIComponent(`"priority:1 AND responder_id:${agentId}"`);
-  const url = `https://${domain}/api/v2/search/tickets?query=${query}&per_page=30&include=description`;
+  const url = `https://${domain}/api/v2/search/tickets?query=${query}&include=description`;
 
   const res = await fetch(url, {
     headers: {
