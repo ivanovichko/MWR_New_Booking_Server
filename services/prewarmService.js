@@ -18,7 +18,7 @@ async function fetchLowPriorityTickets() {
   // Fetch open + pending, low priority, assigned to agent
   // Freshdesk requires the search endpoint for combined filters
   const query = encodeURIComponent(`"priority:1 AND responder_id:${agentId}"`);
-  const url = `https://${domain}/api/v2/search/tickets?query=${query}&include=description`;
+  const url = `https://${domain}/api/v2/search/tickets?query=${query}`;
 
   const res = await fetch(url, {
     headers: {
@@ -156,8 +156,18 @@ async function prewarm(onProgress) {
 
   for (const ticket of tickets) {
     try {
+      // Search endpoint may not include description — fetch full ticket if needed
+      let fullTicket = ticket;
+      if (!ticket.description_text && !ticket.description) {
+        const domain = process.env.FRESHDESK_DOMAIN;
+        const apiKey = process.env.FRESHDESK_API_KEY;
+        const res = await fetch(`https://${domain}/api/v2/tickets/${ticket.id}`, {
+          headers: { 'Authorization': 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64') },
+        });
+        if (res.ok) fullTicket = await res.json();
+      }
       progress(`🔍 Reading ticket #${ticket.id}: ${ticket.subject?.slice(0, 50)}`);
-      const { bookingId, summary } = await extractBookingId(ticket);
+      const { bookingId, summary } = await extractBookingId(fullTicket);
 
       if (!bookingId) {
         progress(`⚠️  #${ticket.id} — no booking ID found`);
