@@ -82,57 +82,128 @@ function parseDataRow(row) {
 }
 
 // ─── Parse booking detail page HTML ──────────────────────────────────────────
-// Returns cleaned HTML of the service section (strips T&Cs and billing).
+// Returns cleaned HTML + structured hotel fields for email building.
 function parseBookingHtml(html) {
   const dom = new JSDOM(html);
   const doc = dom.window.document;
 
-  const body = doc.querySelector('.card .body');
-  if (!body) return { cleanHtml: '<p>Could not parse booking details.</p>', raw: {} };
+  const body = doc.querySelector('.card .body') || doc.querySelector('.body');
+  if (!body) return { cleanHtml: '<p>Could not parse booking details.</p>', details: {} };
 
-  // Remove T&Cs, billing, scripts, styles, modals
-  ['script', 'style', '.modal', '.important_note_banner'].forEach(sel => {
+  // ── Helper: get text after a <strong> label ───────────────────────────────
+  const getField = (labelText) => {
+    const strongs = [...body.querySelectorAll('strong')];
+    const strong = strongs.find(s => s.textContent.trim().toLowerCase().startsWith(labelText.toLowerCase()));
+    if (!strong) return null;
+    // Text is either a sibling span, next sibling text node, or parent p's remaining text
+    const parent = strong.closest('p') || strong.parentElement;
+    if (!parent) return null;
+    // Clone and remove the strong to get the remaining text
+    const clone = parent.cloneNode(true);
+    clone.querySelectorAll('strong').forEach(s => s.remove());
+    // Also remove <small> for bed types (we'll keep it separately)
+    const small = clone.querySelector('small');
+    const smallText = small?.textContent?.trim() || null;
+    small?.remove();
+    const text = clone.textContent.replace(/\s+/g, ' ').trim();
+    return text || null;
+  };
+
+  // ── Hotel name ────────────────────────────────────────────────────────────
+  // First <strong> inside the Hotel section (after <h5>Hotel</h5>)
+  const h5s = [...body.querySelectorAll('h5')];
+  const hotelH5 = h5s.find(h => h.textContent.trim() === 'Hotel');
+  let hotelName = null;
+  let hotelAddress = null;
+  let hotelPhone = null;
+
+  if (hotelH5) {
+    // hotel name is in the first <strong> after the h5
+    let el = hotelH5.nextElementSibling;
+    while (el && !hotelName) {
+      const strong = el.querySelector('strong');
+      if (strong) hotelName = strong.textContent.trim();
+      el = el.nextElementSibling;
+    }
+    // address is in the <span> after the map link paragraph
+    el = hotelH5.nextElementSibling;
+    let foundMap = false;
+    while (el) {
+      if (el.textContent.includes('View Map')) { foundMap = true; el = el.nextElementSibling; continue; }
+      if (foundMap && el.tagName === 'P' && !hotelAddress) {
+        hotelAddress = el.textContent.trim();
+        el = el.nextElementSibling;
+        // phone is the next <p> with just a number
+        if (el && /^\d[\d\s]+$/.test(el.textContent.trim())) {
+          hotelPhone = el.textContent.trim();
+        }
+        break;
+      }
+      el = el.nextElementSibling;
+    }
+  }
+
+  // ── Structured fields ─────────────────────────────────────────────────────
+  const checkIn      = getField('Check-in:');
+  const checkOut     = getField('Check-out:');
+  const roomDetails  = getField('Room Details:');
+  const guestName    = getField('Guest Name(s):');
+  const vendorConf   = body.querySelector('.cls_api_booking_id')?.textContent?.trim()
+                       || getField('Vendor confirmation number:');
+  const reservation  = getField('Reservation:');
+  const requests     = getField('Requests for the hotel:');
+  const arrivalTime  = getField('Estimated Time of Arrival:');
+
+  // Bed types — keep <small> text too
+  const bedStrong = [...body.querySelectorAll('strong')].find(s => s.textContent.trim().startsWith('Bed Types'));
+  let bedTypes = null;
+  if (bedStrong) {
+    const p = bedStrong.closest('p') || bedStrong.parentElement;
+    if (p) bedTypes = p.textContent.replace('Bed Types:', '').replace(/\s+/g, ' ').trim();
+  }
+
+  // Adults / Child / Room
+  const adultsStrong = [...body.querySelectorAll('strong')].find(s => s.textContent.trim().startsWith('Adults:'));
+  let paxLine = null;
+  if (adultsStrong) {
+    const p = adultsStrong.closest('p') || adultsStrong.parentElement;
+    if (p) paxLine = p.textContent.replace(/\s+/g, ' ').trim();
+  }
+
+  // ── Clean HTML for note display ───────────────────────────────────────────
+  // Remove T&Cs, billing, scripts, styles, modals, forms
+  ['script', 'style', '.modal', '.important_note_banner', 'form', 'link'].forEach(sel => {
     body.querySelectorAll(sel).forEach(el => el.remove());
   });
 
-  // Remove "Terms and Conditions" header and everything after it
   const termsHeader = [...body.querySelectorAll('h5')].find(
-    h => h.textContent.trim().toLowerCase() === 'terms and conditions' ||
+    h => h.textContent.trim().toLowerCase().includes('terms and conditions') ||
          h.textContent.trim().toLowerCase().includes('cancellation policy')
   );
   if (termsHeader) {
     let el = termsHeader;
-    while (el) {
-      const next = el.nextElementSibling;
-      el.remove();
-      el = next;
-    }
+    while (el) { const next = el.nextElementSibling; el.remove(); el = next; }
   }
 
-  // Remove billing information section
-  const billingDivs = body.querySelectorAll('.confirmation_billling_info, .billing_info');
-  billingDivs.forEach(el => el.remove());
-
-  // Also cut at "Billing Information" text if present
-  const allParas = body.querySelectorAll('p, h5, hr');
-  let cutting = false;
-  allParas.forEach(el => {
-    if (el.textContent.trim().toLowerCase().includes('billing information')) cutting = true;
-    if (cutting) el.remove();
-  });
-
-  // ── Extract hotel name from rendered text ────────────────────────────────
-  let hotelName = null;
-  const bodyText = body.textContent || '';
-  const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-  const hotelIdx = lines.indexOf('Hotel');
-  if (hotelIdx !== -1 && hotelIdx + 1 < lines.length) {
-    hotelName = lines[hotelIdx + 1];
-  }
+  body.querySelectorAll('.confirmation_billling_info, .billing_info, .TripProtection').forEach(el => el.remove());
 
   return {
     cleanHtml: body.innerHTML.trim(),
-    hotelName,
+    details: {
+      hotelName,
+      hotelAddress,
+      hotelPhone,
+      checkIn,
+      checkOut,
+      roomDetails,
+      bedTypes,
+      paxLine,
+      guestName,
+      vendorConf,
+      reservation,
+      requests,
+      arrivalTime,
+    },
   };
 }
 
