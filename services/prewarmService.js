@@ -22,7 +22,7 @@ async function fetchLowPriorityTickets() {
   let page = 1;
 
   while (true) {
-    const url = `https://${domain}/api/v2/tickets?filter=assigned_to_me&per_page=100&page=${page}`;
+    const url = `https://${domain}/api/v2/tickets?filter=new_and_my_open&per_page=100&page=${page}`;
     const res = await fetch(url, { headers });
 
     if (!res.ok) {
