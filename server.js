@@ -343,6 +343,145 @@ app.post('/check-duplicates', async (req, res) => {
   }
 });
 
-// ─── Start ────────────────────────────────────────────────────────────────────
+// ─── Find user (search primary + secondary) ───────────────────────────────────
+app.post('/find-user', async (req, res) => {
+  const { query } = req.body;
+  if (!query) return res.status(400).json({ error: 'query is required' });
+
+  console.log(`\n👤 User search — "${query}"`);
+
+  try {
+    const dtParams = (cols, extra = {}) => {
+      const p = new URLSearchParams({
+        draw: '1', start: '0', length: '10',
+        'order[0][column]': '1', 'order[0][dir]': 'desc',
+        'search[value]': query, 'search[regex]': 'false',
+        ...extra,
+      });
+      for (let i = 0; i < cols; i++) {
+        p.append(`columns[${i}][data]`, i.toString());
+        p.append(`columns[${i}][name]`, '');
+        p.append(`columns[${i}][searchable]`, 'true');
+        p.append(`columns[${i}][orderable]`, i === 0 || i >= 8 ? 'false' : 'true');
+        p.append(`columns[${i}][search][value]`, '');
+        p.append(`columns[${i}][search][regex]`, 'false');
+      }
+      return p.toString();
+    };
+
+    const [primaryRes, secondaryRes] = await Promise.all([
+      taPost(`https://traveladvantage.com/admin/account/customersList/All/All/null/null/All/All/${encodeURIComponent(query)}`, dtParams(15)),
+      taPost(`https://traveladvantage.com/admin/account/travelersList`, dtParams(10)),
+    ]);
+
+    const strip = (s) => (s || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+
+    // Extract primary member ID from action cell href
+    const extractCustomerId = (cell) => {
+      const m = (cell || '').match(/viewCustomer\/(\d+)/);
+      return m ? m[1] : null;
+    };
+
+    // Extract secondary member ID from editTraveler() call
+    const extractTravelerId = (cell) => {
+      const m = (cell || '').match(/editTraveler\((\d+)\)/);
+      return m ? m[1] : null;
+    };
+
+    const primary = (primaryRes.data || []).map(row => ({
+      type:      'primary',
+      id:        extractCustomerId(row[0]),
+      name:      strip(row[2]),
+      memberId:  strip(row[3]),
+      instance:  strip(row[4]),
+      email:     strip(row[5]),
+      phone:     strip(row[6]),
+      country:   strip(row[7]),
+      status:    strip(row[11]),
+    })).filter(u => u.id);
+
+    const secondary = (secondaryRes.data || []).map(row => ({
+      type:          'secondary',
+      id:            extractTravelerId(row[0]),
+      name:          strip(row[2]),
+      primaryMember: strip(row[3]),
+      instance:      strip(row[4]),
+      email:         strip(row[5]),
+      phone:         strip(row[6]),
+      status:        strip(row[7]),
+    })).filter(u => u.id);
+
+    const results = [...primary, ...secondary];
+    console.log(`✅ User search: ${primary.length} primary, ${secondary.length} secondary`);
+    res.json({ success: true, results });
+
+  } catch (err) {
+    console.error('❌ Error in /find-user:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Full user profile ────────────────────────────────────────────────────────
+app.get('/user/:id', async (req, res) => {
+  const { id } = req.params;
+  console.log(`\n👤 User profile — ${id}`);
+  try {
+    const html = await taGet(`https://traveladvantage.com/admin/account/viewCustomer/${id}`);
+    const user = parseUserHtml(html);
+    res.json({ success: true, user });
+  } catch (err) {
+    console.error('❌ Error in /user/:id:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── User reservation history ─────────────────────────────────────────────────
+app.get('/user/:id/reservations', async (req, res) => {
+  const { id } = req.params;
+  console.log(`\n📋 Reservation history — user ${id}`);
+  try {
+    const params = new URLSearchParams({
+      draw: '1', start: '0', length: '25',
+      'order[0][column]': '6', 'order[0][dir]': 'desc',
+      'search[value]': '', 'search[regex]': 'false',
+    });
+    for (let i = 0; i <= 10; i++) {
+      params.append(`columns[${i}][data]`, i.toString());
+      params.append(`columns[${i}][name]`, '');
+      params.append(`columns[${i}][searchable]`, 'true');
+      params.append(`columns[${i}][orderable]`, [0, 2, 8].includes(i) ? 'false' : 'true');
+      params.append(`columns[${i}][search][value]`, '');
+      params.append(`columns[${i}][search][regex]`, 'false');
+    }
+
+    const data = await taPost(
+      `https://traveladvantage.com/admin/account/reservationHistoryList/${id}`,
+      params.toString()
+    );
+
+    const strip = (s) => (s || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const extractHref = (s) => { const m = (s||'').match(/href="([^"]+)"/); return m ? m[1] : null; };
+
+    const reservations = (data.data || []).map(row => ({
+      detailUrl:  extractHref(row[0]),
+      bookingId:  strip(row[1]),
+      guest:      strip(row[3]),
+      type:       strip(row[4]),
+      supplierId: strip(row[5]),
+      date:       strip(row[6]),
+      status:     strip(row[7]),
+      total:      strip(row[8]),
+      checkIn:    strip(row[9]),
+      checkOut:   strip(row[10]),
+    }));
+
+    res.json({ success: true, reservations, total: data.recordsTotal });
+  } catch (err) {
+    console.error('❌ Error in /user/:id/reservations:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
