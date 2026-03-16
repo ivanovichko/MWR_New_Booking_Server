@@ -9,6 +9,7 @@ const { findHotelEmail }                 = require('./services/geminiService');
 const { addNote, sendEmail, setTicketPending, tagTicket, searchDuplicates } = require('./services/freshdeskService');
 const { initDb, getCachedBooking, cacheBooking, storeSession } = require('./services/dbService');
 const { prewarm, fetchAndCacheBooking }  = require('./services/prewarmService');
+const { taGet, taPost }                                        = require('./services/taAuthService');
 
 const app = express();
 app.use(express.json({ limit: '5mb' }));
