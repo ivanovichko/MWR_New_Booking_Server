@@ -113,6 +113,7 @@ app.get('/booking/:id', async (req, res) => {
       booking,
       details,
       user,
+      supplier,
       noteHtml,
       hotelName:   details?.hotelName,
       productType: booking.productType,
@@ -125,9 +126,8 @@ app.get('/booking/:id', async (req, res) => {
 });
 
 
-// ─── Parse + build note (no Freshdesk write yet) ──────────────────────────────
-// Receives raw HTML pages and DataTables row from userscript.
-// Returns formatted note HTML for agent preview.
+// ─── Parse + build note — DEPRECATED, now handled by /booking/:id ─────────────
+// Kept for backward compatibility only. Proxies through the same logic.
 app.post('/new-booking', async (req, res) => {
   const { dataRow, bookingHtml, userHtml, freshdeskTicketId } = req.body;
 
@@ -135,7 +135,7 @@ app.post('/new-booking', async (req, res) => {
     return res.status(400).json({ error: 'dataRow, bookingHtml, userHtml, and freshdeskTicketId are required' });
   }
 
-  console.log(`\n📦 New booking — ticketId=${freshdeskTicketId}`);
+  console.log(`\n📦 /new-booking (legacy) — ticketId=${freshdeskTicketId}`);
 
   try {
     const booking              = parseDataRow(dataRow);
@@ -144,11 +144,9 @@ app.post('/new-booking', async (req, res) => {
     const supplier             = lookupSupplier(booking.supplierName);
 
     console.log(`✅ Parsed: ${booking.productType} — ${booking.guestName} — ${booking.supplierName}`);
-    if (supplier) console.log(`📬 Supplier contact found: ${supplier.email || supplier.contactUrl}`);
 
     const noteHtml = buildNoteHtml(booking, cleanHtml, user, supplier);
 
-    // Cache for future lookups (fire and forget)
     if (booking.internalBookingId) {
       cacheBooking({
         bookingId: booking.internalBookingId,
