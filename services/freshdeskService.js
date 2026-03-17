@@ -119,10 +119,12 @@ async function tagTicket(ticketId, tags, type) {
 async function searchDuplicates(ref, excludeTicketId) {
   if (!ref) return [];
 
-  const query = encodeURIComponent(`"${ref}"`);
-  const url = `${getBaseUrl().replace('/api/v2', '')}/api/v2/search/tickets?query=${query}`;
+  // Freshdesk search API requires keyword:value format
+  // Search both subject and description for the reference
+  const q = encodeURIComponent(`(subject:"${ref}" OR description:"${ref}")`);
+  const url = `${getBaseUrl().replace('/api/v2', '')}/api/v2/search/tickets?query=${q}`;
 
-  console.log(`🔍 searchDuplicates: ref="${ref}" url=${url}`);
+  console.log(`🔍 searchDuplicates: ref="${ref}"`);
 
   const response = await fetch(url, {
     headers: { 'Authorization': getAuthHeader() },
