@@ -388,7 +388,7 @@ app.post('/find-user', async (req, res) => {
       secondaryParams.append(`columns[${i}][search][regex]`, 'false');
     }
 
-    const primaryUrl = `https://traveladvantage.com/admin/account/customersList/All/All/null/null/All/All/${encodeURIComponent(query)}`;
+    const primaryUrl = `https://traveladvantage.com/admin/account/customersList/All/All/null/null/All/All/${query.replace(/\//g, '%2F')}`;
 
     const primaryReferer  = { 'Referer': 'https://traveladvantage.com/admin/account/manageCustomers' };
     const secondaryReferer = { 'Referer': 'https://traveladvantage.com/admin/account/manageTravelers' };
