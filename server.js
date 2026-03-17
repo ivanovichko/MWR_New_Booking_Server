@@ -390,10 +390,13 @@ app.post('/find-user', async (req, res) => {
 
     const primaryUrl = `https://traveladvantage.com/admin/account/customersList/All/All/null/null/All/All/${encodeURIComponent(query)}`;
 
+    const primaryReferer  = { 'Referer': 'https://traveladvantage.com/admin/account/manageCustomers' };
+    const secondaryReferer = { 'Referer': 'https://traveladvantage.com/admin/account/manageTravelers' };
+
     const [primaryByUrl, primaryByBody, secondaryRes] = await Promise.all([
-      taPost(primaryUrl, primaryParams('')),           // name search via URL path
-      taPost(primaryUrl, primaryParams(query)),        // email/any search via body
-      taPost(`https://traveladvantage.com/admin/account/travelersList`, secondaryParams.toString()),
+      taPost(primaryUrl, primaryParams(''), primaryReferer),
+      taPost(primaryUrl, primaryParams(query), primaryReferer),
+      taPost(`https://traveladvantage.com/admin/account/travelersList`, secondaryParams.toString(), secondaryReferer),
     ]);
 
     console.log(`👤 Primary URL: recordsFiltered=${primaryByUrl.recordsFiltered}, rows=${(primaryByUrl.data||[]).length}`);
