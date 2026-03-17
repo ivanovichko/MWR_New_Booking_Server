@@ -352,63 +352,75 @@ app.post('/find-user', async (req, res) => {
   console.log(`\n👤 User search — "${query}"`);
 
   try {
-    const dtParams = (cols, extra = {}) => {
+    // Primary: name in URL path, email in POST body search[value]
+    // Run both in parallel and merge results
+    const primaryParams = (searchValue) => {
       const p = new URLSearchParams({
         draw: '1', start: '0', length: '10',
         'order[0][column]': '1', 'order[0][dir]': 'desc',
-        'search[value]': query, 'search[regex]': 'false',
-        ...extra,
+        'search[value]': searchValue, 'search[regex]': 'false',
       });
-      for (let i = 0; i < cols; i++) {
+      const nonOrderable = [0, 8, 9, 10, 12, 14];
+      for (let i = 0; i < 15; i++) {
         p.append(`columns[${i}][data]`, i.toString());
         p.append(`columns[${i}][name]`, '');
         p.append(`columns[${i}][searchable]`, 'true');
-        p.append(`columns[${i}][orderable]`, i === 0 || i >= 8 ? 'false' : 'true');
+        p.append(`columns[${i}][orderable]`, nonOrderable.includes(i) ? 'false' : 'true');
         p.append(`columns[${i}][search][value]`, '');
         p.append(`columns[${i}][search][regex]`, 'false');
       }
       return p.toString();
     };
 
-    const [primaryRes, secondaryRes] = await Promise.all([
-      taPost(`https://traveladvantage.com/admin/account/customersList/All/All/null/null/All/All/${encodeURIComponent(query)}`, dtParams(15)),
-      taPost(`https://traveladvantage.com/admin/account/travelersList`, dtParams(10)),
+    // Secondary: query always goes in search[value] body
+    // Orderable: only cols 1-8 are orderable (0 and 9 are not)
+    const secondaryParams = new URLSearchParams({
+      draw: '1', start: '0', length: '10',
+      'order[0][column]': '1', 'order[0][dir]': 'desc',
+      'search[value]': query, 'search[regex]': 'false',
+    });
+    for (let i = 0; i < 10; i++) {
+      secondaryParams.append(`columns[${i}][data]`, i.toString());
+      secondaryParams.append(`columns[${i}][name]`, '');
+      secondaryParams.append(`columns[${i}][searchable]`, 'true');
+      secondaryParams.append(`columns[${i}][orderable]`, (i === 0 || i === 9) ? 'false' : 'true');
+      secondaryParams.append(`columns[${i}][search][value]`, '');
+      secondaryParams.append(`columns[${i}][search][regex]`, 'false');
+    }
+
+    const primaryUrl = `https://traveladvantage.com/admin/account/customersList/All/All/null/null/All/All/${encodeURIComponent(query)}`;
+
+    const [primaryByUrl, primaryByBody, secondaryRes] = await Promise.all([
+      taPost(primaryUrl, primaryParams('')),           // name search via URL path
+      taPost(primaryUrl, primaryParams(query)),        // email/any search via body
+      taPost(`https://traveladvantage.com/admin/account/travelersList`, secondaryParams.toString()),
     ]);
 
-    console.log(`👤 Primary raw: recordsFiltered=${primaryRes.recordsFiltered}, rows=${(primaryRes.data||[]).length}`);
-    console.log(`👤 Secondary raw: recordsFiltered=${secondaryRes.recordsFiltered}, rows=${(secondaryRes.data||[]).length}`);
-    if ((primaryRes.data||[]).length > 0) {
-      console.log(`👤 Primary row[0] sample:`, JSON.stringify(primaryRes.data[0]).slice(0, 300));
-    }
+    console.log(`👤 Primary URL: recordsFiltered=${primaryByUrl.recordsFiltered}, rows=${(primaryByUrl.data||[]).length}`);
+    console.log(`👤 Primary body: recordsFiltered=${primaryByBody.recordsFiltered}, rows=${(primaryByBody.data||[]).length}`);
+    console.log(`👤 Secondary: recordsFiltered=${secondaryRes.recordsFiltered}, rows=${(secondaryRes.data||[]).length}`);
     if ((secondaryRes.data||[]).length > 0) {
-      console.log(`👤 Secondary row[0] sample:`, JSON.stringify(secondaryRes.data[0]).slice(0, 300));
+      console.log(`👤 Secondary row[0]:`, JSON.stringify(secondaryRes.data[0]).slice(0, 300));
     }
 
     const strip = (s) => (s || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const extractCustomerId = (cell) => { const m = (cell||'').match(/viewCustomer\/(\d+)/); return m ? m[1] : null; };
+    const extractTravelerId = (cell) => { const m = (cell||'').match(/editTraveler\((\d+)\)/); return m ? m[1] : null; };
 
-    // Extract primary member ID from action cell href
-    const extractCustomerId = (cell) => {
-      const m = (cell || '').match(/viewCustomer\/(\d+)/);
-      return m ? m[1] : null;
-    };
-
-    // Extract secondary member ID from editTraveler() call
-    const extractTravelerId = (cell) => {
-      const m = (cell || '').match(/editTraveler\((\d+)\)/);
-      return m ? m[1] : null;
-    };
-
-    const primary = (primaryRes.data || []).map(row => ({
-      type:      'primary',
-      id:        extractCustomerId(row[0]),
-      name:      strip(row[2]),
-      memberId:  strip(row[3]),
-      instance:  strip(row[4]),
-      email:     strip(row[5]),
-      phone:     strip(row[6]),
-      country:   strip(row[7]),
-      status:    strip(row[11]),
-    })).filter(u => u.id);
+    // Merge and deduplicate primary results from both searches
+    const allPrimaryRows = [...(primaryByUrl.data||[]), ...(primaryByBody.data||[])];
+    const seenIds = new Set();
+    const primary = allPrimaryRows.map(row => ({
+      type:     'primary',
+      id:       extractCustomerId(row[0]),
+      name:     strip(row[2]),
+      memberId: strip(row[3]),
+      instance: strip(row[4]),
+      email:    strip(row[5]),
+      phone:    strip(row[6]),
+      country:  strip(row[7]),
+      status:   strip(row[11]),
+    })).filter(u => u.id && !seenIds.has(u.id) && seenIds.add(u.id));
 
     const secondary = (secondaryRes.data || []).map(row => ({
       type:          'secondary',
