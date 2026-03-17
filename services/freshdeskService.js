@@ -122,13 +122,22 @@ async function searchDuplicates(ref, excludeTicketId) {
   const query = encodeURIComponent(`"${ref}"`);
   const url = `${getBaseUrl().replace('/api/v2', '')}/api/v2/search/tickets?query=${query}`;
 
+  console.log(`🔍 searchDuplicates: ref="${ref}" url=${url}`);
+
   const response = await fetch(url, {
     headers: { 'Authorization': getAuthHeader() },
   });
 
-  if (!response.ok) return [];
+  console.log(`🔍 searchDuplicates response: ${response.status}`);
+
+  if (!response.ok) {
+    const body = await response.text();
+    console.warn(`⚠️ searchDuplicates failed: ${response.status} — ${body.slice(0, 200)}`);
+    return [];
+  }
 
   const data = await response.json();
+  console.log(`🔍 searchDuplicates results: ${data.total} total, ${(data.results||[]).length} returned`);
   const results = data.results || [];
   return results.filter(t => String(t.id) !== String(excludeTicketId));
 }

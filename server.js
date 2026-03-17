@@ -390,30 +390,22 @@ app.post('/find-user', async (req, res) => {
 
     const primaryUrl = `https://traveladvantage.com/admin/account/customersList/All/All/null/null/All/All/${query.replace(/\//g, '%2F')}`;
 
-    const primaryReferer  = { 'Referer': 'https://traveladvantage.com/admin/account/manageCustomers' };
+    const primaryReferer   = { 'Referer': 'https://traveladvantage.com/admin/account/manageCustomers' };
     const secondaryReferer = { 'Referer': 'https://traveladvantage.com/admin/account/manageTravelers' };
 
-    const [primaryByUrl, primaryByBody, secondaryRes] = await Promise.all([
+    const [primaryRes, secondaryRes] = await Promise.all([
       taPost(primaryUrl, primaryParams(''), primaryReferer),
-      taPost(primaryUrl, primaryParams(query), primaryReferer),
       taPost(`https://traveladvantage.com/admin/account/travelersList`, secondaryParams.toString(), secondaryReferer),
     ]);
 
-    console.log(`👤 Primary URL: recordsFiltered=${primaryByUrl.recordsFiltered}, rows=${(primaryByUrl.data||[]).length}`);
-    console.log(`👤 Primary body: recordsFiltered=${primaryByBody.recordsFiltered}, rows=${(primaryByBody.data||[]).length}`);
+    console.log(`👤 Primary: recordsFiltered=${primaryRes.recordsFiltered}, rows=${(primaryRes.data||[]).length}`);
     console.log(`👤 Secondary: recordsFiltered=${secondaryRes.recordsFiltered}, rows=${(secondaryRes.data||[]).length}`);
-    if ((secondaryRes.data||[]).length > 0) {
-      console.log(`👤 Secondary row[0]:`, JSON.stringify(secondaryRes.data[0]).slice(0, 300));
-    }
 
     const strip = (s) => (s || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
     const extractCustomerId = (cell) => { const m = (cell||'').match(/viewCustomer\/(\d+)/); return m ? m[1] : null; };
     const extractTravelerId = (cell) => { const m = (cell||'').match(/editTraveler\((\d+)\)/); return m ? m[1] : null; };
 
-    // Merge and deduplicate primary results from both searches
-    const allPrimaryRows = [...(primaryByUrl.data||[]), ...(primaryByBody.data||[])];
-    const seenIds = new Set();
-    const primary = allPrimaryRows.map(row => ({
+    const primary = (primaryRes.data || []).map(row => ({
       type:     'primary',
       id:       extractCustomerId(row[0]),
       name:     strip(row[2]),
@@ -423,7 +415,7 @@ app.post('/find-user', async (req, res) => {
       phone:    strip(row[6]),
       country:  strip(row[7]),
       status:   strip(row[11]),
-    })).filter(u => u.id && !seenIds.has(u.id) && seenIds.add(u.id));
+    })).filter(u => u.id);
 
     const secondary = (secondaryRes.data || []).map(row => ({
       type:          'secondary',
