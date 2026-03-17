@@ -104,8 +104,7 @@ app.get('/booking/:id', async (req, res) => {
     const details = parsed.details;
     const user    = parsed.user;
     const supplier = lookupSupplier(booking.supplierName);
-    const { cleanHtml } = parseBookingHtml(cached.booking_html);
-    const noteHtml = buildNoteHtml(booking, cleanHtml, user, supplier);
+    const noteHtml = buildNoteHtml(booking, details, user, supplier);
 
     res.json({
       success: true,
@@ -146,7 +145,7 @@ app.post('/new-booking', async (req, res) => {
 
     console.log(`✅ Parsed: ${booking.productType} — ${booking.guestName} — ${booking.supplierName}`);
 
-    const noteHtml = buildNoteHtml(booking, cleanHtml, user, supplier);
+    const noteHtml = buildNoteHtml(booking, details, user, supplier);
 
     if (booking.internalBookingId) {
       cacheBooking({
@@ -374,6 +373,15 @@ app.post('/find-user', async (req, res) => {
       taPost(`https://traveladvantage.com/admin/account/customersList/All/All/null/null/All/All/${encodeURIComponent(query)}`, dtParams(15)),
       taPost(`https://traveladvantage.com/admin/account/travelersList`, dtParams(10)),
     ]);
+
+    console.log(`👤 Primary raw: recordsFiltered=${primaryRes.recordsFiltered}, rows=${(primaryRes.data||[]).length}`);
+    console.log(`👤 Secondary raw: recordsFiltered=${secondaryRes.recordsFiltered}, rows=${(secondaryRes.data||[]).length}`);
+    if ((primaryRes.data||[]).length > 0) {
+      console.log(`👤 Primary row[0] sample:`, JSON.stringify(primaryRes.data[0]).slice(0, 300));
+    }
+    if ((secondaryRes.data||[]).length > 0) {
+      console.log(`👤 Secondary row[0] sample:`, JSON.stringify(secondaryRes.data[0]).slice(0, 300));
+    }
 
     const strip = (s) => (s || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 
