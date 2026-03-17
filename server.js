@@ -104,7 +104,8 @@ app.get('/booking/:id', async (req, res) => {
     const details = parsed.details;
     const user    = parsed.user;
     const supplier = lookupSupplier(booking.supplierName);
-    const noteHtml = buildNoteHtml(booking, details, user, supplier);
+    const { cleanHtml } = parseBookingHtml(cached.booking_html);
+    const noteHtml = buildNoteHtml(booking, cleanHtml, details, user, supplier);
 
     res.json({
       success: true,
@@ -145,7 +146,7 @@ app.post('/new-booking', async (req, res) => {
 
     console.log(`✅ Parsed: ${booking.productType} — ${booking.guestName} — ${booking.supplierName}`);
 
-    const noteHtml = buildNoteHtml(booking, details, user, supplier);
+    const noteHtml = buildNoteHtml(booking, cleanHtml, details, user, supplier);
 
     if (booking.internalBookingId) {
       cacheBooking({
