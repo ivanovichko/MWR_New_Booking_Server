@@ -1,0 +1,497 @@
+require('dotenv').config();
+const express = require('express');
+const path    = require('path');
+const { parseDataRow, parseBookingHtml } = require('./services/parserService');
+const { parseUserHtml }                  = require('./services/userService');
+const { buildNoteHtml }                  = require('./services/noteBuilder');
+const { lookupSupplier }                 = require('./services/supplierService');
+const { findHotelEmail }                 = require('./services/geminiService');
+const { addNote, sendEmail, setTicketPending, tagTicket, searchDuplicates } = require('./services/freshdeskService');
+const { initDb, getCachedBooking, cacheBooking, storeSession } = require('./services/dbService');
+const { prewarm, fetchAndCacheBooking }  = require('./services/prewarmService');
+const { taGet, taPost }                                        = require('./services/taAuthService');
+
+const app = express();
+app.use(express.json({ limit: '5mb' }));
+app.use(express.static(path.join(__dirname)));
+
+// ─── Init DB on startup ───────────────────────────────────────────────────────
+initDb().catch(err => console.error('❌ DB init failed:', err.message));
+
+// ─── Health check ─────────────────────────────────────────────────────────────
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
+
+// ─── Auth page ────────────────────────────────────────────────────────────────
+app.get('/auth', (req, res) => res.sendFile(path.join(__dirname, 'auth.html')));
+
+// ─── TA Session: manually paste cookie value ──────────────────────────────────
+app.post('/ta-session', async (req, res) => {
+  const { cookie } = req.body;
+  if (!cookie) return res.status(400).json({ error: 'cookie is required' });
+  try {
+    await storeSession(cookie);
+    console.log(`✅ TA session stored (length: ${cookie.length})`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Session store error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Prewarm: polling-based progress ─────────────────────────────────────────
+// In-memory job store (single job at a time is fine)
+const prewarmJob = { running: false, log: [], done: false, error: null, results: null };
+
+app.post('/prewarm/start', async (req, res) => {
+  if (prewarmJob.running) {
+    return res.json({ success: true, message: 'Already running' });
+  }
+
+  // Reset
+  prewarmJob.running = true;
+  prewarmJob.done    = false;
+  prewarmJob.error   = null;
+  prewarmJob.results = null;
+  prewarmJob.log     = [];
+
+  res.json({ success: true, message: 'Prewarm started' });
+
+  // Run async in background
+  prewarm((msg) => prewarmJob.log.push(msg))
+    .then(results => {
+      prewarmJob.results = results;
+      prewarmJob.done    = true;
+      prewarmJob.running = false;
+    })
+    .catch(err => {
+      prewarmJob.error   = err.message;
+      prewarmJob.done    = true;
+      prewarmJob.running = false;
+    });
+});
+
+app.get('/prewarm/status', (req, res) => {
+  res.json({
+    running: prewarmJob.running,
+    done:    prewarmJob.done,
+    error:   prewarmJob.error,
+    log:     prewarmJob.log,
+    results: prewarmJob.results,
+  });
+});
+
+
+// ─── Cached booking lookup ────────────────────────────────────────────────────
+app.get('/booking/:id', async (req, res) => {
+  const bookingId = req.params.id;
+  console.log(`\n🔍 Booking lookup — ${bookingId}`);
+
+  try {
+    let cached = await getCachedBooking(bookingId);
+    let fromCache = true;
+
+    if (!cached) {
+      console.log(`⚠️  Cache miss — live fetching ${bookingId}`);
+      fromCache = false;
+      await fetchAndCacheBooking(bookingId);
+      cached = await getCachedBooking(bookingId);
+    }
+
+    if (!cached) return res.status(404).json({ error: `Booking ${bookingId} not found` });
+
+    const parsed  = cached.parsed;
+    const booking = parsed.booking;
+    const details = parsed.details;
+    const user    = parsed.user;
+    const supplier = lookupSupplier(booking.supplierName);
+    const { cleanHtml } = parseBookingHtml(cached.booking_html);
+    const noteHtml = buildNoteHtml(booking, cleanHtml, details, user, supplier);
+
+    res.json({
+      success: true,
+      fromCache,
+      fetchedAt: cached.fetched_at,
+      booking,
+      details,
+      user,
+      supplier,
+      noteHtml,
+      hotelName:   details?.hotelName,
+      productType: booking.productType,
+    });
+
+  } catch (err) {
+    console.error('❌ Booking lookup error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// ─── Parse + build note — DEPRECATED, now handled by /booking/:id ─────────────
+// Kept for backward compatibility only. Proxies through the same logic.
+app.post('/new-booking', async (req, res) => {
+  const { dataRow, bookingHtml, userHtml, freshdeskTicketId } = req.body;
+
+  if (!dataRow || !bookingHtml || !userHtml || !freshdeskTicketId) {
+    return res.status(400).json({ error: 'dataRow, bookingHtml, userHtml, and freshdeskTicketId are required' });
+  }
+
+  console.log(`\n📦 /new-booking (legacy) — ticketId=${freshdeskTicketId}`);
+
+  try {
+    const booking              = parseDataRow(dataRow);
+    const { cleanHtml, details } = parseBookingHtml(bookingHtml);
+    const user                 = parseUserHtml(userHtml);
+    const supplier             = lookupSupplier(booking.supplierName);
+
+    console.log(`✅ Parsed: ${booking.productType} — ${booking.guestName} — ${booking.supplierName}`);
+
+    const noteHtml = buildNoteHtml(booking, cleanHtml, details, user, supplier);
+
+    if (booking.internalBookingId) {
+      cacheBooking({
+        bookingId: booking.internalBookingId,
+        dataRow, bookingHtml, userHtml,
+        parsed: { booking, details, user },
+      }).catch(e => console.warn('⚠️ Cache write failed:', e.message));
+    }
+
+    res.json({
+      success:     true,
+      noteHtml,
+      booking,
+      details,
+      hotelName:   details.hotelName,
+      productType: booking.productType,
+    });
+
+  } catch (err) {
+    console.error('❌ Error in /new-booking:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Post note to Freshdesk (agent confirmed) ─────────────────────────────────
+app.post('/post-note', async (req, res) => {
+  const { freshdeskTicketId, noteHtml } = req.body;
+
+  if (!freshdeskTicketId || !noteHtml) {
+    return res.status(400).json({ error: 'freshdeskTicketId and noteHtml are required' });
+  }
+
+  try {
+    await addNote(freshdeskTicketId, noteHtml);
+    console.log(`✅ Note posted to ticket ${freshdeskTicketId}`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Error in /post-note:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Find hotel email via Groq (hotels only) ──────────────────────────────────
+app.post('/find-hotel-email', async (req, res) => {
+  const { hotelName, hotelAddress, hotelCountry } = req.body;
+
+  if (!hotelName) {
+    return res.status(400).json({ error: 'hotelName is required' });
+  }
+
+  console.log(`\n🔍 Hotel email search — ${hotelName}`);
+
+  try {
+    const result = await findHotelEmail(hotelName, hotelAddress, hotelCountry);
+    console.log(`✅ Groq result: ${result.email} (${result.confidence})`);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('❌ Error in /find-hotel-email:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Send hotel email + set ticket pending (agent confirmed) ──────────────────
+app.post('/send-hotel-email', async (req, res) => {
+  const { freshdeskTicketId, hotelEmail, booking, details } = req.body;
+
+  if (!freshdeskTicketId || !hotelEmail || !booking) {
+    return res.status(400).json({ error: 'freshdeskTicketId, hotelEmail, and booking are required' });
+  }
+
+  console.log(`\n✉️  Sending hotel email — ticketId=${freshdeskTicketId} to=${hotelEmail}`);
+
+  try {
+    const emailBody = buildHotelEmailHtml(booking, details || {});
+    await sendEmail(
+      freshdeskTicketId,
+      hotelEmail,
+      `Prepaid Reservation Confirmation — ${booking.guestName} / ${booking.checkIn}`,
+      emailBody
+    );
+    console.log('✅ Email sent to', hotelEmail);
+
+    await setTicketPending(freshdeskTicketId);
+    console.log('✅ Ticket set to Pending');
+
+    res.json({ success: true, emailSent: true, hotelEmail });
+  } catch (err) {
+    console.error('❌ Error in /send-hotel-email:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Hotel confirmation email builder ─────────────────────────────────────────
+function buildHotelEmailHtml(booking, details = {}) {
+  const v = (val) => val || '—';
+
+  // Room details: MWR room type | board (from details.roomDetails which has full string)
+  // details.roomDetails = "Standard room (standard room land view) | All-Inclusive x 1"
+  // We want just the MWR part from booking.mwrRoomType + board from roomDetails
+  let roomLine = null;
+  if (details.roomDetails) {
+    // Strip supplier room type in parentheses: "Standard room (standard room land view) | AI x 1"
+    // → "Standard room | AI x 1"
+    roomLine = details.roomDetails.replace(/\s*\([^)]*\)/, '').replace(/\s+/g, ' ').trim();
+  } else if (booking.mwrRoomType) {
+    roomLine = booking.mwrRoomType;
+  }
+
+  const lines = [
+    details.hotelName    ? `<strong>${details.hotelName}</strong>` : null,
+    details.hotelAddress ? details.hotelAddress : null,
+    details.hotelPhone   ? details.hotelPhone   : null,
+    ``,
+    `<strong>Check-in:</strong> ${v(details.checkIn  || booking.checkIn)}`,
+    `<strong>Check-out:</strong> ${v(details.checkOut || booking.checkOut)}`,
+    roomLine             ? `<strong>Room Details:</strong> ${roomLine}` : null,
+    details.bedTypes     ? `<strong>Bed Types:</strong> ${details.bedTypes}` : null,
+    details.paxLine      ? details.paxLine : null,
+    `<strong>Guest Name(s):</strong> ${v(details.guestName || booking.guestName)}`,
+    details.requests     ? `<strong>Requests for the hotel:</strong> ${details.requests}` : null,
+    details.arrivalTime  ? `<strong>Estimated Time of Arrival:</strong> ${details.arrivalTime}` : null,
+    ``,
+    `<strong>Vendor Confirmation Number:</strong> ${v(details.vendorConf || booking.supplierId)}`,
+    `<strong>Reservation:</strong> ${v(details.reservation || booking.internalBookingId)}`,
+  ].filter(l => l !== null);
+
+  const signature = `
+<br>
+<p>Sincerely,<br>
+Ivan K.<br>
+Travel Advantage Support<br>
+<span style="border-top:1px solid #ccc;display:block;padding-top:6px;margin-top:6px;">
+member@traveladvantage.com<br>
+Belgium: +32 71-96-32-66<br>
+Colombia: +571 514-1218<br>
+France: +33 27-68-63-387<br>
+Germany: +49 911 96 959 007<br>
+Italy: +39 02-94-755-846<br>
+Peru: +511 707-3968<br>
+Portugal: +35 13-0880-2148<br>
+Spain: +34 95-156-81-76<br>
+USA: +1 857 763 2085<br>
+<a href="https://www.traveladvantage.com/">https://www.traveladvantage.com/</a>
+</span></p>`;
+
+  return `
+<p>Hi, dear hotel team,</p>
+<p>My name is Ivan, and I'm here with TravelAdvantage support team. I'm contacting you to confirm the prepaid reservation.</p>
+<p>The details are as follows:</p>
+<p>${lines.join('<br>')}</p>
+<p>Kindly double-check and confirm the reservation, including the room and bed type, and please make a note of the customer arrival time or special requests (if listed).</p>
+<p>Please let me know if you need any additional information from my end.</p>
+<p>Thanks and looking forward to your reply</p>
+${signature}`.trim();
+}
+
+// ─── Tag ticket + set type ────────────────────────────────────────────────────
+app.post('/tag-ticket', async (req, res) => {
+  const { freshdeskTicketId, tags, type } = req.body;
+  if (!freshdeskTicketId || !tags) {
+    return res.status(400).json({ error: 'freshdeskTicketId and tags are required' });
+  }
+  try {
+    await tagTicket(freshdeskTicketId, tags, type);
+    console.log(`🏷️  Tagged ticket ${freshdeskTicketId}: ${tags.join(', ')}`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Error in /tag-ticket:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Check for duplicate tickets ─────────────────────────────────────────────
+app.post('/check-duplicates', async (req, res) => {
+  const { vendorConf, internalId, freshdeskTicketId } = req.body;
+  try {
+    const [byVendor, byInternal] = await Promise.all([
+      vendorConf ? searchDuplicates(vendorConf, freshdeskTicketId) : [],
+      internalId ? searchDuplicates(internalId, freshdeskTicketId) : [],
+    ]);
+
+    // Merge and deduplicate by ticket id
+    const seen = new Set();
+    const duplicates = [...byVendor, ...byInternal].filter(t => {
+      if (seen.has(t.id)) return false;
+      seen.add(t.id);
+      return true;
+    });
+
+    console.log(`🔍 Duplicate check for ${vendorConf}/${internalId}: ${duplicates.length} found`);
+    res.json({ success: true, duplicates });
+  } catch (err) {
+    console.error('❌ Error in /check-duplicates:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Find user (search primary + secondary) ───────────────────────────────────
+app.post('/find-user', async (req, res) => {
+  const { query } = req.body;
+  if (!query) return res.status(400).json({ error: 'query is required' });
+
+  console.log(`\n👤 User search — "${query}"`);
+
+  try {
+    const dtParams = (cols, extra = {}) => {
+      const p = new URLSearchParams({
+        draw: '1', start: '0', length: '10',
+        'order[0][column]': '1', 'order[0][dir]': 'desc',
+        'search[value]': query, 'search[regex]': 'false',
+        ...extra,
+      });
+      for (let i = 0; i < cols; i++) {
+        p.append(`columns[${i}][data]`, i.toString());
+        p.append(`columns[${i}][name]`, '');
+        p.append(`columns[${i}][searchable]`, 'true');
+        p.append(`columns[${i}][orderable]`, i === 0 || i >= 8 ? 'false' : 'true');
+        p.append(`columns[${i}][search][value]`, '');
+        p.append(`columns[${i}][search][regex]`, 'false');
+      }
+      return p.toString();
+    };
+
+    const [primaryRes, secondaryRes] = await Promise.all([
+      taPost(`https://traveladvantage.com/admin/account/customersList/All/All/null/null/All/All/${encodeURIComponent(query)}`, dtParams(15)),
+      taPost(`https://traveladvantage.com/admin/account/travelersList`, dtParams(10)),
+    ]);
+
+    console.log(`👤 Primary raw: recordsFiltered=${primaryRes.recordsFiltered}, rows=${(primaryRes.data||[]).length}`);
+    console.log(`👤 Secondary raw: recordsFiltered=${secondaryRes.recordsFiltered}, rows=${(secondaryRes.data||[]).length}`);
+    if ((primaryRes.data||[]).length > 0) {
+      console.log(`👤 Primary row[0] sample:`, JSON.stringify(primaryRes.data[0]).slice(0, 300));
+    }
+    if ((secondaryRes.data||[]).length > 0) {
+      console.log(`👤 Secondary row[0] sample:`, JSON.stringify(secondaryRes.data[0]).slice(0, 300));
+    }
+
+    const strip = (s) => (s || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+
+    // Extract primary member ID from action cell href
+    const extractCustomerId = (cell) => {
+      const m = (cell || '').match(/viewCustomer\/(\d+)/);
+      return m ? m[1] : null;
+    };
+
+    // Extract secondary member ID from editTraveler() call
+    const extractTravelerId = (cell) => {
+      const m = (cell || '').match(/editTraveler\((\d+)\)/);
+      return m ? m[1] : null;
+    };
+
+    const primary = (primaryRes.data || []).map(row => ({
+      type:      'primary',
+      id:        extractCustomerId(row[0]),
+      name:      strip(row[2]),
+      memberId:  strip(row[3]),
+      instance:  strip(row[4]),
+      email:     strip(row[5]),
+      phone:     strip(row[6]),
+      country:   strip(row[7]),
+      status:    strip(row[11]),
+    })).filter(u => u.id);
+
+    const secondary = (secondaryRes.data || []).map(row => ({
+      type:          'secondary',
+      id:            extractTravelerId(row[0]),
+      name:          strip(row[2]),
+      primaryMember: strip(row[3]),
+      instance:      strip(row[4]),
+      email:         strip(row[5]),
+      phone:         strip(row[6]),
+      status:        strip(row[7]),
+    })).filter(u => u.id);
+
+    const results = [...primary, ...secondary];
+    console.log(`✅ User search: ${primary.length} primary, ${secondary.length} secondary`);
+    res.json({ success: true, results });
+
+  } catch (err) {
+    console.error('❌ Error in /find-user:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Full user profile ────────────────────────────────────────────────────────
+app.get('/user/:id', async (req, res) => {
+  const { id } = req.params;
+  console.log(`\n👤 User profile — ${id}`);
+  try {
+    const html = await taGet(`https://traveladvantage.com/admin/account/viewCustomer/${id}`);
+    const user = parseUserHtml(html);
+    res.json({ success: true, user });
+  } catch (err) {
+    console.error('❌ Error in /user/:id:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── User reservation history ─────────────────────────────────────────────────
+app.get('/user/:id/reservations', async (req, res) => {
+  const { id } = req.params;
+  console.log(`\n📋 Reservation history — user ${id}`);
+  try {
+    const params = new URLSearchParams({
+      draw: '1', start: '0', length: '25',
+      'order[0][column]': '6', 'order[0][dir]': 'desc',
+      'search[value]': '', 'search[regex]': 'false',
+    });
+    for (let i = 0; i <= 10; i++) {
+      params.append(`columns[${i}][data]`, i.toString());
+      params.append(`columns[${i}][name]`, '');
+      params.append(`columns[${i}][searchable]`, 'true');
+      params.append(`columns[${i}][orderable]`, [0, 2, 8].includes(i) ? 'false' : 'true');
+      params.append(`columns[${i}][search][value]`, '');
+      params.append(`columns[${i}][search][regex]`, 'false');
+    }
+
+    const data = await taPost(
+      `https://traveladvantage.com/admin/account/reservationHistoryList/${id}`,
+      params.toString()
+    );
+
+    const strip = (s) => (s || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const extractHref = (s) => { const m = (s||'').match(/href="([^"]+)"/); return m ? m[1] : null; };
+
+    const reservations = (data.data || []).map(row => ({
+      detailUrl:  extractHref(row[0]),
+      bookingId:  strip(row[1]),
+      guest:      strip(row[3]),
+      type:       strip(row[4]),
+      supplierId: strip(row[5]),
+      date:       strip(row[6]),
+      status:     strip(row[7]),
+      total:      strip(row[8]),
+      checkIn:    strip(row[9]),
+      checkOut:   strip(row[10]),
+    }));
+
+    res.json({ success: true, reservations, total: data.recordsTotal });
+  } catch (err) {
+    console.error('❌ Error in /user/:id/reservations:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
