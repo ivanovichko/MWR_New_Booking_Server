@@ -170,7 +170,7 @@ async function getTicketContext(ticketId) {
     description: strip(ticket.description || ''),
     status:      ticket.status,
     priority:    ticket.priority,
-    conversations: conversations.slice(0, 10).map(c => ({
+    conversations: conversations.slice(0, 30).map(c => ({
       type:   c.private ? 'note' : (c.incoming ? 'customer' : 'agent'),
       body:   strip(c.body || ''),
       from:   c.from_email || '',

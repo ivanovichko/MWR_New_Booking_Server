@@ -39,7 +39,7 @@ function buildContext(booking, details, user, supplier, ticketContext) {
 
     ticketContext ? '\n=== TICKET ===' : null,
     ticketContext && ticketContext.subject     ? `Subject: ${ticketContext.subject}`     : null,
-    ticketContext && ticketContext.description ? `Description: ${ticketContext.description.slice(0, 800)}` : null,
+    ticketContext && ticketContext.description ? `Description: ${ticketContext.description.slice(0, 6000)}` : null,
   ].filter(Boolean);
 
 
@@ -47,7 +47,7 @@ function buildContext(booking, details, user, supplier, ticketContext) {
   if (ticketContext && ticketContext.conversations && ticketContext.conversations.length) {
     const convLines = ['\n=== CONVERSATION ==='];
     ticketContext.conversations.forEach(c => {
-      convLines.push(`[${c.type.toUpperCase()}] ${c.from ? c.from + ': ' : ''}${c.body.slice(0, 400)}`);
+      convLines.push(`[${c.type.toUpperCase()}] ${c.from ? c.from + ': ' : ''}${c.body.slice(0, 2000)}`);
     });
     return lines.join('\n') + '\n' + convLines.join('\n');
   }
