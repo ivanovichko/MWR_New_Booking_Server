@@ -97,4 +97,69 @@ Write in English unless instructed otherwise.`;
   }
 }
 
-module.exports = { aiAssist };
+/**
+ * Finds a hotel's contact email using Groq compound-beta-mini (web search enabled).
+ * Returns { email, source, confidence, notes }
+ */
+async function findHotelEmail(hotelName, hotelAddress, hotelCountry) {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error('GROQ_API_KEY not set');
+
+  const prompt = `Find the reservations or contact email address for this specific hotel:
+
+Hotel name: ${hotelName}
+${hotelAddress ? `Address: ${hotelAddress}` : ''}
+${hotelCountry ? `Country: ${hotelCountry}` : ''}
+
+Search for this hotel's official contact email. Prefer reservations@ or info@ addresses from the hotel's own website.
+Only return a real verified email — do NOT guess or invent one.
+
+Return ONLY a JSON object, no markdown:
+{
+  "email": "the email address or null",
+  "source": "URL or description of where found, or null",
+  "confidence": "high or medium or low",
+  "notes": "anything relevant"
+}`;
+
+  const MAX_RETRIES = 3;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    const response = await fetch(GROQ_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: 'compound-beta-mini',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.1,
+        max_tokens: 300,
+      }),
+    });
+
+    if (response.status === 429) {
+      if (attempt === MAX_RETRIES) throw new Error('Groq rate limit hit — try again in a minute.');
+      await sleep(attempt * 10000);
+      continue;
+    }
+
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`Groq API error ${response.status}: ${err}`);
+    }
+
+    const data = await response.json();
+    const rawText = data?.choices?.[0]?.message?.content || '';
+    const cleaned = rawText.replace(/```json|```/g, '').trim();
+
+    try {
+      return JSON.parse(cleaned);
+    } catch {
+      console.error('Groq returned non-JSON:', rawText);
+      return { email: null, source: null, confidence: 'low', notes: `Could not parse: ${rawText.slice(0, 200)}` };
+    }
+  }
+}
+
+module.exports = { aiAssist, findHotelEmail };
