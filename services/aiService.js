@@ -6,7 +6,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 /**
  * Builds a context string from booking + user + supplier data.
  */
-function buildContext(booking, details, user, supplier) {
+function buildContext(booking, details, user, supplier, ticketContext) {
   const lines = [
     '=== BOOKING ===',
     booking.productType       ? `Type: ${booking.productType}`                     : null,
@@ -36,8 +36,21 @@ function buildContext(booking, details, user, supplier) {
     user && user.status      ? `Status: ${user.status}`       : null,
     user && user.country     ? `Country: ${user.country}`     : null,
     user && user.city        ? `City: ${user.city}`           : null,
+
+    ticketContext ? '\n=== TICKET ===' : null,
+    ticketContext && ticketContext.subject     ? `Subject: ${ticketContext.subject}`     : null,
+    ticketContext && ticketContext.description ? `Description: ${ticketContext.description.slice(0, 800)}` : null,
   ].filter(Boolean);
 
+
+  // Append conversation history
+  if (ticketContext && ticketContext.conversations && ticketContext.conversations.length) {
+    const convLines = ['\n=== CONVERSATION ==='];
+    ticketContext.conversations.forEach(c => {
+      convLines.push(`[${c.type.toUpperCase()}] ${c.from ? c.from + ': ' : ''}${c.body.slice(0, 400)}`);
+    });
+    return lines.join('\n') + '\n' + convLines.join('\n');
+  }
   return lines.join('\n');
 }
 
@@ -45,11 +58,11 @@ function buildContext(booking, details, user, supplier) {
  * Calls Groq with a system context + user prompt.
  * Returns the generated text string.
  */
-async function aiAssist({ booking, details, user, supplier, prompt }) {
+async function aiAssist({ booking, details, user, supplier, ticketContext, prompt }) {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) throw new Error('GROQ_API_KEY not set');
 
-  const context = buildContext(booking, details, user, supplier);
+  const context = buildContext(booking, details, user, supplier, ticketContext);
 
   const systemPrompt = `You are a travel support assistant at MWR TravelAdvantage. 
 You have the following booking and member information available:
