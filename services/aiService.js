@@ -6,31 +6,36 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 /**
  * Builds a context string from booking + user + supplier data.
  */
-function buildContext(booking, user, supplier) {
+function buildContext(booking, details, user, supplier) {
   const lines = [
     '=== BOOKING ===',
-    booking.productType   ? `Type: ${booking.productType}`                : null,
-    booking.internalBookingId ? `Booking ID (TA): ${booking.internalBookingId}` : null,
-    booking.supplierId    ? `Booking ID (Supplier): ${booking.supplierId}` : null,
-    booking.bookingStatus ? `Status: ${booking.bookingStatus}`            : null,
-    booking.bookingDate   ? `Booked: ${booking.bookingDate}`              : null,
-    booking.checkIn       ? `Check-in: ${booking.checkIn}`                : null,
-    booking.checkOut      ? `Check-out: ${booking.checkOut}`              : null,
-    booking.supplierName  ? `Supplier: ${booking.supplierName}`           : null,
-    booking.mwrRoomType   ? `Room Type: ${booking.mwrRoomType}`           : null,
-    booking.guestName     ? `Guest: ${booking.guestName}`                 : null,
-    booking.destinationCountry ? `Country: ${booking.destinationCountry}` : null,
-    booking.destinationCity    ? `City: ${booking.destinationCity}`       : null,
-    supplier?.email       ? `Supplier Email: ${supplier.email}`           : null,
+    booking.productType       ? `Type: ${booking.productType}`                     : null,
+    booking.internalBookingId ? `Booking ID (TA): ${booking.internalBookingId}`    : null,
+    booking.supplierId        ? `Booking ID (Supplier): ${booking.supplierId}`      : null,
+    booking.bookingStatus     ? `Status: ${booking.bookingStatus}`                  : null,
+    booking.bookingDate       ? `Booked: ${booking.bookingDate}`                    : null,
+    booking.checkIn           ? `Check-in: ${booking.checkIn}`                      : null,
+    booking.checkOut          ? `Check-out: ${booking.checkOut}`                    : null,
+    booking.mwrRoomType       ? `Room Type: ${booking.mwrRoomType}`                 : null,
+    booking.guestName         ? `Guest: ${booking.guestName}`                       : null,
+    booking.destinationCountry ? `Country: ${booking.destinationCountry}`           : null,
+    booking.destinationCity    ? `City: ${booking.destinationCity}`                 : null,
+
+    '\n=== HOTEL ===',
+    details && details.hotelName    ? `Hotel Name: ${details.hotelName}`       : (booking.supplierName ? `Hotel Name: ${booking.supplierName}` : null),
+    details && details.hotelAddress ? `Hotel Address: ${details.hotelAddress}` : null,
+    details && details.hotelPhone   ? `Hotel Phone: ${details.hotelPhone}`     : null,
+    supplier && supplier.email      ? `Hotel/Supplier Email: ${supplier.email}` : null,
+    supplier && supplier.name       ? `Supplier: ${supplier.name}`              : (booking.supplierName ? `Supplier: ${booking.supplierName}` : null),
 
     user ? '\n=== MEMBER ===' : null,
-    user?.fullName    ? `Name: ${user.fullName}`       : null,
-    user?.email       ? `Email: ${user.email}`         : null,
-    user?.phone       ? `Phone: ${user.phone}`         : null,
-    user?.instance    ? `Instance: ${user.instance}`   : null,
-    user?.status      ? `Status: ${user.status}`       : null,
-    user?.country     ? `Country: ${user.country}`     : null,
-    user?.city        ? `City: ${user.city}`           : null,
+    user && user.fullName    ? `Name: ${user.fullName}`       : null,
+    user && user.email       ? `Email: ${user.email}`         : null,
+    user && user.phone       ? `Phone: ${user.phone}`         : null,
+    user && user.instance    ? `Instance: ${user.instance}`   : null,
+    user && user.status      ? `Status: ${user.status}`       : null,
+    user && user.country     ? `Country: ${user.country}`     : null,
+    user && user.city        ? `City: ${user.city}`           : null,
   ].filter(Boolean);
 
   return lines.join('\n');
@@ -40,11 +45,11 @@ function buildContext(booking, user, supplier) {
  * Calls Groq with a system context + user prompt.
  * Returns the generated text string.
  */
-async function aiAssist({ booking, user, supplier, prompt }) {
+async function aiAssist({ booking, details, user, supplier, prompt }) {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) throw new Error('GROQ_API_KEY not set');
 
-  const context = buildContext(booking, user, supplier);
+  const context = buildContext(booking, details, user, supplier);
 
   const systemPrompt = `You are a travel support assistant at MWR TravelAdvantage. 
 You have the following booking and member information available:

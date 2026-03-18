@@ -506,12 +506,12 @@ app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 
 // ─── AI assist ────────────────────────────────────────────────────────────────
 app.post('/ai-assist', async (req, res) => {
-  const { booking, user, supplier, prompt } = req.body;
+  const { booking, details, user, supplier, prompt } = req.body;
   if (!booking || !prompt) return res.status(400).json({ error: 'booking and prompt are required' });
 
   console.log(`\n🤖 AI assist — prompt: "${prompt.slice(0, 60)}..."`);
   try {
-    const text = await aiAssist({ booking, user, supplier, prompt });
+    const text = await aiAssist({ booking, details, user, supplier, prompt });
     console.log(`✅ AI assist — ${text.length} chars`);
     res.json({ success: true, text });
   } catch (err) {
