@@ -144,4 +144,38 @@ async function searchDuplicates(ref, excludeTicketId) {
   return results.filter(t => String(t.id) !== String(excludeTicketId));
 }
 
-module.exports = { addNote, sendEmail, setTicketPending, updateTicket, tagTicket, searchDuplicates };
+/**
+ * Fetches ticket subject, description, and conversation history.
+ * Returns a structured object ready for AI context injection.
+ */
+async function getTicketContext(ticketId) {
+  const headers = { 'Authorization': getAuthHeader() };
+  const base    = getBaseUrl();
+
+  const [ticketRes, convRes] = await Promise.all([
+    fetch(`${base}/tickets/${ticketId}`, { headers }),
+    fetch(`${base}/tickets/${ticketId}/conversations`, { headers }),
+  ]);
+
+  if (!ticketRes.ok) throw new Error(`Failed to fetch ticket ${ticketId}: ${ticketRes.status}`);
+
+  const ticket = await ticketRes.json();
+  const conversations = convRes.ok ? await convRes.json() : [];
+
+  // Strip HTML tags from text
+  const strip = (html) => (html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+
+  return {
+    subject:     ticket.subject || '',
+    description: strip(ticket.description || ''),
+    status:      ticket.status,
+    priority:    ticket.priority,
+    conversations: conversations.slice(0, 10).map(c => ({
+      type:   c.private ? 'note' : (c.incoming ? 'customer' : 'agent'),
+      body:   strip(c.body || ''),
+      from:   c.from_email || '',
+    })).filter(c => c.body),
+  };
+}
+
+module.exports = { addNote, sendEmail, setTicketPending, updateTicket, tagTicket, searchDuplicates, getTicketContext };

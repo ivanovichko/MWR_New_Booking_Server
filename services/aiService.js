@@ -8,8 +8,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
  */
 function buildContext(booking, details, user, supplier, ticketContext) {
   const lines = [
-    '=== BOOKING ===',
-    booking.productType       ? `Type: ${booking.productType}`                     : null,
+    Object.keys(booking || {}).length ? '=== BOOKING ===' : null,
+    booking && booking.productType       ? `Type: ${booking.productType}`                     : null,
     booking.internalBookingId ? `Booking ID (TA): ${booking.internalBookingId}`    : null,
     booking.supplierId        ? `Booking ID (Supplier): ${booking.supplierId}`      : null,
     booking.bookingStatus     ? `Status: ${booking.bookingStatus}`                  : null,

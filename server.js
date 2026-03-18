@@ -6,7 +6,7 @@ const { parseUserHtml }                  = require('./services/userService');
 const { buildNoteHtml }                  = require('./services/noteBuilder');
 const { lookupSupplier }                 = require('./services/supplierService');
 const { aiAssist, findHotelEmail }       = require('./services/aiService');
-const { addNote, sendEmail, setTicketPending, tagTicket, searchDuplicates } = require('./services/freshdeskService');
+const { addNote, sendEmail, setTicketPending, tagTicket, searchDuplicates, getTicketContext } = require('./services/freshdeskService');
 const { initDb, getCachedBooking, cacheBooking, storeSession } = require('./services/dbService');
 const { prewarm, fetchAndCacheBooking }  = require('./services/prewarmService');
 const { taGet, taPost }                                        = require('./services/taAuthService');
@@ -505,12 +505,22 @@ app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 
 // ─── AI assist ────────────────────────────────────────────────────────────────
 app.post('/ai-assist', async (req, res) => {
-  const { booking, details, user, supplier, prompt } = req.body;
+  const { booking, details, user, supplier, prompt, freshdeskTicketId } = req.body;
   if (!booking || !prompt) return res.status(400).json({ error: 'booking and prompt are required' });
 
   console.log(`\n🤖 AI assist — prompt: "${prompt.slice(0, 60)}..."`);
   try {
-    const text = await aiAssist({ booking, details, user, supplier, prompt });
+    let ticketContext = null;
+    if (freshdeskTicketId) {
+      try {
+        ticketContext = await getTicketContext(freshdeskTicketId);
+        console.log(`📋 Ticket context fetched: "${ticketContext.subject}"`);
+      } catch (e) {
+        console.warn(`⚠️ Could not fetch ticket context: ${e.message}`);
+      }
+    }
+
+    const text = await aiAssist({ booking, details, user, supplier, ticketContext, prompt });
     console.log(`✅ AI assist — ${text.length} chars`);
     res.json({ success: true, text });
   } catch (err) {
