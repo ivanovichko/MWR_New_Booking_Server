@@ -6,6 +6,7 @@ const { parseUserHtml }                  = require('./services/userService');
 const { buildNoteHtml }                  = require('./services/noteBuilder');
 const { lookupSupplier }                 = require('./services/supplierService');
 const { findHotelEmail }                 = require('./services/geminiService');
+const { aiAssist }                       = require('./services/aiService');
 const { addNote, sendEmail, setTicketPending, tagTicket, searchDuplicates } = require('./services/freshdeskService');
 const { initDb, getCachedBooking, cacheBooking, storeSession } = require('./services/dbService');
 const { prewarm, fetchAndCacheBooking }  = require('./services/prewarmService');
@@ -502,3 +503,19 @@ app.get('/user/:id/reservations', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+
+// ─── AI assist ────────────────────────────────────────────────────────────────
+app.post('/ai-assist', async (req, res) => {
+  const { booking, user, supplier, prompt } = req.body;
+  if (!booking || !prompt) return res.status(400).json({ error: 'booking and prompt are required' });
+
+  console.log(`\n🤖 AI assist — prompt: "${prompt.slice(0, 60)}..."`);
+  try {
+    const text = await aiAssist({ booking, user, supplier, prompt });
+    console.log(`✅ AI assist — ${text.length} chars`);
+    res.json({ success: true, text });
+  } catch (err) {
+    console.error('❌ AI assist error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
