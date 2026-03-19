@@ -82,7 +82,7 @@ Write in English unless instructed otherwise.`;
         'Authorization': `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
+        model: 'groq/compound',
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user',   content: prompt },
@@ -111,7 +111,7 @@ Write in English unless instructed otherwise.`;
 }
 
 /**
- * Finds a hotel's contact email using Groq compound-beta-mini (web search enabled).
+ * Finds a hotel's contact email using Groq groq/compound (web search enabled).
  * Returns { email, source, confidence, notes }
  */
 async function findHotelEmail(hotelName, hotelAddress, hotelCountry) {
@@ -144,7 +144,7 @@ Return ONLY a JSON object, no markdown:
         'Authorization': `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: 'compound-beta-mini',
+        model: 'llama-3.3-70b-versatile',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.1,
         max_tokens: 300,
