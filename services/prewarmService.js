@@ -209,4 +209,4 @@ async function prewarm(onProgress) {
   return results;
 }
 
-module.exports = { prewarm, fetchAndCacheBooking };
+module.exports = { prewarm, fetchAndCacheBooking, extractBookingId };

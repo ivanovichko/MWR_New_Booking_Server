@@ -8,7 +8,7 @@ const { lookupSupplier }                 = require('./services/supplierService')
 const { aiAssist, findHotelEmail }       = require('./services/aiService');
 const { addNote, sendEmail, setTicketPending, tagTicket, searchDuplicates, getTicketContext } = require('./services/freshdeskService');
 const { initDb, getCachedBooking, cacheBooking, storeSession } = require('./services/dbService');
-const { prewarm, fetchAndCacheBooking }  = require('./services/prewarmService');
+const { prewarm, fetchAndCacheBooking, extractBookingId } = require('./services/prewarmService');
 const { taGet, taPost }                                        = require('./services/taAuthService');
 
 const app = express();
@@ -502,6 +502,48 @@ app.get('/user/:id/reservations', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+
+// ─── Extract booking ID from ticket + fetch + cache ───────────────────────────
+app.post('/extract-booking-id', async (req, res) => {
+  const { freshdeskTicketId } = req.body;
+  if (!freshdeskTicketId) return res.status(400).json({ error: 'freshdeskTicketId is required' });
+
+  console.log(`\n🔍 Extract booking ID — ticket ${freshdeskTicketId}`);
+  try {
+    const ticketContext = await getTicketContext(freshdeskTicketId);
+    const { bookingId } = await extractBookingId({
+      subject:          ticketContext.subject,
+      description_text: ticketContext.description,
+    });
+
+    if (!bookingId) return res.json({ success: true, bookingId: null });
+
+    console.log(`📦 Found booking ID: ${bookingId} — fetching from TA...`);
+    await fetchAndCacheBooking(bookingId);
+    console.log(`✅ Booking ${bookingId} cached`);
+    res.json({ success: true, bookingId });
+  } catch (err) {
+    console.error('❌ Error in /extract-booking-id:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Send outbound reply to supplier or customer ──────────────────────────────
+app.post('/send-reply', async (req, res) => {
+  const { freshdeskTicketId, toEmail, bodyHtml } = req.body;
+  if (!freshdeskTicketId || !toEmail || !bodyHtml)
+    return res.status(400).json({ error: 'freshdeskTicketId, toEmail, and bodyHtml are required' });
+
+  console.log(`\n📤 Outbound reply — ticket ${freshdeskTicketId} → ${toEmail}`);
+  try {
+    await sendEmail(freshdeskTicketId, toEmail, null, bodyHtml);
+    console.log(`✅ Reply sent to ${toEmail}`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Error in /send-reply:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ─── AI assist ────────────────────────────────────────────────────────────────
 app.post('/ai-assist', async (req, res) => {
