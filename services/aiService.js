@@ -144,7 +144,7 @@ Return ONLY a JSON object, no markdown:
         'Authorization': `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
+        model: 'compound-beta-mini',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.1,
         max_tokens: 300,
@@ -164,12 +164,15 @@ Return ONLY a JSON object, no markdown:
 
     const data = await response.json();
     const rawText = data?.choices?.[0]?.message?.content || '';
-    const cleaned = rawText.replace(/```json|```/g, '').trim();
+
+    // Extract JSON block from response — compound may wrap it in prose
+    const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+    const cleaned = jsonMatch ? jsonMatch[0] : rawText.replace(/```json|```/g, '').trim();
 
     try {
       return JSON.parse(cleaned);
     } catch {
-      console.error('Groq returned non-JSON:', rawText);
+      console.error('Groq returned non-JSON:', rawText.slice(0, 300));
       return { email: null, source: null, confidence: 'low', notes: `Could not parse: ${rawText.slice(0, 200)}` };
     }
   }
