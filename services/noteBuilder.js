@@ -42,19 +42,51 @@ function buildNoteHtml(booking, cleanHtml, details, user, supplier = null) {
       supplierDisplay += '<div style="margin-top:4px;font-size:12px;color:#856404;background:#fff3cd;padding:3px 6px;border-radius:3px;">' + supplier.note + '</div>';
   }
 
+  const isflight   = booking.productType && booking.productType.toLowerCase().includes('flight');
+  const iscar      = booking.productType && booking.productType.toLowerCase().includes('car');
+  const istransfer = booking.productType && booking.productType.toLowerCase().includes('transfer');
+  const isground   = booking.productType && booking.productType.toLowerCase().includes('ground');
+  const ishotel    = booking.productType && booking.productType.toLowerCase().includes('hotel');
+
+  const typeRows = isflight ? [
+    details && details.departAirline ? ['Depart Airline', v(details.departAirline)] : null,
+    details && details.returnAirline ? ['Return Airline', v(details.returnAirline)] : null,
+    details && details.pnr           ? ['PNR',            v(details.pnr)]           : null,
+    details && details.ticketNo      ? ['Ticket No.',     v(details.ticketNo)]      : null,
+  ].filter(Boolean) : iscar ? [
+    details && details.carVehicle    ? ['Vehicle',        v(details.carVehicle)]    : null,
+    details && details.carFlightInfo ? ['Flight',         v(details.carFlightInfo)] : null,
+    details && details.pickupDetails ? ['Pickup',         v(details.pickupDetails)] : null,
+    details && details.dropoffDetails ? ['Dropoff',       v(details.dropoffDetails)] : null,
+  ].filter(Boolean) : istransfer ? [
+    details && details.transferFrom         ? ['From',          v(details.transferFrom)]         : null,
+    details && details.transferTo           ? ['To',            v(details.transferTo)]           : null,
+    details && details.transferDate         ? ['Transfer Date', v(details.transferDate)]         : null,
+    details && details.transferFlightTrain  ? ['Flight/Train',  v(details.transferFlightTrain)]  : null,
+    details && details.transferVehicle      ? ['Vehicle',       v(details.transferVehicle)]      : null,
+    details && details.transferCarrier      ? ['Carrier',       v(details.transferCarrier)]      : null,
+    details && details.transferCarrierEmail ? ['Carrier Email', v(details.transferCarrierEmail)] : null,
+    details && details.transferCarrierPhone ? ['Carrier Phone', v(details.transferCarrierPhone)] : null,
+  ].filter(Boolean) : isground ? [
+    details && details.departCompany ? ['Company',  v(details.departCompany)] : null,
+  ].filter(Boolean) : ishotel ? [
+    ['Hotel', v(details && details.hotelName ? details.hotelName : booking.supplierName)],
+  ] : [];
+
   // ── 1. Booking Summary ─────────────────────────────────────────────────────
   const summaryRows = [
     ['Booking Date',          v(booking.bookingDate)],
     ['Booking ID (TA)',        v(booking.internalBookingId)],
     ['Booking ID (Supplier)', v(booking.supplierId)],
     ['Supplier',              supplierDisplay],
-    ['Hotel',                 v(details && details.hotelName ? details.hotelName : booking.supplierName)],
+    ...typeRows,
     ['Guest',                 v(booking.guestName)],
     booking.mwrRoomType && booking.mwrRoomType !== '—' ? ['Room Type', v(booking.mwrRoomType)] : null,
     ['Check-In',  v(booking.checkIn)],
     ['Check-Out', v(booking.checkOut)],
     booking.destinationCountry && booking.destinationCountry !== '—' ? ['Country', v(booking.destinationCountry)] : null,
     booking.destinationCity    && booking.destinationCity    !== '—' ? ['City',    v(booking.destinationCity)]    : null,
+    booking.voucherUrl ? ['Voucher', `<a href="${booking.voucherUrl}" target="_blank">View Voucher ↗</a>`] : null,
   ];
 
   // ── 2. Financial Details ───────────────────────────────────────────────────

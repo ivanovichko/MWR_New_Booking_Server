@@ -78,6 +78,14 @@ function parseDataRow(row) {
     locationTo:             v(39),
     returnLocationFrom:     v(40),
     returnLocationTo:       v(41),
+
+    // Voucher link — present for activity bookings (Viator etc.), col 44
+    voucherUrl: (() => {
+      const cell = row[44];
+      if (!cell || typeof cell !== 'string') return null;
+      const match = cell.match(/href=["']([^"']+)["'][^>]*title=["']View Voucher["']|title=["']View Voucher["'][^>]*href=["']([^"']+)["']/);
+      return match ? (match[1] || match[2]) : null;
+    })(),
   };
 }
 
@@ -170,7 +178,49 @@ function parseBookingHtml(html) {
     if (p) paxLine = p.textContent.replace(/\s+/g, ' ').trim();
   }
 
-  // ── Clean HTML for note display ───────────────────────────────────────────
+  // ── Flight fields ─────────────────────────────────────────────────────────
+  const departAirline  = getField('Depart Airline');
+  const returnAirline  = getField('Return Airline');
+  const pnr            = getField('PNR No.');
+  const ticketNo       = getField('Ticket No.');
+
+  // ── Car fields ────────────────────────────────────────────────────────────
+  const carAirline        = getField('Airline:');
+  const carFlightNumber   = getField('Flight Number:');
+  const carFlightInfo     = (carAirline && carFlightNumber) ? carAirline + ' ' + carFlightNumber : (carAirline || carFlightNumber);
+  const carVehicle        = getField('Car:');
+
+  // Pickup / Dropoff — parse the h5 sections
+  const getTransportSection = (label) => {
+    const h5 = [...body.querySelectorAll('h5')].find(h => h.textContent.trim() === label);
+    if (!h5) return null;
+    const lines = [];
+    let el = h5.nextElementSibling;
+    let count = 0;
+    while (el && count < 4) {
+      const t = el.textContent.replace(/\s+/g, ' ').trim();
+      if (t) lines.push(t);
+      el = el.nextElementSibling;
+      count++;
+    }
+    return lines.join(' · ') || null;
+  };
+  const pickupDetails  = getTransportSection('Pickup Details');
+  const dropoffDetails = getTransportSection('Dropoff Details');
+
+  // ── Transfer fields ───────────────────────────────────────────────────────
+  const transferFrom        = getField('From:');
+  const transferTo          = getField('To:');
+  const transferDate        = getField('Transfer Date:');
+  const transferFlightTrain = getField('Flight or Train Number:');
+  const transferVehicle     = getField('Vehicle:');
+  const transferCarrier     = getField('Title:');
+  const transferCarrierEmail = getField('Email:');
+  const transferCarrierPhone = getField('Phone:');
+
+  // ── Ground fields ─────────────────────────────────────────────────────────
+  const departCompany = getField('Depart Companies:');
+
   // Remove T&Cs, billing, scripts, styles, modals, forms
   ['script', 'style', '.modal', '.important_note_banner', 'form', 'link'].forEach(sel => {
     body.querySelectorAll(sel).forEach(el => el.remove());
@@ -203,6 +253,27 @@ function parseBookingHtml(html) {
       reservation,
       requests,
       arrivalTime,
+      // Flight-specific
+      departAirline,
+      returnAirline,
+      pnr,
+      ticketNo,
+      // Car-specific
+      carFlightInfo,
+      carVehicle,
+      pickupDetails,
+      dropoffDetails,
+      // Transfer-specific
+      transferFrom,
+      transferTo,
+      transferDate,
+      transferFlightTrain,
+      transferVehicle,
+      transferCarrier,
+      transferCarrierEmail,
+      transferCarrierPhone,
+      // Ground-specific
+      departCompany,
     },
   };
 }
