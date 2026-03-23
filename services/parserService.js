@@ -42,7 +42,7 @@ function parseDataRow(row) {
     turboUser:              v(6),
     guestName:              v(7),
     productType:            v(8),   // Hotel / Flight / Transfer / Activities / etc.
-    supplierName:           v(9),
+    supplierName:           v(9) ? stripHtml(v(9)) : null,
     supplierRoomType:       v(10),
     mwrRoomType:            v(11),
     bookingStatus:          stripHtml(v(12)),
