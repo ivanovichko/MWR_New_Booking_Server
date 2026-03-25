@@ -7,7 +7,7 @@ const { buildNoteHtml }                  = require('./services/noteBuilder');
 const { lookupSupplier }                 = require('./services/supplierService');
 const { aiAssist, findHotelEmail }       = require('./services/aiService');
 const { addNote, sendEmail, setTicketPending, tagTicket, searchDuplicates, getTicketContext } = require('./services/freshdeskService');
-const { initDb, getCachedBooking, cacheBooking, storeSession } = require('./services/dbService');
+const { initDb, getCachedBooking, cacheBooking, storeSession, getPrompts, createPrompt, updatePrompt, deletePrompt, getMacros, createMacro, updateMacro, deleteMacro } = require('./services/dbService');
 const { prewarm, fetchAndCacheBooking, extractBookingId } = require('./services/prewarmService');
 const { taGet, taPost }                                        = require('./services/taAuthService');
 
@@ -543,6 +543,50 @@ app.post('/send-reply', async (req, res) => {
     console.error('❌ Error in /send-reply:', err.message);
     res.status(500).json({ error: err.message });
   }
+});
+
+// ─── Settings: Prompts ────────────────────────────────────────────────────────
+app.get('/settings/prompts', async (req, res) => {
+  try { res.json(await getPrompts()); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+app.post('/settings/prompts', async (req, res) => {
+  const { label, text } = req.body;
+  if (!label || !text) return res.status(400).json({ error: 'label and text required' });
+  try { res.json(await createPrompt({ label, text })); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+app.put('/settings/prompts/:id', async (req, res) => {
+  const { label, text } = req.body;
+  if (!label || !text) return res.status(400).json({ error: 'label and text required' });
+  try { res.json(await updatePrompt(req.params.id, { label, text })); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+app.delete('/settings/prompts/:id', async (req, res) => {
+  try { await deletePrompt(req.params.id); res.json({ success: true }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── Settings: Macros ─────────────────────────────────────────────────────────
+app.get('/settings/macros', async (req, res) => {
+  try { res.json(await getMacros()); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+app.post('/settings/macros', async (req, res) => {
+  const { name, text } = req.body;
+  if (!name || !text) return res.status(400).json({ error: 'name and text required' });
+  try { res.json(await createMacro({ name, text })); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+app.put('/settings/macros/:id', async (req, res) => {
+  const { name, text } = req.body;
+  if (!name || !text) return res.status(400).json({ error: 'name and text required' });
+  try { res.json(await updateMacro(req.params.id, { name, text })); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+app.delete('/settings/macros/:id', async (req, res) => {
+  try { await deleteMacro(req.params.id); res.json({ success: true }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ─── AI assist ────────────────────────────────────────────────────────────────
