@@ -152,8 +152,12 @@ async function searchDuplicates(ref, excludeTicketId) {
   try {
     const data = await fdGet(`/api/_/search/tickets?term=${encodeURIComponent(ref)}&context=spotlight`);
     const results = data.results || data.tickets || data || [];
+    if (Array.isArray(results) && results.length > 0) {
+      console.log(`🔍 sample result keys: ${Object.keys(results[0]).join(', ')}`);
+      console.log(`🔍 sample statuses: ${results.slice(0, 3).map(t => `#${t.id}:${t.status}`).join(', ')}`);
+    }
     const filtered = Array.isArray(results)
-      ? results.filter(t => String(t.id) !== String(excludeTicketId))
+      ? results.filter(t => String(t.id) !== String(excludeTicketId) && (t.status === 2 || t.status === 3))
       : [];
     console.log(`🔍 searchDuplicates: ${filtered.length} found (excluding current)`);
     return filtered;
