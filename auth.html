@@ -44,11 +44,35 @@
   <textarea id="cookieValue" placeholder="nddt7c6jsdj6hpengqosthtr2dfocj0o"></textarea>
   <button id="saveBtn" onclick="saveSession()">Save Session →</button>
   <div class="status" id="status"></div>
+  <hr>
+
+  <h2>🔑 Freshdesk Session</h2>
+  <p class="sub">Paste your Freshdesk session cookie to enable full-text ticket search (duplicate detection). Expires periodically — re-paste when duplicate checks stop working.</p>
+
+  <div class="steps">
+    <strong>How to get the cookie:</strong><br>
+    1. Open <code>mwrlife.freshdesk.com</code> and log in<br>
+    2. Press <code>F12</code> → Application → Cookies → mwrlife.freshdesk.com<br>
+    3. Find the <code>_helpkit_session</code> cookie<br>
+    4. Copy the <strong>Value</strong> and paste it below
+  </div>
+
+  <label>Cookie Value</label>
+  <textarea id="fdCookieValue" placeholder="_helpkit_session=..."></textarea>
+  <button id="fdSaveBtn" onclick="saveFdSession()">Save Freshdesk Session →</button>
+  <div class="status" id="fdStatus"></div>
+
 </div>
 
 <script>
   function showStatus(msg, type) {
     const el = document.getElementById('status');
+    el.textContent = msg;
+    el.className = `status ${type}`;
+  }
+
+  function showFdStatus(msg, type) {
+    const el = document.getElementById('fdStatus');
     el.textContent = msg;
     el.className = `status ${type}`;
   }
@@ -77,6 +101,34 @@
     } finally {
       btn.disabled = false;
       btn.textContent = 'Save Session →';
+    }
+  }
+
+  async function saveFdSession() {
+    const value = document.getElementById('fdCookieValue').value.trim();
+    if (!value) return showFdStatus('Please paste the cookie value.', 'error');
+
+    const btn = document.getElementById('fdSaveBtn');
+    btn.disabled = true;
+    btn.textContent = 'Saving...';
+    showFdStatus('Saving session...', 'info');
+
+    try {
+      const cookie = value.startsWith('_helpkit_session=') ? value : `_helpkit_session=${value}`;
+      const res = await fetch('/freshdesk-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cookie }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to save');
+      showFdStatus('✅ Freshdesk session saved! Duplicate search enabled.', 'success');
+      document.getElementById('fdCookieValue').value = '';
+    } catch (err) {
+      showFdStatus(`❌ ${err.message}`, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Save Freshdesk Session →';
     }
   }
 </script>

@@ -116,32 +116,55 @@ async function tagTicket(ticketId, tags, type) {
  * Search for tickets containing a reference number.
  * Returns array of matching tickets (excluding the current ticket).
  */
-async function searchDuplicates(ref, excludeTicketId) {
-  if (!ref) return [];
+const { getFreshdeskSession } = require('./dbService');
 
-  // Freshdesk search API requires keyword:value format
-  // Search both subject and description for the reference
-  const q = encodeURIComponent(`(subject:"${ref}" OR description:"${ref}")`);
-  const url = `${getBaseUrl().replace('/api/v2', '')}/api/v2/search/tickets?query=${q}`;
-
-  console.log(`🔍 searchDuplicates: ref="${ref}"`);
-
+/**
+ * GET using Freshdesk internal session cookie — for api/_ endpoints.
+ */
+async function fdGet(path) {
+  const cookie = await getFreshdeskSession();
+  if (!cookie) throw new Error('No Freshdesk session stored. Visit /freshdesk-auth to set one.');
+  const url = `https://${process.env.FRESHDESK_DOMAIN}${path}`;
   const response = await fetch(url, {
-    headers: { 'Authorization': getAuthHeader() },
+    headers: {
+      'Cookie': cookie,
+      'X-Requested-With': 'XMLHttpRequest',
+      'Accept': 'application/json',
+    },
   });
-
-  console.log(`🔍 searchDuplicates response: ${response.status}`);
-
+  if (response.status === 401 || response.status === 403) {
+    throw new Error('FRESHDESK_SESSION_EXPIRED');
+  }
   if (!response.ok) {
     const body = await response.text();
-    console.warn(`⚠️ searchDuplicates failed: ${response.status} — ${body.slice(0, 200)}`);
+    throw new Error(`Freshdesk internal API error ${response.status}: ${body.slice(0, 200)}`);
+  }
+  return response.json();
+}
+
+/**
+ * Search for duplicate tickets using Freshdesk internal full-text search.
+ * Falls back to empty array on session errors so callers degrade gracefully.
+ */
+async function searchDuplicates(ref, excludeTicketId) {
+  if (!ref) return [];
+  console.log(`🔍 searchDuplicates: ref="${ref}"`);
+  try {
+    const data = await fdGet(`/api/_/search/tickets?term=${encodeURIComponent(ref)}&context=spotlight`);
+    const results = data.results || data.tickets || data || [];
+    const filtered = Array.isArray(results)
+      ? results.filter(t => String(t.id) !== String(excludeTicketId))
+      : [];
+    console.log(`🔍 searchDuplicates: ${filtered.length} found (excluding current)`);
+    return filtered;
+  } catch (err) {
+    if (err.message === 'FRESHDESK_SESSION_EXPIRED') {
+      console.warn('⚠️ Freshdesk session expired — duplicate check skipped');
+    } else {
+      console.warn(`⚠️ searchDuplicates error: ${err.message}`);
+    }
     return [];
   }
-
-  const data = await response.json();
-  console.log(`🔍 searchDuplicates results: ${data.total} total, ${(data.results||[]).length} returned`);
-  const results = data.results || [];
-  return results.filter(t => String(t.id) !== String(excludeTicketId));
 }
 
 /**

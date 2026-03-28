@@ -29,6 +29,12 @@ const TRANSLATE_PROMPT = `Translate the following text to {{memberLanguage}}. Tr
 // ─── Initialize schema ────────────────────────────────────────────────────────
 async function initDb() {
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS freshdesk_sessions (
+      id          SERIAL PRIMARY KEY,
+      cookie      TEXT NOT NULL,
+      created_at  TIMESTAMPTZ DEFAULT NOW()
+    );
+
     CREATE TABLE IF NOT EXISTS ta_sessions (
       id          SERIAL PRIMARY KEY,
       cookie      TEXT NOT NULL,
@@ -77,6 +83,17 @@ async function initDb() {
   }
 
   console.log('✅ DB schema ready');
+}
+
+// ─── Freshdesk session ────────────────────────────────────────────────────────
+async function storeFreshdeskSession(cookie) {
+  await pool.query(`DELETE FROM freshdesk_sessions`);
+  await pool.query(`INSERT INTO freshdesk_sessions (cookie) VALUES ($1)`, [cookie]);
+}
+
+async function getFreshdeskSession() {
+  const res = await pool.query(`SELECT cookie FROM freshdesk_sessions ORDER BY created_at DESC LIMIT 1`);
+  return res.rows[0]?.cookie || null;
 }
 
 // ─── Session ──────────────────────────────────────────────────────────────────
@@ -157,4 +174,4 @@ async function deleteMacro(id) {
   await pool.query(`DELETE FROM agent_macros WHERE id=$1`, [id]);
 }
 
-module.exports = { initDb, storeSession, getSession, cacheBooking, getCachedBooking, storeTicketSummary, getTicketSummaries, pool, getPrompts, createPrompt, updatePrompt, deletePrompt, getMacros, createMacro, updateMacro, deleteMacro };
+module.exports = { initDb, storeSession, getSession, cacheBooking, getCachedBooking, storeTicketSummary, getTicketSummaries, pool, getPrompts, createPrompt, updatePrompt, deletePrompt, getMacros, createMacro, updateMacro, deleteMacro, storeFreshdeskSession, getFreshdeskSession };

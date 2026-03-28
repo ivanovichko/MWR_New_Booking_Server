@@ -7,7 +7,7 @@ const { buildNoteHtml }                  = require('./services/noteBuilder');
 const { lookupSupplier }                 = require('./services/supplierService');
 const { aiAssist, findHotelEmail }       = require('./services/aiService');
 const { addNote, sendEmail, setTicketPending, tagTicket, searchDuplicates, getTicketContext } = require('./services/freshdeskService');
-const { initDb, getCachedBooking, cacheBooking, storeSession, getPrompts, createPrompt, updatePrompt, deletePrompt, getMacros, createMacro, updateMacro, deleteMacro } = require('./services/dbService');
+const { initDb, getCachedBooking, cacheBooking, storeSession, getPrompts, createPrompt, updatePrompt, deletePrompt, getMacros, createMacro, updateMacro, deleteMacro, storeFreshdeskSession } = require('./services/dbService');
 const { prewarm, fetchAndCacheBooking, extractBookingId } = require('./services/prewarmService');
 const { taGet, taPost }                                        = require('./services/taAuthService');
 
@@ -23,6 +23,20 @@ app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 // ─── Auth page ────────────────────────────────────────────────────────────────
 app.get('/auth', (req, res) => res.sendFile(path.join(__dirname, 'auth.html')));
+
+// ─── Freshdesk Session ────────────────────────────────────────────────────────
+app.post('/freshdesk-session', async (req, res) => {
+  const { cookie } = req.body;
+  if (!cookie) return res.status(400).json({ error: 'cookie is required' });
+  try {
+    await storeFreshdeskSession(cookie);
+    console.log(`✅ Freshdesk session stored (length: ${cookie.length})`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Freshdesk session store error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ─── TA Session: manually paste cookie value ──────────────────────────────────
 app.post('/ta-session', async (req, res) => {
