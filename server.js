@@ -335,22 +335,23 @@ app.post('/tag-ticket', async (req, res) => {
 
 // ─── Check for duplicate tickets ─────────────────────────────────────────────
 app.post('/check-duplicates', async (req, res) => {
-  const { vendorConf, internalId, freshdeskTicketId } = req.body;
+  const { vendorConf, internalId, memberEmail, freshdeskTicketId } = req.body;
   try {
-    const [byVendor, byInternal] = await Promise.all([
-      vendorConf ? searchDuplicates(vendorConf, freshdeskTicketId) : [],
-      internalId ? searchDuplicates(internalId, freshdeskTicketId) : [],
+    const [byVendor, byInternal, byEmail] = await Promise.all([
+      vendorConf  ? searchDuplicates(vendorConf,  freshdeskTicketId) : [],
+      internalId  ? searchDuplicates(internalId,  freshdeskTicketId) : [],
+      memberEmail ? searchDuplicates(memberEmail, freshdeskTicketId) : [],
     ]);
 
     // Merge and deduplicate by ticket id
     const seen = new Set();
-    const duplicates = [...byVendor, ...byInternal].filter(t => {
+    const duplicates = [...byVendor, ...byInternal, ...byEmail].filter(t => {
       if (seen.has(t.id)) return false;
       seen.add(t.id);
       return true;
     });
 
-    console.log(`🔍 Duplicate check for ${vendorConf}/${internalId}: ${duplicates.length} found`);
+    console.log(`🔍 Duplicate check for ${vendorConf}/${internalId}/${memberEmail}: ${duplicates.length} found`);
     res.json({ success: true, duplicates });
   } catch (err) {
     console.error('❌ Error in /check-duplicates:', err.message);
