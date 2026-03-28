@@ -343,14 +343,13 @@ app.post('/check-duplicates', async (req, res) => {
       memberEmail ? searchDuplicates(memberEmail, freshdeskTicketId) : [],
     ]);
 
-    // Merge and deduplicate by ticket id
-    const seen = new Set();
-    const duplicates = [...byVendor, ...byInternal, ...byEmail].filter(t => {
-      if (seen.has(t.id)) return false;
-      seen.add(t.id);
-      return true;
-    });
+    // Tag each result with its match source, merge and deduplicate by ticket id
+    const seen = new Map();
+    for (const t of byVendor)  { if (!seen.has(t.id)) seen.set(t.id, { ...t, matchedBy: ['supplier ref'] }); else seen.get(t.id).matchedBy.push('supplier ref'); }
+    for (const t of byInternal){ if (!seen.has(t.id)) seen.set(t.id, { ...t, matchedBy: ['booking ID'] }); else seen.get(t.id).matchedBy.push('booking ID'); }
+    for (const t of byEmail)   { if (!seen.has(t.id)) seen.set(t.id, { ...t, matchedBy: ['member email'] }); else seen.get(t.id).matchedBy.push('member email'); }
 
+    const duplicates = [...seen.values()];
     console.log(`🔍 Duplicate check for ${vendorConf}/${internalId}/${memberEmail}: ${duplicates.length} found`);
     res.json({ success: true, duplicates });
   } catch (err) {
