@@ -4,7 +4,8 @@ const { parseDataRow, parseBookingHtml } = require('./parserService');
 const { parseUserHtml } = require('./userService');
 const { buildNoteHtml } = require('./noteBuilder');
 const { lookupSupplier } = require('./supplierService');
-const { cacheBooking, storeTicketSummary } = require('./dbService');
+const { searchDuplicates } = require('./freshdeskService');
+const { cacheBooking, storeTicketSummary, getCachedBooking } = require('./dbService');
 
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
@@ -307,6 +308,16 @@ async function prewarm(onProgress) {
       }
 
       progress(`📦 Fetching booking ${bookingId} for ticket #${ticket.id}...`);
+
+      // Check if already cached — skip TA fetch if so
+      const existing = await getCachedBooking(bookingId);
+      if (existing) {
+        progress(`⚡ #${ticket.id} → ${bookingId} already cached, skipping TA fetch`);
+        await storeTicketSummary({ ticketId: String(ticket.id), bookingId, summary });
+        results.push({ ticketId: ticket.id, bookingId, status: 'already_cached', summary, isNewBooking });
+        continue;
+      }
+
       const { booking, cleanHtml, details, user, supplier } = await fetchAndCacheBooking(bookingId);
       await storeTicketSummary({ ticketId: String(ticket.id), bookingId, summary });
 
@@ -325,6 +336,37 @@ async function prewarm(onProgress) {
       const noteHtml = buildNoteHtml(booking, cleanHtml, details, user, supplier);
       await postNote(ticket.id, noteHtml);
 
+      // Duplicate check — run three parallel searches
+      try {
+        const [byVendor, byInternal, byEmail] = await Promise.all([
+          booking.supplierId        ? searchDuplicates(booking.supplierId,        ticket.id)        : [],
+          booking.internalBookingId ? searchDuplicates(booking.internalBookingId, ticket.id)        : [],
+          user?.email               ? searchDuplicates(user.email,                ticket.id, true)  : [],
+        ]);
+
+        const seen = new Map();
+        for (const t of byVendor)   { if (!seen.has(t.id)) seen.set(t.id, { ...t, matchedBy: ['supplier ref'] }); else seen.get(t.id).matchedBy.push('supplier ref'); }
+        for (const t of byInternal) { if (!seen.has(t.id)) seen.set(t.id, { ...t, matchedBy: ['booking ID'] });   else seen.get(t.id).matchedBy.push('booking ID'); }
+        for (const t of byEmail)    { if (!seen.has(t.id)) seen.set(t.id, { ...t, matchedBy: ['member email'] }); else seen.get(t.id).matchedBy.push('member email'); }
+
+        const duplicates = [...seen.values()];
+
+        if (duplicates.length > 0) {
+          progress(`⚠️ #${ticket.id} — ${duplicates.length} open thread(s) found`);
+          const rows = duplicates.map(t =>
+            `<tr><td style="padding:4px 8px;"><a href="https://mwrlife.freshdesk.com/a/tickets/${t.id}" target="_blank">#${t.id}</a></td>` +
+            `<td style="padding:4px 8px;">${t.subject || '—'}</td>` +
+            `<td style="padding:4px 8px;color:#856404;">matched by: ${(t.matchedBy || []).join(', ')}</td></tr>`
+          ).join('');
+          const dupNoteHtml =
+            `<p><strong>⚠️ Open Threads Found</strong></p>` +
+            `<table style="width:100%;border-collapse:collapse;font-size:13px;"><tbody>${rows}</tbody></table>`;
+          await postNote(ticket.id, dupNoteHtml);
+        }
+      } catch (e) {
+        progress(`⚠️ #${ticket.id} — duplicate check failed: ${e.message}`);
+      }
+
       progress(`✅ #${ticket.id} → ${bookingId} cached`);
       results.push({ ticketId: ticket.id, bookingId, status: 'cached', summary, isNewBooking, daysUntil: dateInfo?.daysUntil ?? null });
 
@@ -336,7 +378,9 @@ async function prewarm(onProgress) {
     await new Promise(r => setTimeout(r, 500));
   }
 
-  progress(`🎉 Prewarm complete — ${results.filter(r => r.status === 'cached').length}/${tickets.length} cached`);
+  const cached   = results.filter(r => r.status === 'cached').length;
+  const skipped  = results.filter(r => r.status === 'already_cached').length;
+  progress(`🎉 Prewarm complete — ${cached} cached, ${skipped} already cached, ${results.filter(r => r.status === 'error').length} errors (${tickets.length} total)`);
   return results;
 }
 

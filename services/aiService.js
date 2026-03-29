@@ -39,7 +39,7 @@ function buildContext(booking, details, user, supplier, ticketContext) {
 
     ticketContext ? '\n=== TICKET ===' : null,
     ticketContext && ticketContext.subject     ? `Subject: ${ticketContext.subject}`     : null,
-    ticketContext && ticketContext.description ? `Description: ${ticketContext.description.slice(0, 6000)}` : null,
+    ticketContext && ticketContext.description ? `Description: ${ticketContext.description.slice(0, 20000)}` : null,
   ].filter(Boolean);
 
 
@@ -88,7 +88,7 @@ Write in English unless instructed otherwise.`;
           { role: 'user',   content: prompt },
         ],
         temperature: 0.4,
-        max_tokens: 1000,
+        max_tokens: 8000,
       }),
     });
 
