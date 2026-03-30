@@ -306,7 +306,10 @@ async function checkPendings(onProgress, isStopped = () => false) {
     `https://${domain}/api/v2/tickets?status=3&responder_id=${agentId}&per_page=100`,
     { headers: { 'Authorization': 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64') } }
   );
-  if (!res.ok) throw new Error(`Failed to fetch pending tickets: ${res.status}`);
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Failed to fetch pending tickets: ${res.status} — ${body.slice(0, 200)}`);
+  }
   const tickets = await res.json();
   progress(`📋 Found ${tickets.length} pending ticket(s)`);
 
