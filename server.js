@@ -54,7 +54,7 @@ app.post('/ta-session', async (req, res) => {
 
 // ─── Prewarm: polling-based progress ─────────────────────────────────────────
 // In-memory job store (single job at a time is fine)
-const prewarmJob = { running: false, log: [], done: false, error: null, results: null };
+const prewarmJob = { running: false, log: [], done: false, error: null, results: null, stopped: false };
 
 app.post('/prewarm/start', async (req, res) => {
   if (prewarmJob.running) {
@@ -67,11 +67,12 @@ app.post('/prewarm/start', async (req, res) => {
   prewarmJob.error   = null;
   prewarmJob.results = null;
   prewarmJob.log     = [];
+  prewarmJob.stopped = false;
 
   res.json({ success: true, message: 'Prewarm started' });
 
   // Run async in background
-  prewarm((msg) => prewarmJob.log.push(msg))
+  prewarm((msg) => prewarmJob.log.push(msg), () => prewarmJob.stopped)
     .then(results => {
       prewarmJob.results = results;
       prewarmJob.done    = true;
@@ -84,6 +85,11 @@ app.post('/prewarm/start', async (req, res) => {
     });
 });
 
+app.post('/prewarm/stop', (req, res) => {
+  prewarmJob.stopped = true;
+  res.json({ success: true });
+});
+
 app.get('/prewarm/status', (req, res) => {
   res.json({
     running: prewarmJob.running,
@@ -91,11 +97,12 @@ app.get('/prewarm/status', (req, res) => {
     error:   prewarmJob.error,
     log:     prewarmJob.log,
     results: prewarmJob.results,
+    stopped: prewarmJob.stopped,
   });
 });
 
 
-const pendingsJob = { running: false, log: [], done: false, error: null, results: null };
+const pendingsJob = { running: false, log: [], done: false, error: null, results: null, stopped: false };
 
 app.post('/check-pendings/start', async (req, res) => {
   if (pendingsJob.running) return res.json({ success: true, message: 'Already running' });
@@ -104,14 +111,20 @@ app.post('/check-pendings/start', async (req, res) => {
   pendingsJob.error   = null;
   pendingsJob.results = null;
   pendingsJob.log     = [];
+  pendingsJob.stopped = false;
   res.json({ success: true, message: 'Check pendings started' });
-  checkPendings((msg) => pendingsJob.log.push(msg))
+  checkPendings((msg) => pendingsJob.log.push(msg), () => pendingsJob.stopped)
     .then(results => { pendingsJob.results = results; pendingsJob.done = true; pendingsJob.running = false; })
     .catch(err  => { pendingsJob.error = err.message; pendingsJob.done = true; pendingsJob.running = false; });
 });
 
+app.post('/check-pendings/stop', (req, res) => {
+  pendingsJob.stopped = true;
+  res.json({ success: true });
+});
+
 app.get('/check-pendings/status', (req, res) => {
-  res.json({ running: pendingsJob.running, done: pendingsJob.done, error: pendingsJob.error, log: pendingsJob.log, results: pendingsJob.results });
+  res.json({ running: pendingsJob.running, done: pendingsJob.done, error: pendingsJob.error, log: pendingsJob.log, results: pendingsJob.results, stopped: pendingsJob.stopped });
 });
 
 

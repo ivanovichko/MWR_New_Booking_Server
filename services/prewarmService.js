@@ -294,7 +294,7 @@ Return ONLY a JSON object, no markdown: { "date": "YYYY-MM-DD or null" }`;
 }
 
 // ─── Check pending tickets ────────────────────────────────────────────────────
-async function checkPendings(onProgress) {
+async function checkPendings(onProgress, isStopped = () => false) {
   const progress = (msg) => { console.log(msg); onProgress?.(msg); };
   const domain  = process.env.FRESHDESK_DOMAIN;
   const apiKey  = process.env.FRESHDESK_API_KEY;
@@ -303,7 +303,7 @@ async function checkPendings(onProgress) {
 
   progress('📋 Fetching pending tickets...');
   const res = await fetch(
-    `https://${domain}/api/v2/tickets?status=3&assignee_id=${agentId}&per_page=100`,
+    `https://${domain}/api/v2/tickets?status=3&responder_id=${agentId}&per_page=100`,
     { headers: { 'Authorization': 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64') } }
   );
   if (!res.ok) throw new Error(`Failed to fetch pending tickets: ${res.status}`);
@@ -313,6 +313,7 @@ async function checkPendings(onProgress) {
   const results = { reopened: 0, skipped: 0, noDate: 0, errors: 0 };
 
   for (const ticket of tickets) {
+    if (isStopped()) { progress('🛑 Stopped by user.'); break; }
     try {
       const tags = ticket.tags || [];
 
@@ -360,7 +361,7 @@ async function checkPendings(onProgress) {
 }
 
 // ─── Main prewarm function ────────────────────────────────────────────────────
-async function prewarm(onProgress) {
+async function prewarm(onProgress, isStopped = () => false) {
   const progress = (msg) => { console.log(msg); onProgress?.(msg); };
 
   progress('📋 Fetching LOW priority tickets...');
@@ -370,6 +371,7 @@ async function prewarm(onProgress) {
   const results = [];
 
   for (const ticket of tickets) {
+    if (isStopped()) { progress('🛑 Stopped by user.'); break; }
     try {
       // Fetch full ticket if description missing
       let fullTicket = ticket;
