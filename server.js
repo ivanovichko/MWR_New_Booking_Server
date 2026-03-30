@@ -8,7 +8,7 @@ const { lookupSupplier }                 = require('./services/supplierService')
 const { aiAssist, findHotelEmail }       = require('./services/aiService');
 const { addNote, sendEmail, setTicketPending, tagTicket, searchDuplicates, getTicketContext } = require('./services/freshdeskService');
 const { initDb, getCachedBooking, cacheBooking, storeSession, getPrompts, createPrompt, updatePrompt, deletePrompt, getMacros, createMacro, updateMacro, deleteMacro, storeFreshdeskSession } = require('./services/dbService');
-const { prewarm, fetchAndCacheBooking, extractBookingId } = require('./services/prewarmService');
+const { prewarm, fetchAndCacheBooking, extractBookingId, checkPendings } = require('./services/prewarmService');
 const { taGet, taPost }                                        = require('./services/taAuthService');
 
 const app = express();
@@ -95,7 +95,26 @@ app.get('/prewarm/status', (req, res) => {
 });
 
 
-// ─── Cached booking lookup ────────────────────────────────────────────────────
+const pendingsJob = { running: false, log: [], done: false, error: null, results: null };
+
+app.post('/check-pendings/start', async (req, res) => {
+  if (pendingsJob.running) return res.json({ success: true, message: 'Already running' });
+  pendingsJob.running = true;
+  pendingsJob.done    = false;
+  pendingsJob.error   = null;
+  pendingsJob.results = null;
+  pendingsJob.log     = [];
+  res.json({ success: true, message: 'Check pendings started' });
+  checkPendings((msg) => pendingsJob.log.push(msg))
+    .then(results => { pendingsJob.results = results; pendingsJob.done = true; pendingsJob.running = false; })
+    .catch(err  => { pendingsJob.error = err.message; pendingsJob.done = true; pendingsJob.running = false; });
+});
+
+app.get('/check-pendings/status', (req, res) => {
+  res.json({ running: pendingsJob.running, done: pendingsJob.done, error: pendingsJob.error, log: pendingsJob.log, results: pendingsJob.results });
+});
+
+
 app.get('/booking/:id', async (req, res) => {
   const bookingId = req.params.id;
   console.log(`\n🔍 Booking lookup — ${bookingId}`);
@@ -340,7 +359,7 @@ app.post('/check-duplicates', async (req, res) => {
     const [byVendor, byInternal, byEmail] = await Promise.all([
       vendorConf  ? searchDuplicates(vendorConf,  freshdeskTicketId) : [],
       internalId  ? searchDuplicates(internalId,  freshdeskTicketId) : [],
-      memberEmail ? searchDuplicates(memberEmail, freshdeskTicketId) : [],
+      memberEmail ? searchDuplicates(memberEmail, freshdeskTicketId, true) : [],
     ]);
 
     // Tag each result with its match source, merge and deduplicate by ticket id

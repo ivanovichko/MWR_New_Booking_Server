@@ -232,6 +232,133 @@ async function postNote(ticketId, bodyHtml) {
   });
 }
 
+// ─── Set Freshdesk ticket status ─────────────────────────────────────────────
+async function setTicketStatus(ticketId, status, priority = null) {
+  const domain = process.env.FRESHDESK_DOMAIN;
+  const apiKey = process.env.FRESHDESK_API_KEY;
+  const body = { status };
+  if (priority !== null) body.priority = priority;
+  await fetch(`https://${domain}/api/v2/tickets/${ticketId}`, {
+    method: 'PUT',
+    headers: {
+      'Authorization': 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64'),
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+// ─── Extract check-in date from tags ─────────────────────────────────────────
+const MONTHS = { jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11 };
+
+function extractDateFromTags(tags) {
+  for (const tag of (tags || [])) {
+    // Match MMM-DD or MMM DD (e.g. Mar-25, Apr 02)
+    const m = tag.match(/^([A-Za-z]{3})[-\s](\d{1,2})$/);
+    if (m) {
+      const monthIdx = MONTHS[m[1].toLowerCase()];
+      if (monthIdx === undefined) continue;
+      const day = parseInt(m[2]);
+      const now = new Date();
+      let year = now.getFullYear();
+      // If this month/day already passed this year, use next year
+      const candidate = new Date(year, monthIdx, day);
+      if (candidate < now) year++;
+      return new Date(year, monthIdx, day).toISOString().split('T')[0];
+    }
+  }
+  return null;
+}
+
+async function extractDateFromTagsWithGroq(tags) {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey || !tags?.length) return null;
+  const prompt = `Extract a check-in date from these ticket tags: ${JSON.stringify(tags)}
+Return ONLY a JSON object, no markdown: { "date": "YYYY-MM-DD or null" }`;
+  try {
+    const res = await fetch(GROQ_API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: 'llama-3.3-70b-versatile',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.1,
+        max_tokens: 50,
+      }),
+    });
+    const data = await res.json();
+    const raw = data?.choices?.[0]?.message?.content || '{}';
+    const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim());
+    return parsed.date || null;
+  } catch { return null; }
+}
+
+// ─── Check pending tickets ────────────────────────────────────────────────────
+async function checkPendings(onProgress) {
+  const progress = (msg) => { console.log(msg); onProgress?.(msg); };
+  const domain  = process.env.FRESHDESK_DOMAIN;
+  const apiKey  = process.env.FRESHDESK_API_KEY;
+  const agentId = process.env.FRESHDESK_AGENT_ID;
+  if (!agentId) throw new Error('FRESHDESK_AGENT_ID not set');
+
+  progress('📋 Fetching pending tickets...');
+  const res = await fetch(
+    `https://${domain}/api/v2/tickets?status=3&assignee_id=${agentId}&per_page=100`,
+    { headers: { 'Authorization': 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64') } }
+  );
+  if (!res.ok) throw new Error(`Failed to fetch pending tickets: ${res.status}`);
+  const tickets = await res.json();
+  progress(`📋 Found ${tickets.length} pending ticket(s)`);
+
+  const results = { reopened: 0, skipped: 0, noDate: 0, errors: 0 };
+
+  for (const ticket of tickets) {
+    try {
+      const tags = ticket.tags || [];
+
+      // Pass 1: regex
+      let dateStr = extractDateFromTags(tags);
+
+      // Pass 2: Groq fallback
+      if (!dateStr) {
+        progress(`🤖 #${ticket.id} — no date in tags, trying Groq...`);
+        dateStr = await extractDateFromTagsWithGroq(tags);
+      }
+
+      if (!dateStr) {
+        progress(`⚠️  #${ticket.id} — no date found in tags: [${tags.join(', ')}]`);
+        results.noDate++;
+        continue;
+      }
+
+      const dateInfo = checkInPriority(dateStr);
+      if (!dateInfo) {
+        progress(`⚠️  #${ticket.id} — could not parse date: ${dateStr}`);
+        results.noDate++;
+        continue;
+      }
+
+      if (dateInfo.daysUntil < 7) {
+        const priorityLabel = dateInfo.daysUntil < 3 ? 'HIGH' : 'MEDIUM';
+        const priority = dateInfo.daysUntil < 3 ? 3 : 2;
+        await setTicketStatus(ticket.id, 2, priority); // 2 = Open
+        progress(`🔺 #${ticket.id} — check-in in ${dateInfo.daysUntil} days → reopened (${priorityLabel})`);
+        results.reopened++;
+      } else {
+        progress(`✅ #${ticket.id} — check-in in ${dateInfo.daysUntil} days, leaving pending`);
+        results.skipped++;
+      }
+    } catch (err) {
+      progress(`❌ #${ticket.id} — ${err.message}`);
+      results.errors++;
+    }
+    await new Promise(r => setTimeout(r, 300));
+  }
+
+  progress(`🎉 Done — ${results.reopened} reopened, ${results.skipped} left pending, ${results.noDate} no date, ${results.errors} errors`);
+  return results;
+}
+
 // ─── Main prewarm function ────────────────────────────────────────────────────
 async function prewarm(onProgress) {
   const progress = (msg) => { console.log(msg); onProgress?.(msg); };
@@ -321,7 +448,13 @@ async function prewarm(onProgress) {
       const { booking, cleanHtml, details, user, supplier } = await fetchAndCacheBooking(bookingId);
       await storeTicketSummary({ ticketId: String(ticket.id), bookingId, summary });
 
-      // Check-in date priority
+      if (!isNewBooking) {
+        progress(`📦 #${ticket.id} → ${bookingId} cached (not a new booking, skipping actions)`);
+        results.push({ ticketId: ticket.id, bookingId, status: 'cached', summary, isNewBooking, daysUntil: null });
+        continue;
+      }
+
+      // New booking — check-in date priority
       const dateInfo = checkInPriority(booking.checkIn);
 
       if (dateInfo) {
@@ -367,7 +500,7 @@ async function prewarm(onProgress) {
         progress(`⚠️ #${ticket.id} — duplicate check failed: ${e.message}`);
       }
 
-      progress(`✅ #${ticket.id} → ${bookingId} cached`);
+      progress(`✅ #${ticket.id} → ${bookingId} cached + processed as new booking`);
       results.push({ ticketId: ticket.id, bookingId, status: 'cached', summary, isNewBooking, daysUntil: dateInfo?.daysUntil ?? null });
 
     } catch (err) {
@@ -384,4 +517,4 @@ async function prewarm(onProgress) {
   return results;
 }
 
-module.exports = { prewarm, fetchAndCacheBooking, extractBookingId, checkInPriority };
+module.exports = { prewarm, fetchAndCacheBooking, extractBookingId, checkInPriority, checkPendings };
