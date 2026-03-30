@@ -302,15 +302,17 @@ async function checkPendings(onProgress, isStopped = () => false) {
   if (!agentId) throw new Error('FRESHDESK_AGENT_ID not set');
 
   progress('📋 Fetching pending tickets...');
+  const query = encodeURIComponent(`status:3 AND agent_id:${agentId}`);
   const res = await fetch(
-    `https://${domain}/api/v2/tickets?status=3&responder_id=${agentId}&per_page=100`,
+    `https://${domain}/api/v2/search/tickets?query="${query}"`,
     { headers: { 'Authorization': 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64') } }
   );
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`Failed to fetch pending tickets: ${res.status} — ${body.slice(0, 200)}`);
   }
-  const tickets = await res.json();
+  const data = await res.json();
+  const tickets = data.results || [];
   progress(`📋 Found ${tickets.length} pending ticket(s)`);
 
   const results = { reopened: 0, skipped: 0, noDate: 0, errors: 0 };
