@@ -228,61 +228,29 @@ function parseBookingHtml(html) {
 
   body.querySelectorAll('.confirmation_billling_info, .billing_info, .TripProtection').forEach(el => el.remove());
 
-  // Preserve Hotel Cancellation Policy block (at the end of the page)
-  let cancellationPolicyHtml = null;
-  const cancelH5 = [...body.querySelectorAll('h5')].find(
-    h => h.textContent.trim().toLowerCase().includes('hotel cancellation policy')
-  );
-  if (cancelH5) {
-    const parts = [cancelH5.outerHTML];
-    let el = cancelH5.nextElementSibling;
-    while (el) { parts.push(el.outerHTML); el = el.nextElementSibling; }
-    cancellationPolicyHtml = parts.join('');
-    // Remove from DOM — will re-append after cleanup
-    let cur = cancelH5;
-    while (cur) { const next = cur.nextElementSibling; cur.remove(); cur = next; }
-  }
+  // Work on HTML string for reliable phrase-based cleanup
+  let cleanedHtml = body.innerHTML;
 
-  // Strip from T&C agreement phrase onwards (mid-content boilerplate)
-  const tcPhrase = 'By proceeding with this reservation, you agree to all Terms and Conditions';
-  let stripped = false;
-  const allEls = [...body.querySelectorAll('*')];
-  for (const el of allEls) {
-    if (stripped) { el.remove(); continue; }
-    if (el.childNodes.length === 1 || el.tagName === 'P' || el.tagName === 'DIV') {
-      if (el.textContent.includes(tcPhrase)) {
-        // Remove this element and all following siblings up the tree
-        let cur = el;
-        while (cur && cur !== body) {
-          let sib = cur.nextSibling;
-          while (sib) { const next = sib.nextSibling; sib.parentNode?.removeChild(sib); sib = next; }
-          cur.parentNode?.removeChild(cur);
-          cur = cur.parentElement;
-          break;
-        }
-        stripped = true;
-      }
-    }
-  }
+  // 1. Extract Hotel Cancellation Policy block (save before stripping)
+  const cancelMatch = cleanedHtml.match(/(<h5[^>]*>[^<]*[Hh]otel\s+[Cc]ancellation\s+[Pp]olicy[^<]*<\/h5>[\s\S]*)/i);
+  const cancellationPolicyHtml = cancelMatch ? cancelMatch[1] : null;
 
-  // Also strip via h5 terms header if still present
-  const termsHeader = [...body.querySelectorAll('h5')].find(
-    h => h.textContent.trim().toLowerCase().includes('terms and conditions')
-  );
-  if (termsHeader) {
-    let el = termsHeader;
-    while (el) { const next = el.nextElementSibling; el.remove(); el = next; }
-  }
+  // 2. Strip T&C phrase and everything after it
+  const tcPhrase = 'By proceeding with this reservation';
+  const tcIdx = cleanedHtml.indexOf(tcPhrase);
+  if (tcIdx !== -1) cleanedHtml = cleanedHtml.slice(0, tcIdx);
 
-  // Re-append cancellation policy at the end
+  // 3. Also strip from terms h5 if still present
+  const termsH5 = cleanedHtml.search(/<h5[^>]*>[^<]*terms and conditions[^<]*<\/h5>/i);
+  if (termsH5 !== -1) cleanedHtml = cleanedHtml.slice(0, termsH5);
+
+  // 4. Re-append cancellation policy
   if (cancellationPolicyHtml) {
-    const wrapper = doc.createElement('div');
-    wrapper.innerHTML = cancellationPolicyHtml;
-    body.appendChild(wrapper);
+    cleanedHtml += '<div style="margin-top:12px;">' + cancellationPolicyHtml + '</div>';
   }
 
   return {
-    cleanHtml: body.innerHTML.trim(),
+    cleanHtml: cleanedHtml.trim(),
     details: {
       hotelName,
       hotelAddress,
