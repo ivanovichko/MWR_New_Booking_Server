@@ -174,4 +174,48 @@ function buildNoteHtml(booking, cleanHtml, details, user, supplier = null) {
   ).trim();
 }
 
-module.exports = { buildNoteHtml };
+/**
+ * Builds a short booking-only note (no member details, no financials).
+ * Used when multiple bookings exist on a single ticket.
+ */
+function buildShortNoteHtml(booking, details) {
+  const v = (val) => (val !== null && val !== undefined && val !== '' && val !== '-') ? val : '—';
+  const tableStyle = 'width:100%;border-collapse:collapse;margin-bottom:12px;font-size:13px;';
+  const thStyle    = 'padding:5px 10px;background:#f5f5f5;border:1px solid #ddd;text-align:left;font-weight:600;white-space:nowrap;width:38%;color:#444;';
+  const tdStyle    = 'padding:5px 10px;border:1px solid #ddd;color:#222;';
+
+  const productType = (booking.productType || '').toLowerCase();
+  const isFlight    = productType.includes('flight');
+
+  const rows = [
+    ['Booking ID (TA)',        v(booking.internalBookingId)],
+    ['Booking ID (Supplier)', v(booking.supplierId)],
+    ['Supplier',              v(booking.supplierName)],
+    isFlight
+      ? ['Airline', v(details && details.departAirline ? details.departAirline : booking.supplierName)]
+      : ['Hotel',   v(details && details.hotelName    ? details.hotelName    : booking.supplierName)],
+    !isFlight && booking.mwrRoomType ? ['Room Type', v(booking.mwrRoomType)] : null,
+    ['Guest',     v(booking.guestName)],
+    ['Check-In',  v(booking.checkIn)],
+    ['Check-Out', v(booking.checkOut)],
+    isFlight && booking.locationTo ? ['Destination', v(booking.locationTo)] : null,
+    booking.destinationCity ? ['City', v(booking.destinationCity)] : null,
+  ].filter(Boolean);
+
+  const tableHtml = '<table style="' + tableStyle + '"><tbody>' +
+    rows.map(([label, val]) =>
+      '<tr><th style="' + thStyle + '">' + label + '</th><td style="' + tdStyle + '">' + val + '</td></tr>'
+    ).join('') +
+    '</tbody></table>';
+
+  return (
+    '<div style="font-family:system-ui,-apple-system,sans-serif;font-size:13px;color:#222;max-width:900px;">' +
+    '<h4 style="margin:0 0 10px;font-size:14px;color:#1a1a1a;border-bottom:2px solid #17a2b8;padding-bottom:4px;">📌 ' +
+      v(booking.productType) + ' — #' + v(booking.internalBookingId) +
+    '</h4>' +
+    tableHtml +
+    '</div>'
+  );
+}
+
+module.exports = { buildNoteHtml, buildShortNoteHtml };

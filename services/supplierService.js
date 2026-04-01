@@ -131,7 +131,13 @@ function normalise(str) {
  * @returns {{ email, contactUrl, note } | null}
  */
 function lookupSupplier(supplierName) {
-  const key = normalise(supplierName);
+  // Normalise incoming name: strip trailing (digits), version tags, generic suffixes
+  const cleaned = (supplierName || '')
+    .replace(/\s*\(\d+\)\s*$/g, '')   // W2M (39665426) → W2M
+    .replace(/\bV\d+\b/gi, '')         // TBO V2 → TBO
+    .replace(/\bpackage\b/gi, '')      // Expedia Package → Expedia
+    .trim();
+  const key = normalise(cleaned);
   if (!key) return null;
 
   for (const entry of SUPPLIER_MAP) {

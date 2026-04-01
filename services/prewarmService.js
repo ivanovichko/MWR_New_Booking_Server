@@ -141,10 +141,23 @@ function extractHref(str) {
 // ─── Fetch and cache a single booking ────────────────────────────────────────
 async function fetchAndCacheBooking(bookingId) {
   let dataRow = null;
-  for (const status of [0, 3]) {
+
+  // TA status codes: 0=confirmed, 3=pending, 2=cancelled
+  // Validate first result matches searched ID to avoid false matches
+  for (const status of [0, 3, 2]) {
     const url = `https://traveladvantage.com/admin/bookings/bookingsList/All/${status}/All/null/null/All/${bookingId}`;
     const data = await taPost(url, buildDataTableParams(bookingId));
-    if (data?.data?.length > 0) { dataRow = data.data[0]; break; }
+    if (data?.data?.length > 0) {
+      const row = data.data[0];
+      const parsed = parseDataRow(row);
+      // Validate: either internal ID or supplier ref must match
+      const idMatch = parsed.internalBookingId === bookingId ||
+                      parsed.supplierId === bookingId ||
+                      (parsed.internalBookingId || '').includes(bookingId) ||
+                      bookingId.includes(parsed.internalBookingId || '') ||
+                      (parsed.supplierId || '').toLowerCase() === bookingId.toLowerCase();
+      if (idMatch) { dataRow = row; break; }
+    }
   }
 
   if (!dataRow) throw new Error(`Booking ${bookingId} not found in TA`);
@@ -329,14 +342,8 @@ async function checkPendings(onProgress, isStopped = () => false) {
     try {
       const tags = ticket.tags || [];
 
-      // Pass 1: regex
-      let dateStr = extractDateFromTags(tags);
-
-      // Pass 2: Groq fallback
-      if (!dateStr) {
-        progress(`🤖 #${ticket.id} — no date in tags, trying Groq...`);
-        dateStr = await extractDateFromTagsWithGroq(tags);
-      }
+      // Regex only: MMM-DD or MMM DD
+      const dateStr = extractDateFromTags(tags);
 
       if (!dateStr) {
         progress(`⚠️  #${ticket.id} — no date found in tags: [${tags.join(', ')}]`);
@@ -369,6 +376,7 @@ async function checkPendings(onProgress, isStopped = () => false) {
   }
 
   progress(`🎉 Done — ${results.reopened} reopened, ${results.skipped} left pending, ${results.noDate} no date, ${results.errors} errors`);
+  if (results.reopened > 0) progress(`🔺 Reopened tickets: ${results.reopened} (within 7 days of check-in)`);
   return results;
 }
 
@@ -470,11 +478,13 @@ async function prewarm(onProgress, isStopped = () => false) {
 
       // New booking — check-in date priority
       const dateInfo = checkInPriority(booking.checkIn);
+      const actions = ['note_posted'];
 
       if (dateInfo) {
         progress(`📅 #${ticket.id} — check-in in ${dateInfo.daysUntil} days (${dateInfo.label} priority)`);
         if (dateInfo.priority > 1) {
           await setTicketPriority(ticket.id, dateInfo.priority);
+          actions.push(`priority_${dateInfo.label}`);
           progress(`🔺 #${ticket.id} — priority set to ${dateInfo.label.toUpperCase()}`);
         }
       }
@@ -484,6 +494,7 @@ async function prewarm(onProgress, isStopped = () => false) {
       await postNote(ticket.id, noteHtml);
 
       // Duplicate check — run three parallel searches
+      let dupCount = 0;
       try {
         const [byVendor, byInternal, byEmail] = await Promise.all([
           booking.supplierId        ? searchDuplicates(booking.supplierId,        ticket.id)        : [],
@@ -497,8 +508,10 @@ async function prewarm(onProgress, isStopped = () => false) {
         for (const t of byEmail)    { if (!seen.has(t.id)) seen.set(t.id, { ...t, matchedBy: ['member email'] }); else seen.get(t.id).matchedBy.push('member email'); }
 
         const duplicates = [...seen.values()];
+        dupCount = duplicates.length;
 
         if (duplicates.length > 0) {
+          actions.push(`duplicates_${duplicates.length}`);
           progress(`⚠️ #${ticket.id} — ${duplicates.length} open thread(s) found`);
           const rows = duplicates.map(t =>
             `<tr><td style="padding:4px 8px;"><a href="https://mwrlife.freshdesk.com/a/tickets/${t.id}" target="_blank">#${t.id}</a></td>` +
@@ -515,7 +528,7 @@ async function prewarm(onProgress, isStopped = () => false) {
       }
 
       progress(`✅ #${ticket.id} → ${bookingId} cached + processed as new booking`);
-      results.push({ ticketId: ticket.id, bookingId, status: 'cached', summary, isNewBooking, daysUntil: dateInfo?.daysUntil ?? null });
+      results.push({ ticketId: ticket.id, bookingId, status: 'cached', summary, isNewBooking, daysUntil: dateInfo?.daysUntil ?? null, actions, dupCount });
 
     } catch (err) {
       progress(`❌ #${ticket.id} — ${err.message}`);
@@ -527,7 +540,15 @@ async function prewarm(onProgress, isStopped = () => false) {
 
   const cached   = results.filter(r => r.status === 'cached').length;
   const skipped  = results.filter(r => r.status === 'already_cached').length;
-  progress(`🎉 Prewarm complete — ${cached} cached, ${skipped} already cached, ${results.filter(r => r.status === 'error').length} errors (${tickets.length} total)`);
+  const newBooks = results.filter(r => r.isNewBooking).length;
+  const prioBumped = results.filter(r => r.actions?.some(a => a.startsWith('priority_'))).length;
+  const withDups   = results.filter(r => r.dupCount > 0).length;
+  const errors     = results.filter(r => r.status === 'error').length;
+
+  progress(`🎉 Prewarm complete — ${cached} new cached, ${skipped} already cached, ${errors} errors (${tickets.length} total)`);
+  if (newBooks)    progress(`🆕 New bookings detected: ${newBooks}`);
+  if (prioBumped)  progress(`🔺 Priority bumped: ${prioBumped}`);
+  if (withDups)    progress(`⚠️ Open threads found: ${withDups} tickets`);
   return results;
 }
 

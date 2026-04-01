@@ -226,9 +226,31 @@ function parseBookingHtml(html) {
     body.querySelectorAll(sel).forEach(el => el.remove());
   });
 
+  // Extract Hotel Cancellation Policy block before stripping (it's at the end)
+  let cancellationPolicyHtml = null;
+  const cancelH5 = [...body.querySelectorAll('h5')].find(
+    h => h.textContent.trim().toLowerCase().includes('hotel cancellation policy')
+  );
+  if (cancelH5) {
+    const parts = [cancelH5.outerHTML];
+    let el = cancelH5.nextElementSibling;
+    while (el) { parts.push(el.outerHTML); el = el.nextElementSibling; }
+    cancellationPolicyHtml = parts.join('');
+  }
+
+  // Strip from the T&C agreement phrase onwards (mid-content boilerplate)
+  const tcPhrase = 'By proceeding with this reservation, you agree to all Terms and Conditions';
+  body.querySelectorAll('p, div, span').forEach(el => {
+    if (el.textContent.includes(tcPhrase)) {
+      // Remove this element and all following siblings
+      let cur = el;
+      while (cur) { const next = cur.nextElementSibling; cur.remove(); cur = next; }
+    }
+  });
+
+  // Also strip via h5 terms headers
   const termsHeader = [...body.querySelectorAll('h5')].find(
-    h => h.textContent.trim().toLowerCase().includes('terms and conditions') ||
-         h.textContent.trim().toLowerCase().includes('cancellation policy')
+    h => h.textContent.trim().toLowerCase().includes('terms and conditions')
   );
   if (termsHeader) {
     let el = termsHeader;
@@ -236,6 +258,13 @@ function parseBookingHtml(html) {
   }
 
   body.querySelectorAll('.confirmation_billling_info, .billing_info, .TripProtection').forEach(el => el.remove());
+
+  // Re-append cancellation policy at the end
+  if (cancellationPolicyHtml) {
+    const wrapper = doc.createElement('div');
+    wrapper.innerHTML = cancellationPolicyHtml;
+    body.appendChild(wrapper);
+  }
 
   return {
     cleanHtml: body.innerHTML.trim(),
