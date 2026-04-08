@@ -600,17 +600,33 @@ app.post('/bulk-confirm', async (req, res) => {
   const apiKey = process.env.FRESHDESK_API_KEY;
   const auth   = 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64');
 
-  // Fetch all open/pending tickets with this tag (paginate up to 10 pages)
+  console.log(`🏨 Bulk confirm: fetching tickets with tag "${tag}"`);
+
+  // Fetch open tickets with tag, then pending — merge results
   let tickets = [];
-  for (let page = 1; page <= 10; page++) {
-    const query = encodeURIComponent(`tag:'${tag}' AND (status:2 OR status:3)`);
-    const r = await fetch(`https://${domain}/api/v2/search/tickets?query="${query}"&page=${page}`, { headers: { Authorization: auth } });
-    if (!r.ok) break;
-    const data = await r.json();
-    const batch = data.results || [];
-    tickets.push(...batch);
-    if (batch.length < 30) break;
+  for (const status of [2, 3]) {
+    for (let page = 1; page <= 10; page++) {
+      const q = `tag:'${tag}' AND status:${status}`;
+      const url = `https://${domain}/api/v2/search/tickets?query="${encodeURIComponent(q)}"&page=${page}`;
+      console.log(`🔍 Fetching: ${url}`);
+      const r = await fetch(url, { headers: { Authorization: auth } });
+      if (!r.ok) {
+        const body = await r.text();
+        console.warn(`⚠️ Freshdesk search error ${r.status}: ${body.slice(0,200)}`);
+        break;
+      }
+      const data = await r.json();
+      const batch = data.results || [];
+      console.log(`📋 status:${status} page:${page} — ${batch.length} results`);
+      tickets.push(...batch);
+      if (batch.length < 30) break;
+    }
   }
+
+  // Deduplicate by ticket id
+  const seen = new Set();
+  tickets = tickets.filter(t => { if (seen.has(t.id)) return false; seen.add(t.id); return true; });
+  console.log(`📋 Total unique tickets: ${tickets.length}`);
 
   const bookings = [];
   const errors   = [];
