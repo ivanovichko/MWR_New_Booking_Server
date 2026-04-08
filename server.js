@@ -607,7 +607,7 @@ app.post('/bulk-confirm', async (req, res) => {
   for (const status of [2, 3]) {
     for (let page = 1; page <= 10; page++) {
       const q = `tag:'${tag}' AND status:${status}`;
-      const url = `https://${domain}/api/v2/search/tickets?query="${encodeURIComponent(q)}"&page=${page}`;
+      const url = `https://${domain}/api/v2/search/tickets?query="${q.replace(/ /g, '%20')}"&page=${page}`;
       console.log(`🔍 Fetching: ${url}`);
       const r = await fetch(url, { headers: { Authorization: auth } });
       if (!r.ok) {
