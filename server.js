@@ -591,6 +591,77 @@ app.post('/send-reply', async (req, res) => {
   }
 });
 
+// ─── Bulk confirm ─────────────────────────────────────────────────────────────
+app.post('/bulk-confirm', async (req, res) => {
+  const { tag } = req.body;
+  if (!tag) return res.status(400).json({ error: 'tag is required' });
+
+  const domain = process.env.FRESHDESK_DOMAIN;
+  const apiKey = process.env.FRESHDESK_API_KEY;
+  const auth   = 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64');
+
+  // Fetch all open/pending tickets with this tag (paginate up to 10 pages)
+  let tickets = [];
+  for (let page = 1; page <= 10; page++) {
+    const query = encodeURIComponent(`tag:'${tag}' AND (status:2 OR status:3)`);
+    const r = await fetch(`https://${domain}/api/v2/search/tickets?query="${query}"&page=${page}`, { headers: { Authorization: auth } });
+    if (!r.ok) break;
+    const data = await r.json();
+    const batch = data.results || [];
+    tickets.push(...batch);
+    if (batch.length < 30) break;
+  }
+
+  const bookings = [];
+  const errors   = [];
+
+  for (const ticket of tickets) {
+    try {
+      // Check cache first
+      let parsed = null;
+      const cached = await getCachedBooking(ticket.id.toString());
+
+      if (cached && cached.parsed) {
+        parsed = cached.parsed;
+      } else {
+        // Try to extract booking ID from subject/description
+        const content = [ticket.subject || '', ticket.description_text || ticket.description || ''].join('\n').slice(0, 2000);
+        const idMatch = content.match(/\b([A-Z0-9]{5,20})\b/g);
+        if (!idMatch) { errors.push({ ticketId: ticket.id, subject: ticket.subject, reason: 'No booking ID found' }); continue; }
+
+        // Try each candidate
+        let found = false;
+        for (const candidate of idMatch.slice(0, 5)) {
+          try {
+            const fetched = await fetchAndCacheBooking(candidate);
+            if (fetched) { parsed = fetched; found = true; break; }
+          } catch (e) { /* try next */ }
+        }
+        if (!found) { errors.push({ ticketId: ticket.id, subject: ticket.subject, reason: 'Could not fetch booking' }); continue; }
+      }
+
+      const { booking, details } = parsed;
+      bookings.push({
+        ticketId:        ticket.id,
+        subject:         ticket.subject,
+        internalId:      booking.internalBookingId,
+        supplierId:      booking.supplierId,
+        guestName:       booking.guestName,
+        checkIn:         booking.checkIn,
+        checkOut:        booking.checkOut,
+        roomType:        booking.mwrRoomType || booking.supplierRoomType,
+        paxLine:         details?.paxLine || null,
+        requests:        details?.requests || null,
+        hotelName:       details?.hotelName || booking.supplierName,
+      });
+    } catch (err) {
+      errors.push({ ticketId: ticket.id, subject: ticket.subject, reason: err.message });
+    }
+  }
+
+  res.json({ success: true, bookings, errors, total: tickets.length });
+});
+
 // ─── Settings: Prompts ────────────────────────────────────────────────────────
 app.get('/settings/prompts', async (req, res) => {
   try { res.json(await getPrompts()); }
