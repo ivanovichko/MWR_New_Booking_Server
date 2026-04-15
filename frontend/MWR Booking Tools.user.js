@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      2.6
+// @version      2.7
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -756,16 +756,19 @@ async function showGuidedPrewarmModal() {
         const postNoteBtn2 = document.createElement('button');
         postNoteBtn2.textContent = '📋 Post Member Note';
         postNoteBtn2.style.cssText = 'padding:4px 8px;border:1px solid #28a745;border-radius:4px;background:#fff;color:#28a745;font-size:11px;cursor:pointer;font-weight:500;';
-        postNoteBtn2.onclick = () => withButtonLoading(postNoteBtn2, '⏳ Posting...', async () => {
+        postNoteBtn2.onclick = async () => {
+          postNoteBtn2.disabled = true; postNoteBtn2.textContent = '⏳';
+          const v = val => val || '—';
           const th = 'padding:5px 8px;background:#f5f5f5;border:1px solid #ddd;text-align:left;font-weight:600;font-size:12px;color:#444;';
           const td = 'padding:5px 8px;border:1px solid #ddd;color:#222;font-size:12px;';
-          const memberRows = [['Name',user.fullName||user.name||''],['Email',user.email||''],['Phone',user.phone||''],['Country',user.country||''],['Status',user.status||'']].filter(([,v])=>v);
-          const rowsHtml = memberRows.map(([l,v]) => `<tr><th style="${th}">${l}</th><td style="${td}">${v}</td></tr>`).join('');
-          const noteHtml = `<div style="font-family:system-ui,sans-serif;"><h4 style="margin:0 0 8px;font-size:14px;">👤 Member — ${user.fullName||user.name||''}</h4><table style="width:100%;border-collapse:collapse;">${rowsHtml}</table></div>`;
+          const noteRows = [['Name', user.fullName||user.name], ['Email', user.email], ['Phone', user.phone], ['Country', user.country], ['Status', user.status], ['Instance', user.instance]].filter(([,val]) => val);
+          const rowsHtml = noteRows.map(([l,val]) => `<tr><th style="${th}">${l}</th><td style="${td}">${v(val)}</td></tr>`).join('');
+          const noteHtml = `<div style="font-family:system-ui,sans-serif;"><h4 style="margin:0 0 8px;font-size:14px;">👤 Member — ${v(user.fullName||user.name)}</h4><table style="width:100%;border-collapse:collapse;">${rowsHtml}</table></div>`;
           const { ok } = await gmPost(`${BACKEND_URL}/post-note`, { freshdeskTicketId: String(t.id), noteHtml });
+          postNoteBtn2.disabled = false; postNoteBtn2.textContent = '📋 Post Member Note';
           if (ok) { showToast('✅ Member note posted!', 'success'); refreshThread(); }
           else showToast('❌ Failed to post note.', 'error');
-        });
+        };
         actionRow.appendChild(postNoteBtn2);
         customerSection.appendChild(actionRow);
       }
