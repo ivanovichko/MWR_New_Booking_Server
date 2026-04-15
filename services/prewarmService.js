@@ -552,4 +552,4 @@ async function prewarm(onProgress, isStopped = () => false) {
   return results;
 }
 
-module.exports = { prewarm, fetchAndCacheBooking, extractBookingId, checkInPriority, checkPendings };
+module.exports = { prewarm, fetchAndCacheBooking, extractBookingId, checkInPriority, checkPendings, postNote, setTicketPriority };
