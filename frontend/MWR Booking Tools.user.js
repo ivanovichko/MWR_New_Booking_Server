@@ -619,6 +619,11 @@ async function showGuidedPrewarmModal() {
     columns.appendChild(rightCol);
     body.appendChild(columns);
 
+    // Reply panel placeholder — populated when booking loads
+    const replyPanelWrapper = document.createElement('div');
+    replyPanelWrapper.style.cssText = 'display:none;border:1px solid #eee;border-radius:8px;overflow:hidden;flex-shrink:0;';
+    body.appendChild(replyPanelWrapper);
+
     // Ticket card with description — fetch immediately (fast, no Groq)
     const card = document.createElement('div');
     card.style.cssText = 'border:1px solid #eee;border-radius:8px;overflow:hidden;display:flex;flex-direction:column;flex:1;';
@@ -676,6 +681,7 @@ async function showGuidedPrewarmModal() {
       customerSection.innerHTML = '<div style="color:#999;font-size:11px;">No member data</div>';
 
       if (!bd) {
+        replyPanelWrapper.style.display = 'none';
         const msg = document.createElement('div');
         msg.style.cssText = 'color:#dc3545;font-size:12px;margin-bottom:8px;';
         msg.textContent = currentBookingId ? `⚠️ Could not fetch booking for "${currentBookingId}".` : '⚠️ No booking ID found in this ticket.';
@@ -772,19 +778,100 @@ async function showGuidedPrewarmModal() {
         if (ok) { showToast('✅ Note posted!', 'success', 2000); refreshFreshdeskTicket(); }
         else showToast('❌ ' + (cr?.error || 'Error'), 'error');
       });
-      const replyBtnEl = document.createElement('button');
-      replyBtnEl.textContent = '💬 Reply';
-      replyBtnEl.style.cssText = 'flex:1;padding:7px;border:1px solid #0056d2;border-radius:5px;background:#fff;color:#0056d2;font-size:12px;font-weight:600;cursor:pointer;';
-      replyBtnEl.onclick = () => {
-        if (bd.booking && bd.user) {
-          const cacheKey = bd.booking.internalBookingId || currentBookingId;
-          bookingCache.set(cacheKey, { booking: bd.booking, details: bd.details, user: bd.user, supplier: bd.supplier || null, noteHtml: '' });
-          lastViewedBookingId = cacheKey; lastViewedUserSummary = bd.user;
-          activateViewButton('taReplyBtn'); showReplyModal(String(t.id));
-        } else showToast('No member data available for reply.', 'warning');
-      };
-      replyRowEl.appendChild(postNoteBtn); replyRowEl.appendChild(replyBtnEl);
+      replyRowEl.appendChild(postNoteBtn);
       bookingSection.appendChild(replyRowEl);
+
+      // ── Inline reply panel ─────────────────────────────────────────────────
+      replyPanelWrapper.innerHTML = '';
+      replyPanelWrapper.style.display = '';
+
+      const supplierObj    = bd.supplier || null;
+      const customerEmail  = user && user.email ? user.email : null;
+      const suppEmailFill  = supplierObj && supplierObj.email ? supplierObj.email : '';
+
+      const rTabStyle = (color, active) =>
+        `padding:8px 16px;border:none;border-bottom:2px solid ${active ? color : 'transparent'};background:${active ? '#fff' : 'transparent'};color:${color};font-size:12px;font-weight:600;cursor:pointer;`;
+
+      const replyTabBar    = document.createElement('div');
+      replyTabBar.style.cssText = 'display:flex;background:#f8f9fa;border-bottom:1px solid #eee;';
+      const replyBody      = document.createElement('div');
+      replyBody.style.cssText = 'padding:10px 14px;';
+
+      const custTabBtn = document.createElement('button');
+      custTabBtn.textContent = '📩 Customer';
+      const suppTabBtn = document.createElement('button');
+      suppTabBtn.textContent = '📤 Supplier';
+
+      const setReplyTab = (type) => {
+        custTabBtn.style.cssText = rTabStyle('#0056d2', type === 'customer');
+        suppTabBtn.style.cssText = rTabStyle('#28a745', type === 'supplier');
+        replyBody.innerHTML = '';
+
+        if (type === 'customer') {
+          if (!customerEmail) {
+            replyBody.innerHTML = '<div style="color:#999;font-size:12px;padding:4px 0;">No customer email found.</div>';
+            return;
+          }
+          showReplyComposer('customer', customerEmail, booking, details, user, supplierObj, replyBody, null, String(t.id));
+        } else {
+          // Supplier — editable To: field + textarea + send
+          const toRow = document.createElement('div');
+          toRow.style.cssText = 'display:flex;gap:6px;align-items:center;margin-bottom:8px;';
+          const toLabel = document.createElement('span');
+          toLabel.style.cssText = 'font-size:12px;color:#666;font-weight:500;white-space:nowrap;';
+          toLabel.textContent = 'To:';
+          const toInput = document.createElement('input');
+          toInput.type = 'text'; toInput.value = suppEmailFill;
+          toInput.placeholder = 'Supplier email address...';
+          toInput.style.cssText = 'flex:1;padding:5px 10px;border:1px solid #ddd;border-radius:5px;font-size:12px;';
+          toRow.appendChild(toLabel); toRow.appendChild(toInput);
+          replyBody.appendChild(toRow);
+
+          const suppTA = document.createElement('textarea');
+          suppTA.style.cssText = 'width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid #ddd;border-radius:6px;font-size:13px;font-family:system-ui,sans-serif;resize:vertical;min-height:140px;line-height:1.5;outline:none;margin-bottom:8px;';
+          suppTA.value = buildReplySignature('supplier', booking, details, user);
+          attachMacroTrigger(suppTA, booking, details, user);
+          setTimeout(() => {
+            const pos = suppTA.value.indexOf('[your message here]');
+            if (pos !== -1) { suppTA.focus(); suppTA.setSelectionRange(pos, pos + '[your message here]'.length); }
+          }, 50);
+          replyBody.appendChild(suppTA);
+
+          const suppActions = document.createElement('div');
+          suppActions.style.cssText = 'display:flex;gap:8px;';
+
+          const suppSendBtn = document.createElement('button');
+          suppSendBtn.textContent = '📤 Send to Supplier';
+          suppSendBtn.style.cssText = 'padding:7px 14px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;background:#28a745;color:#fff;';
+          suppSendBtn.onclick = async () => {
+            const msgBody = suppTA.value.trim();
+            const toEmail = toInput.value.trim();
+            if (!msgBody) { showToast('Message is empty.', 'warning'); return; }
+            if (!toEmail) { showToast('Enter supplier email.', 'warning'); return; }
+            suppSendBtn.disabled = true; suppSendBtn.textContent = 'Sending...';
+            const noteHtml = '<p>' + msgBody.replace(/\n/g, '<br>') + '</p>';
+            const { ok } = await gmPost(BACKEND_URL + '/send-reply', { freshdeskTicketId: String(t.id), toEmail, bodyHtml: noteHtml });
+            if (ok) { suppSendBtn.textContent = '✅ Sent!'; showToast('Reply sent to supplier.'); refreshFreshdeskTicket(); }
+            else { suppSendBtn.textContent = '❌ Failed'; suppSendBtn.disabled = false; }
+          };
+
+          const suppCopyBtn = document.createElement('button');
+          suppCopyBtn.textContent = '📋 Copy';
+          suppCopyBtn.style.cssText = 'padding:7px 14px;border:1px solid #ddd;border-radius:6px;cursor:pointer;font-size:13px;background:#fff;color:#555;';
+          suppCopyBtn.onclick = () => {
+            navigator.clipboard.writeText(suppTA.value).then(() => { suppCopyBtn.textContent = '✅ Copied!'; setTimeout(() => { suppCopyBtn.textContent = '📋 Copy'; }, 2000); });
+          };
+
+          suppActions.appendChild(suppSendBtn); suppActions.appendChild(suppCopyBtn);
+          replyBody.appendChild(suppActions);
+        }
+      };
+
+      custTabBtn.onclick = () => setReplyTab('customer');
+      suppTabBtn.onclick = () => setReplyTab('supplier');
+      replyTabBar.appendChild(custTabBtn); replyTabBar.appendChild(suppTabBtn);
+      replyPanelWrapper.appendChild(replyTabBar); replyPanelWrapper.appendChild(replyBody);
+      setReplyTab(customerEmail ? 'customer' : 'supplier');
 
       confirmBtn.onclick = async () => {
         confirmBtn.disabled = true; confirmBtn.textContent = '⏳ Processing...';
