@@ -377,7 +377,7 @@ app.post('/merge-ticket', async (req, res) => {
   try {
     const sourceLink = `https://mwrlife.freshdesk.com/a/tickets/${sourceTicketId}`;
     const descHtml = description || '';
-    console.log(`🔀 desc length: ${descHtml.length}, first 300 chars: [${descHtml.slice(0, 300)}]`);
+    console.log(`🔀 desc length: ${descHtml.length}`);
     const noteHtml = `<p><a href="${sourceLink}">${sourceLink}</a></p>${descHtml}`;
 
     // Post note on target (duplicate) ticket: source link + description
@@ -668,9 +668,19 @@ app.post('/send-reply', async (req, res) => {
   }
 });
 
-// ─── Guided prewarm ───────────────────────────────────────────────────────────
+// Fast ticket fetch — just HTML, no Groq
+app.get('/guided-prewarm/ticket/:id', async (req, res) => {
+  const ticketId = req.params.id;
+  const domain   = process.env.FRESHDESK_DOMAIN;
+  const apiKey   = process.env.FRESHDESK_API_KEY;
+  const auth     = 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64');
+  const tRes = await fetch(`https://${domain}/api/v2/tickets/${ticketId}`, { headers: { Authorization: auth } });
+  if (!tRes.ok) return res.status(500).json({ error: 'Could not fetch ticket' });
+  const ticket = await tRes.json();
+  res.json({ ticket });
+});
 
-// Fetch low-priority tickets for guided prewarm
+
 app.get('/guided-prewarm/tickets', async (req, res) => {
   const domain  = process.env.FRESHDESK_DOMAIN;
   const apiKey  = process.env.FRESHDESK_API_KEY;
@@ -709,26 +719,20 @@ app.get('/guided-prewarm/analyse/:id', async (req, res) => {
   console.log(`🎯 Analysing ticket #${ticketId}`);
 
   try {
-    // Fetch full ticket with HTML description
+    // Fetch ticket for Groq (needs subject + description_text)
     const tRes = await fetch(`https://${domain}/api/v2/tickets/${ticketId}`, { headers: { Authorization: auth } });
-    if (!tRes.ok) {
-      const b = await tRes.text();
-      console.error(`❌ Ticket fetch failed ${tRes.status}: ${b.slice(0,200)}`);
-      return res.status(500).json({ error: `Could not fetch ticket: ${tRes.status}` });
-    }
+    if (!tRes.ok) return res.status(500).json({ error: `Could not fetch ticket: ${tRes.status}` });
     const ticket = await tRes.json();
-    console.log(`📋 Ticket fetched: "${ticket.subject?.slice(0,50)}"`);
 
-    // Fetch conversation count
+    // Fetch conversation count in parallel
     const cRes = await fetch(`https://${domain}/api/v2/tickets/${ticketId}/conversations`, { headers: { Authorization: auth } });
     const convData = cRes.ok ? await cRes.json() : [];
     const conversationCount = Array.isArray(convData) ? convData.length : 0;
     console.log(`💬 Conversations: ${conversationCount}`);
 
-    // If convs > 2, skip
     if (conversationCount > 2) {
       console.log(`⏭ Skipping — convs > 2`);
-      return res.json({ skip: true, reason: 'conversations > 2', ticket });
+      return res.json({ skip: true, reason: 'conversations > 2' });
     }
 
     // Groq: extract booking ID
@@ -736,7 +740,7 @@ app.get('/guided-prewarm/analyse/:id', async (req, res) => {
     const { bookingId, isNewBooking } = await extractBookingId(ticket, conversationCount);
     console.log(`📦 bookingId=${bookingId} isNewBooking=${isNewBooking}`);
 
-    // Try to fetch booking if ID found
+    // Try to fetch booking
     let bookingData = null;
     if (bookingId) {
       try {
@@ -753,7 +757,7 @@ app.get('/guided-prewarm/analyse/:id', async (req, res) => {
       }
     }
 
-    res.json({ skip: false, ticket, conversationCount, bookingId, isNewBooking, bookingData });
+    res.json({ skip: false, conversationCount, bookingId, isNewBooking, bookingData });
   } catch (err) {
     console.error(`❌ Analyse error for ticket #${ticketId}: ${err.message}`, err.stack);
     res.status(500).json({ error: err.message });
