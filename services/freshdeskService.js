@@ -1,4 +1,5 @@
-const fetch = require('node-fetch');
+const fetch    = require('node-fetch');
+const FormData = require('form-data');
 
 function getBaseUrl() {
   return `https://${process.env.FRESHDESK_DOMAIN}/api/v2`;
@@ -205,4 +206,27 @@ async function getTicketContext(ticketId) {
   };
 }
 
-module.exports = { getAuthHeader, addNote, sendEmail, setTicketPending, updateTicket, tagTicket, searchDuplicates, getTicketContext };
+/**
+ * Sends an outbound reply with file attachments (multipart/form-data).
+ * files: array of multer file objects { buffer, originalname, mimetype }
+ */
+async function sendEmailWithAttachments(ticketId, toEmail, bodyHtml, files = []) {
+  const fd = new FormData();
+  fd.append('body', bodyHtml);
+  fd.append('to_emails[]', toEmail);
+  for (const f of files) {
+    fd.append('attachments[]', f.buffer, { filename: f.originalname, contentType: f.mimetype });
+  }
+  const response = await fetch(`${getBaseUrl()}/tickets/${ticketId}/reply`, {
+    method: 'POST',
+    headers: { 'Authorization': getAuthHeader(), ...fd.getHeaders() },
+    body: fd,
+  });
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Freshdesk sendEmailWithAttachments failed ${response.status}: ${err}`);
+  }
+  return response.json();
+}
+
+module.exports = { getAuthHeader, addNote, sendEmail, sendEmailWithAttachments, setTicketPending, updateTicket, tagTicket, searchDuplicates, getTicketContext };

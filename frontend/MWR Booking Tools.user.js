@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      2.1
+// @version      2.3
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -541,16 +541,44 @@ async function showGuidedPrewarmModal() {
     style: 'top:40px;left:50%;transform:translateX(-50%);width:1600px;max-width:calc(100vw - 24px);max-height:96vh;',
     bodyStyle: 'display:flex;flex-direction:column;gap:12px;',
   });
+
+  // ── Priority picker ────────────────────────────────────────────────────────
+  const filterKey = await new Promise((resolve) => {
+    body.innerHTML = '';
+    const label = document.createElement('div');
+    label.style.cssText = 'font-size:13px;color:#555;margin-bottom:8px;text-align:center;';
+    label.textContent = 'Which queue would you like to work on?';
+    body.appendChild(label);
+
+    const grid = document.createElement('div');
+    grid.style.cssText = 'display:flex;gap:10px;justify-content:center;';
+
+    const options = [
+      { key: 'high',    label: 'High',    color: '#dc3545', bg: '#fff5f5', icon: '🔴' },
+      { key: 'medium',  label: 'Medium',  color: '#fd7e14', bg: '#fff8f0', icon: '🟡' },
+      { key: 'low',     label: 'Low',     color: '#28a745', bg: '#f5fff8', icon: '🟢' },
+      { key: 'pending', label: 'Pending', color: '#0056d2', bg: '#f0f5ff', icon: '⏳' },
+    ];
+    options.forEach(function(opt) {
+      const btn = document.createElement('button');
+      btn.style.cssText = 'padding:14px 22px;border:2px solid ' + opt.color + ';border-radius:8px;background:' + opt.bg + ';color:' + opt.color + ';font-size:14px;font-weight:600;cursor:pointer;min-width:100px;';
+      btn.innerHTML = opt.icon + '<br><span style="font-size:13px;">' + opt.label + '</span>';
+      btn.onclick = function() { resolve(opt.key); };
+      grid.appendChild(btn);
+    });
+    body.appendChild(grid);
+  });
+
   body.innerHTML = '<div style="color:#999;font-size:13px;">Loading tickets...</div>';
 
-  const { ok, data } = await gmGet(`${BACKEND_URL}/guided-prewarm/tickets`);
+  const { ok, data } = await gmGet(`${BACKEND_URL}/guided-prewarm/tickets?filter=${filterKey}`);
   if (!ok || !data.tickets) {
     body.innerHTML = '<div style="color:red;">❌ Could not load tickets.</div>';
     return;
   }
 
   const tickets = data.tickets;
-  if (!tickets.length) { body.innerHTML = '<div style="color:#999;font-size:13px;">No low priority tickets found.</div>'; return; }
+  if (!tickets.length) { body.innerHTML = '<div style="color:#999;font-size:13px;">No ' + filterKey + ' tickets found.</div>'; return; }
 
   let idx = 0;
   let stopped = false;
@@ -839,8 +867,11 @@ async function showGuidedPrewarmModal() {
           }, 50);
           replyBody.appendChild(suppTA);
 
+          const { el: suppAttachEl, getFiles: getSuppFiles } = buildAttachmentUI();
+          replyBody.appendChild(suppAttachEl);
+
           const suppActions = document.createElement('div');
-          suppActions.style.cssText = 'display:flex;gap:8px;';
+          suppActions.style.cssText = 'display:flex;gap:8px;margin-top:4px;';
 
           const suppSendBtn = document.createElement('button');
           suppSendBtn.textContent = '📤 Send to Supplier';
@@ -852,7 +883,18 @@ async function showGuidedPrewarmModal() {
             if (!toEmail) { showToast('Enter supplier email.', 'warning'); return; }
             suppSendBtn.disabled = true; suppSendBtn.textContent = 'Sending...';
             const noteHtml = '<p>' + msgBody.replace(/\n/g, '<br>') + '</p>';
-            const { ok } = await gmPost(BACKEND_URL + '/send-reply', { freshdeskTicketId: String(t.id), toEmail, bodyHtml: noteHtml });
+            const attachedFiles = getSuppFiles();
+            var ok;
+            if (attachedFiles.length > 0) {
+              var fd = new FormData();
+              fd.append('freshdeskTicketId', String(t.id));
+              fd.append('toEmail', toEmail);
+              fd.append('bodyHtml', noteHtml);
+              attachedFiles.forEach(function(f) { fd.append('files', f, f.name); });
+              ok = (await gmPostForm(BACKEND_URL + '/send-reply', fd)).ok;
+            } else {
+              ok = (await gmPost(BACKEND_URL + '/send-reply', { freshdeskTicketId: String(t.id), toEmail, bodyHtml: noteHtml })).ok;
+            }
             if (ok) { suppSendBtn.textContent = '✅ Sent!'; showToast('Reply sent to supplier.'); refreshFreshdeskTicket(); }
             else { suppSendBtn.textContent = '❌ Failed'; suppSendBtn.disabled = false; }
           };
@@ -2039,6 +2081,44 @@ async function runExtractBookingId(triggerBtn, outputArea) {
   }
 }
 
+function buildAttachmentUI() {
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'margin-top:6px;display:flex;flex-wrap:wrap;align-items:center;gap:6px;';
+
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file'; fileInput.multiple = true;
+  fileInput.style.display = 'none';
+
+  const attachBtn = document.createElement('button');
+  attachBtn.type = 'button'; attachBtn.textContent = '📎 Attach files';
+  attachBtn.style.cssText = 'padding:4px 10px;border:1px solid #ddd;border-radius:5px;background:#fff;color:#555;font-size:12px;cursor:pointer;';
+  attachBtn.onclick = () => fileInput.click();
+
+  const fileList = document.createElement('div');
+  fileList.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;';
+
+  let files = [];
+
+  fileInput.onchange = () => {
+    files = Array.from(fileInput.files);
+    fileList.innerHTML = '';
+    files.forEach(function(f, i) {
+      const tag = document.createElement('span');
+      tag.style.cssText = 'display:flex;align-items:center;gap:4px;padding:2px 8px;background:#e9ecef;border-radius:12px;font-size:11px;color:#333;';
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button'; removeBtn.textContent = '×';
+      removeBtn.style.cssText = 'background:none;border:none;cursor:pointer;color:#999;font-size:13px;padding:0;line-height:1;';
+      removeBtn.onclick = (function(idx, el) { return function() { files.splice(idx, 1); fileList.removeChild(el); }; })(i, tag);
+      tag.appendChild(document.createTextNode('📄 ' + f.name + ' '));
+      tag.appendChild(removeBtn);
+      fileList.appendChild(tag);
+    });
+  };
+
+  wrap.appendChild(attachBtn); wrap.appendChild(fileInput); wrap.appendChild(fileList);
+  return { el: wrap, getFiles: function() { return files; } };
+}
+
 function buildReplySignature(recipientType, booking, details, user) {
   const stripHtml = (s) => s ? s.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : '';
   const rawName = user && (user.fullName || user.name) ? (user.fullName || user.name).split(' ')[0] : 'there';
@@ -2183,6 +2263,10 @@ function showReplyComposer(recipientType, toEmail, booking, details, user, suppl
     container.appendChild(replyArea);
   }
 
+  // Attachment picker
+  const { el: attachEl, getFiles } = buildAttachmentUI();
+  container.appendChild(attachEl);
+
   // Send + cancel actions
   actionsArea.style.display = 'flex';
   container.appendChild(actionsArea);
@@ -2197,7 +2281,18 @@ function showReplyComposer(recipientType, toEmail, booking, details, user, suppl
     if (!tid) { showToast('No ticket detected.', 'error'); return; }
     sendBtn.disabled = true; sendBtn.textContent = 'Sending...';
     const noteHtml = '<p>' + body.replace(/\n/g, '<br>') + '</p>';
-    const { ok } = await gmPost(BACKEND_URL + '/send-reply', { freshdeskTicketId: tid, toEmail, bodyHtml: noteHtml });
+    const attachedFiles = getFiles();
+    var ok;
+    if (attachedFiles.length > 0) {
+      var fd = new FormData();
+      fd.append('freshdeskTicketId', tid);
+      fd.append('toEmail', toEmail);
+      fd.append('bodyHtml', noteHtml);
+      attachedFiles.forEach(function(f) { fd.append('files', f, f.name); });
+      ok = (await gmPostForm(BACKEND_URL + '/send-reply', fd)).ok;
+    } else {
+      ok = (await gmPost(BACKEND_URL + '/send-reply', { freshdeskTicketId: tid, toEmail, bodyHtml: noteHtml })).ok;
+    }
     if (ok) { sendBtn.textContent = '✅ Sent!'; showToast('Reply sent to ' + label + '.'); refreshFreshdeskTicket(); }
     else    { sendBtn.textContent = '❌ Failed'; sendBtn.disabled = false; }
   };
@@ -2902,6 +2997,26 @@ function gmPost(url, data) {
         }
       },
       onerror: () => resolve({ ok: false, status: 0, data: { error: `Could not reach server. First request may take ~30s to wake up Render.` } }),
+    });
+  });
+}
+
+function gmPostForm(url, formData) {
+  return new Promise((resolve) => {
+    GM_xmlhttpRequest({
+      method: 'POST',
+      url,
+      data: formData,
+      // No Content-Type header — GM_xmlhttpRequest sets multipart boundary automatically
+      onload: (res) => {
+        try {
+          const json = JSON.parse(res.responseText);
+          resolve({ ok: res.status >= 200 && res.status < 300, data: json });
+        } catch (e) {
+          resolve({ ok: false, data: { error: 'Invalid JSON response' } });
+        }
+      },
+      onerror: () => resolve({ ok: false, data: { error: 'Could not reach server.' } }),
     });
   });
 }

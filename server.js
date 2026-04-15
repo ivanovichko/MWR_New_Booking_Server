@@ -1,12 +1,14 @@
 require('dotenv').config();
 const express = require('express');
 const path    = require('path');
+const multer  = require('multer');
+const upload  = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 const { parseDataRow, parseBookingHtml } = require('./services/parserService');
 const { parseUserHtml, findUser }        = require('./services/userService');
 const { buildNoteHtml }                  = require('./services/noteBuilder');
 const { lookupSupplier }                 = require('./services/supplierService');
 const { aiAssist, findHotelEmail }       = require('./services/aiService');
-const { getAuthHeader, addNote, sendEmail, setTicketPending, tagTicket, searchDuplicates, getTicketContext } = require('./services/freshdeskService');
+const { getAuthHeader, addNote, sendEmail, sendEmailWithAttachments, setTicketPending, tagTicket, searchDuplicates, getTicketContext } = require('./services/freshdeskService');
 const { initDb, getCachedBooking, cacheBooking, storeSession, getPrompts, createPrompt, updatePrompt, deletePrompt, getMacros, createMacro, updateMacro, deleteMacro, storeFreshdeskSession } = require('./services/dbService');
 const { prewarm, fetchAndCacheBooking, extractBookingId, checkPendings, checkInPriority, setTicketPriority, postNote } = require('./services/prewarmService');
 const { taGet, taPost }                  = require('./services/taAuthService');
@@ -510,14 +512,20 @@ app.post('/extract-booking-id', async (req, res) => {
 });
 
 // ─── Send outbound reply to supplier or customer ──────────────────────────────
-app.post('/send-reply', async (req, res) => {
+// Accepts multipart/form-data (with files[]) or plain JSON (no attachments).
+app.post('/send-reply', upload.array('files'), async (req, res) => {
   const { freshdeskTicketId, toEmail, bodyHtml } = req.body;
   if (!freshdeskTicketId || !toEmail || !bodyHtml)
     return res.status(400).json({ error: 'freshdeskTicketId, toEmail, and bodyHtml are required' });
 
-  console.log(`\n📤 Outbound reply — ticket ${freshdeskTicketId} → ${toEmail}`);
+  const files = req.files || [];
+  console.log(`\n📤 Outbound reply — ticket ${freshdeskTicketId} → ${toEmail} (${files.length} attachment(s))`);
   try {
-    await sendEmail(freshdeskTicketId, toEmail, null, bodyHtml);
+    if (files.length > 0) {
+      await sendEmailWithAttachments(freshdeskTicketId, toEmail, bodyHtml, files);
+    } else {
+      await sendEmail(freshdeskTicketId, toEmail, null, bodyHtml);
+    }
     console.log(`✅ Reply sent to ${toEmail}`);
     res.json({ success: true });
   } catch (err) {
@@ -543,16 +551,29 @@ app.get('/guided-prewarm/ticket/:id', async (req, res) => {
 });
 
 
+// filter → { priority, status } mapping — Freshdesk priority: 1=Low, 2=Medium, 3=High, 4=Urgent
+const GUIDED_FILTERS = {
+  low:     { priority: 1, status: FD_STATUS.OPEN },
+  medium:  { priority: 2, status: FD_STATUS.OPEN },
+  high:    { priority: 3, status: FD_STATUS.OPEN },
+  pending: { priority: null, status: FD_STATUS.PENDING },
+};
+
 app.get('/guided-prewarm/tickets', async (req, res) => {
   const domain  = process.env.FRESHDESK_DOMAIN;
   const agentId = process.env.FRESHDESK_AGENT_ID;
   if (!agentId) return res.status(500).json({ error: 'FRESHDESK_AGENT_ID not set' });
   const auth = getAuthHeader();
-  console.log(`🎯 Guided prewarm: fetching low-priority tickets for agent ${agentId}`);
+
+  const filterKey = (req.query.filter || 'low').toLowerCase();
+  const filter = GUIDED_FILTERS[filterKey] || GUIDED_FILTERS.low;
+  console.log(`🎯 Guided prewarm: fetching ${filterKey} tickets for agent ${agentId}`);
 
   let tickets = [];
   for (let page = 1; page <= 10; page++) {
-    const q = `priority:1 AND agent_id:${agentId} AND status:${FD_STATUS.OPEN}`;
+    const parts = [`agent_id:${agentId}`, `status:${filter.status}`];
+    if (filter.priority) parts.push(`priority:${filter.priority}`);
+    const q = parts.join(' AND ');
     const url = `https://${domain}/api/v2/search/tickets?query="${q.replace(/ /g, '%20')}"&page=${page}`;
     console.log(`🔍 Fetching: ${url}`);
     const r = await fetch(url, { headers: { Authorization: auth } });
