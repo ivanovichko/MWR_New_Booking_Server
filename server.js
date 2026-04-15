@@ -377,16 +377,26 @@ app.post('/merge-ticket', async (req, res) => {
   try {
     const sourceLink = `https://mwrlife.freshdesk.com/a/tickets/${sourceTicketId}`;
     const descHtml = description || '';
-    console.log(`🔀 Merge note desc preview: ${descHtml.slice(0, 200)}`);
+    console.log(`🔀 desc length: ${descHtml.length}, first 300 chars: [${descHtml.slice(0, 300)}]`);
     const noteHtml = `<p><a href="${sourceLink}">${sourceLink}</a></p>${descHtml}`;
 
-    // Post note on target (duplicate) ticket
+    // Post note on target (duplicate) ticket: source link + description
     const noteRes = await fetch(`https://${domain}/api/v2/tickets/${targetTicketId}/notes`, {
       method: 'POST',
       headers: { 'Authorization': auth, 'Content-Type': 'application/json' },
       body: JSON.stringify({ body: noteHtml, private: true }),
     });
-    if (!noteRes.ok) { const b = await noteRes.text(); throw new Error(`Note failed: ${b.slice(0,100)}`); }
+    if (!noteRes.ok) { const b = await noteRes.text(); throw new Error(`Note on target failed: ${b.slice(0,100)}`); }
+
+    // Post note on source ticket: link to where it was merged
+    const targetLink = `https://mwrlife.freshdesk.com/a/tickets/${targetTicketId}`;
+    const sourceNoteHtml = `<p>Merged into ticket <a href="${targetLink}">#${targetTicketId}</a></p><p>${targetLink}</p>`;
+    const sourceNoteRes = await fetch(`https://${domain}/api/v2/tickets/${sourceTicketId}/notes`, {
+      method: 'POST',
+      headers: { 'Authorization': auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body: sourceNoteHtml, private: true }),
+    });
+    if (!sourceNoteRes.ok) { const b = await sourceNoteRes.text(); console.warn(`⚠️ Note on source failed: ${b.slice(0,100)}`); }
 
     // Close source ticket
     const closeBody = JSON.stringify({ status: 5, type: 'Reservations' });
@@ -783,11 +793,32 @@ app.post('/guided-prewarm/confirm', async (req, res) => {
 
     const results = { notePosted: false, emailSent: false, tagged: [], prioritySet: null, error: null };
 
+    // Build standard tags (same as autoTagTicket)
+    const buildTags = (bk) => {
+      const existing = bk.tags || [];
+      const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      let monthTag = null;
+      if (bk.checkIn) {
+        const m = bk.checkIn.match(/([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})/);
+        if (m) {
+          const mi = ['january','february','march','april','may','june','july','august','september','october','november','december'].indexOf(m[1].toLowerCase());
+          if (mi >= 0) monthTag = `${months[mi]}-${m[2].padStart(2,'0')}`;
+        }
+      }
+      const country = bk.destinationCountry || null;
+      return [...new Set([...existing, monthTag, country].filter(Boolean))];
+    };
+
     if (action === 'hotel_email') {
       // Post booking note
       const noteHtml = buildNoteHtml(booking, cachedCleanHtml, details, user, supplier);
       await postNote(ticketId, noteHtml);
       results.notePosted = true;
+
+      // Tag ticket
+      const tags = buildTags(booking);
+      await tagTicket(ticketId, tags, 'Reservations');
+      results.tagged.push(...tags);
 
       // Find hotel email
       const { findHotelEmail } = require('./services/aiService');
@@ -801,7 +832,7 @@ app.post('/guided-prewarm/confirm', async (req, res) => {
         results.hotelEmail = emailResult.email;
       } else {
         // Fallback: tag call_hotel
-        await tagTicket(ticketId, [...(booking.tags || []), 'call_hotel']);
+        await tagTicket(ticketId, [...buildTags(booking), 'call_hotel'], 'Reservations');
         results.tagged.push('call_hotel');
         results.fallback = true;
       }
@@ -809,17 +840,22 @@ app.post('/guided-prewarm/confirm', async (req, res) => {
       const noteHtml = buildNoteHtml(booking, cachedCleanHtml, details, user, supplier);
       await postNote(ticketId, noteHtml);
       results.notePosted = true;
-      await tagTicket(ticketId, [...(booking.tags || []), 'call_hotel']);
+      const tags = [...buildTags(booking), 'call_hotel'];
+      await tagTicket(ticketId, tags, 'Reservations');
       await setTicketPriority(ticketId, 3);
-      results.tagged.push('call_hotel');
+      results.tagged.push(...tags);
       results.prioritySet = 'high';
     } else if (action === 'voucher') {
-      await tagTicket(ticketId, [...(booking.tags || []), 'voucher']);
-      results.tagged.push('voucher');
+      const tags = [...buildTags(booking), 'voucher'];
+      await tagTicket(ticketId, tags, 'Reservations');
+      results.tagged.push(...tags);
     } else if (action === 'note_only') {
       const noteHtml = buildNoteHtml(booking, cachedCleanHtml, details, user, supplier);
       await postNote(ticketId, noteHtml);
       results.notePosted = true;
+      const tags = buildTags(booking);
+      await tagTicket(ticketId, tags, 'Reservations');
+      results.tagged.push(...tags);
     }
 
     res.json({ success: true, results });
