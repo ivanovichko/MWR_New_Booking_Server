@@ -377,6 +377,7 @@ app.post('/merge-ticket', async (req, res) => {
   try {
     const sourceLink = `https://mwrlife.freshdesk.com/a/tickets/${sourceTicketId}`;
     const descHtml = description || '';
+    console.log(`🔀 Merge note desc preview: ${descHtml.slice(0, 200)}`);
     const noteHtml = `<p><a href="${sourceLink}">${sourceLink}</a></p>${descHtml}`;
 
     // Post note on target (duplicate) ticket
