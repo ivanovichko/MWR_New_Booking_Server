@@ -778,12 +778,14 @@ app.post('/guided-prewarm/confirm', async (req, res) => {
     const { lookupSupplier } = require('./services/supplierService');
     const supplier = lookupSupplier(booking.supplierName);
     const { buildNoteHtml } = require('./services/noteBuilder');
+    const { parseBookingHtml } = require('./services/parserService');
+    const { cleanHtml: cachedCleanHtml } = cached.booking_html ? parseBookingHtml(cached.booking_html) : { cleanHtml: '' };
 
     const results = { notePosted: false, emailSent: false, tagged: [], prioritySet: null, error: null };
 
     if (action === 'hotel_email') {
       // Post booking note
-      const noteHtml = buildNoteHtml(booking, cached.booking_html || '', details, user, supplier);
+      const noteHtml = buildNoteHtml(booking, cachedCleanHtml, details, user, supplier);
       await postNote(ticketId, noteHtml);
       results.notePosted = true;
 
@@ -803,7 +805,7 @@ app.post('/guided-prewarm/confirm', async (req, res) => {
         results.fallback = true;
       }
     } else if (action === 'call_hotel') {
-      const noteHtml = buildNoteHtml(booking, cached.booking_html || '', details, user, supplier);
+      const noteHtml = buildNoteHtml(booking, cachedCleanHtml, details, user, supplier);
       await postNote(ticketId, noteHtml);
       results.notePosted = true;
       await tagTicket(ticketId, [...(booking.tags || []), 'call_hotel']);
@@ -814,7 +816,7 @@ app.post('/guided-prewarm/confirm', async (req, res) => {
       await tagTicket(ticketId, [...(booking.tags || []), 'voucher']);
       results.tagged.push('voucher');
     } else if (action === 'note_only') {
-      const noteHtml = buildNoteHtml(booking, cached.booking_html || '', details, user, supplier);
+      const noteHtml = buildNoteHtml(booking, cachedCleanHtml, details, user, supplier);
       await postNote(ticketId, noteHtml);
       results.notePosted = true;
     }
