@@ -794,7 +794,8 @@ app.post('/guided-prewarm/confirm', async (req, res) => {
       const emailResult = await findHotelEmail(details.hotelName || booking.supplierName, booking.locationTo, booking.destinationCountry);
 
       if (emailResult && emailResult.email && emailResult.confidence !== 'low') {
-        await sendEmail(ticketId, emailResult.email, booking, details, user, supplier);
+        const emailBody = buildHotelEmailHtml(booking, details || {});
+        await sendEmail(ticketId, emailResult.email, null, emailBody);
         await setTicketPending(ticketId);
         results.emailSent = true;
         results.hotelEmail = emailResult.email;
