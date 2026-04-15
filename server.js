@@ -600,10 +600,11 @@ app.get('/guided-prewarm/analyse/:id', async (req, res) => {
   console.log(`🎯 Analysing ticket #${ticketId}`);
 
   try {
-    // Fetch ticket for Groq (needs subject + description_text)
-    const tRes = await fetch(`https://${domain}/api/v2/tickets/${ticketId}`, { headers: { Authorization: auth } });
+    // Fetch ticket (include requester for email fallback)
+    const tRes = await fetch(`https://${domain}/api/v2/tickets/${ticketId}?include=requester`, { headers: { Authorization: auth } });
     if (!tRes.ok) return res.status(500).json({ error: `Could not fetch ticket: ${tRes.status}` });
     const ticket = await tRes.json();
+    const requesterEmail = ticket.requester?.email || null;
 
     // Fetch conversation count in parallel
     const cRes = await fetch(`https://${domain}/api/v2/tickets/${ticketId}/conversations`, { headers: { Authorization: auth } });
@@ -624,6 +625,7 @@ app.get('/guided-prewarm/analyse/:id', async (req, res) => {
         if (cached && cached.parsed) {
           console.log(`⚡ Booking ${bookingId} from cache`);
           bookingData = cached.parsed;
+          if (!bookingData.supplier) bookingData.supplier = lookupSupplier(bookingData.booking.supplierName);
         } else {
           console.log(`📡 Fetching booking ${bookingId} from TA...`);
           bookingData = await fetchAndCacheBooking(bookingId);
@@ -633,7 +635,34 @@ app.get('/guided-prewarm/analyse/:id', async (req, res) => {
       }
     }
 
-    res.json({ skip: false, conversationCount, bookingId, isNewBooking, bookingData });
+    // Attach noteHtml to bookingData
+    if (bookingData) {
+      const { booking, details, user, supplier } = bookingData;
+      bookingData.noteHtml = buildNoteHtml(booking, details, user, supplier || lookupSupplier(booking.supplierName));
+    }
+
+    // Fallback: if no booking found, look up member by requester email
+    let userData = null;
+    if (!bookingData && requesterEmail) {
+      try {
+        console.log(`👤 No booking — searching user by email: ${requesterEmail}`);
+        const results = await findUser(requesterEmail);
+        if (results.length > 0) {
+          const u = results[0];
+          const TA_BASE = process.env.TA_BASE_URL || 'https://traveladvantage.com';
+          userData = {
+            ...u,
+            loginLink:   `${TA_BASE}/admin/account/webadminCustomerLogin/${u.id}`,
+            profileLink: `${TA_BASE}/admin/account/viewCustomer/${u.id}`,
+          };
+          console.log(`✅ User found: ${u.name} (${u.email})`);
+        }
+      } catch (e) {
+        console.warn(`⚠️ User fallback failed: ${e.message}`);
+      }
+    }
+
+    res.json({ skip: false, conversationCount, bookingId, isNewBooking, bookingData, userData });
   } catch (err) {
     console.error(`❌ Analyse error for ticket #${ticketId}: ${err.message}`, err.stack);
     res.status(500).json({ error: err.message });
@@ -644,9 +673,16 @@ app.get('/guided-prewarm/analyse/:id', async (req, res) => {
 app.get('/guided-prewarm/booking/:id', async (req, res) => {
   const bookingId = req.params.id;
   try {
+    let bookingData;
     const cached = await (require('./services/dbService').getCachedBooking)(bookingId);
-    if (cached && cached.parsed) return res.json({ success: true, bookingData: cached.parsed });
-    const bookingData = await fetchAndCacheBooking(bookingId);
+    if (cached && cached.parsed) {
+      bookingData = cached.parsed;
+      if (!bookingData.supplier) bookingData.supplier = lookupSupplier(bookingData.booking.supplierName);
+    } else {
+      bookingData = await fetchAndCacheBooking(bookingId);
+    }
+    const { booking, details, user, supplier } = bookingData;
+    bookingData.noteHtml = buildNoteHtml(booking, details, user, supplier || lookupSupplier(booking.supplierName));
     res.json({ success: true, bookingData });
   } catch (err) {
     res.status(404).json({ error: err.message });
