@@ -699,7 +699,7 @@ app.get('/guided-prewarm/analyse/:id', async (req, res) => {
 
   try {
     // Fetch full ticket with HTML description
-    const tRes = await fetch(`https://${domain}/api/v2/tickets/${ticketId}?include=description`, { headers: { Authorization: auth } });
+    const tRes = await fetch(`https://${domain}/api/v2/tickets/${ticketId}`, { headers: { Authorization: auth } });
     if (!tRes.ok) {
       const b = await tRes.text();
       console.error(`❌ Ticket fetch failed ${tRes.status}: ${b.slice(0,200)}`);
