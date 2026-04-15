@@ -600,19 +600,26 @@ app.get('/guided-prewarm/tickets', async (req, res) => {
   const agentId = process.env.FRESHDESK_AGENT_ID;
   if (!agentId) return res.status(500).json({ error: 'FRESHDESK_AGENT_ID not set' });
   const auth = 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64');
+  console.log(`🎯 Guided prewarm: fetching low-priority tickets for agent ${agentId}`);
 
   let tickets = [];
   for (let page = 1; page <= 10; page++) {
-    const r = await fetch(
-      `https://${domain}/api/v2/tickets?priority=1&assignee_id=${agentId}&per_page=100&page=${page}&order_by=created_at&order_type=asc`,
-      { headers: { Authorization: auth } }
-    );
-    if (!r.ok) { const b = await r.text(); return res.status(500).json({ error: `Freshdesk error: ${b.slice(0,200)}` }); }
-    const batch = await r.json();
-    if (!Array.isArray(batch) || batch.length === 0) break;
+    const q = `priority:1 AND agent_id:${agentId} AND status:2`;
+    const url = `https://${domain}/api/v2/search/tickets?query="${q.replace(/ /g, '%20')}"&page=${page}`;
+    console.log(`🔍 Fetching: ${url}`);
+    const r = await fetch(url, { headers: { Authorization: auth } });
+    if (!r.ok) {
+      const b = await r.text();
+      console.error(`❌ Freshdesk error ${r.status}: ${b.slice(0,200)}`);
+      return res.status(500).json({ error: `Freshdesk error: ${b.slice(0,200)}` });
+    }
+    const data = await r.json();
+    const batch = data.results || [];
+    console.log(`📋 Page ${page}: ${batch.length} tickets`);
     tickets.push(...batch);
-    if (batch.length < 100) break;
+    if (batch.length < 30) break;
   }
+  console.log(`📋 Total: ${tickets.length} tickets`);
   res.json({ tickets });
 });
 
