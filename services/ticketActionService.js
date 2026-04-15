@@ -9,7 +9,7 @@ const { buildHotelEmailHtml } = require('./hotelEmailBuilder');
 
 /**
  * Builds the standard tag set for a booking:
- * month tag (e.g. "May-02"), destination country, plus any existing tags.
+ * month tag (e.g. "May 25"), destination country, plus any existing tags.
  */
 function buildBookingTags(booking) {
   const existing = booking.tags || [];
@@ -20,11 +20,38 @@ function buildBookingTags(booking) {
     if (m) {
       const mi = ['january','february','march','april','may','june','july','august',
                   'september','october','november','december'].indexOf(m[1].toLowerCase());
-      if (mi >= 0) monthTag = `${months[mi]}-${m[2].padStart(2, '0')}`;
+      if (mi >= 0) monthTag = `${months[mi]} ${m[3].slice(-2)}`;
     }
   }
   const country = booking.destinationCountry || null;
   return [...new Set([...existing, monthTag, country].filter(Boolean))];
+}
+
+/**
+ * Builds a standalone HTML note summarising the hotel email search result.
+ */
+function buildEmailResultHtml(emailResult) {
+  if (!emailResult || !emailResult.email) {
+    return `<div style="padding:10px 14px;background:#f8d7da;border-left:4px solid #dc3545;border-radius:4px;font-size:13px;font-family:system-ui,sans-serif;">
+      <strong>❌ Hotel Email Not Found</strong><br>
+      <em style="color:#555;">Tagged call_hotel — please contact hotel by phone.</em>
+    </div>`;
+  }
+  if (emailResult.confidence === 'low') {
+    return `<div style="padding:10px 14px;background:#fff3cd;border-left:4px solid #fd7e14;border-radius:4px;font-size:13px;font-family:system-ui,sans-serif;">
+      <strong>⚠️ Hotel Email — Low Confidence</strong><br>
+      <strong>Email:</strong> ${emailResult.email}<br>
+      ${emailResult.notes ? `<strong>Notes:</strong> ${emailResult.notes}<br>` : ''}
+      <em style="color:#555;">Tagged call_hotel — verify and send manually if correct.</em>
+    </div>`;
+  }
+  return `<div style="padding:10px 14px;background:#d4edda;border-left:4px solid #28a745;border-radius:4px;font-size:13px;font-family:system-ui,sans-serif;">
+    <strong>📧 Hotel Email Found</strong><br>
+    <strong>Email:</strong> ${emailResult.email}<br>
+    <strong>Confidence:</strong> ${emailResult.confidence}<br>
+    ${emailResult.source ? `<strong>Source:</strong> ${emailResult.source}<br>` : ''}
+    <em style="color:#555;">Email sent automatically — ticket set to Pending.</em>
+  </div>`;
 }
 
 /**
@@ -44,20 +71,27 @@ async function confirmTicket(ticketId, bookingId, action) {
   const results = { notePosted: false, emailSent: false, tagged: [], prioritySet: null };
 
   if (action === 'hotel_email') {
+    // 1. Post booking note
     const noteHtml = buildNoteHtml(booking, cachedCleanHtml, details, user, supplier);
     await postNote(ticketId, noteHtml);
     results.notePosted = true;
 
+    // 2. Tag ticket
     const tags = buildBookingTags(booking);
     await tagTicket(ticketId, tags, 'Reservations');
     results.tagged.push(...tags);
 
+    // 3. Find hotel email
     const emailResult = await findHotelEmail(
       details.hotelName || booking.supplierName,
       booking.locationTo,
       booking.destinationCountry
     );
 
+    // 4. Always post a separate note with the email search outcome
+    await postNote(ticketId, buildEmailResultHtml(emailResult));
+
+    // 5. Send email or fall back to call_hotel tag
     if (emailResult && emailResult.email && emailResult.confidence !== 'low') {
       const emailBody = buildHotelEmailHtml(booking, details || {});
       await sendEmail(ticketId, emailResult.email, null, emailBody);

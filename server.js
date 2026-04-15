@@ -526,15 +526,20 @@ app.post('/send-reply', async (req, res) => {
   }
 });
 
-// Fast ticket fetch — just HTML, no Groq
+// Fast ticket fetch — ticket + full conversation thread, no Groq
 app.get('/guided-prewarm/ticket/:id', async (req, res) => {
   const ticketId = req.params.id;
   const domain   = process.env.FRESHDESK_DOMAIN;
   const auth     = getAuthHeader();
-  const tRes = await fetch(`https://${domain}/api/v2/tickets/${ticketId}`, { headers: { Authorization: auth } });
+  const headers  = { Authorization: auth };
+  const [tRes, cRes] = await Promise.all([
+    fetch(`https://${domain}/api/v2/tickets/${ticketId}`, { headers }),
+    fetch(`https://${domain}/api/v2/tickets/${ticketId}/conversations`, { headers }),
+  ]);
   if (!tRes.ok) return res.status(500).json({ error: 'Could not fetch ticket' });
-  const ticket = await tRes.json();
-  res.json({ success: true, ticket });
+  const ticket        = await tRes.json();
+  const conversations = cRes.ok ? await cRes.json() : [];
+  res.json({ success: true, ticket, conversations });
 });
 
 
@@ -584,11 +589,6 @@ app.get('/guided-prewarm/analyse/:id', async (req, res) => {
     const convData = cRes.ok ? await cRes.json() : [];
     const conversationCount = Array.isArray(convData) ? convData.length : 0;
     console.log(`💬 Conversations: ${conversationCount}`);
-
-    if (conversationCount > PREWARM_CONVERSATION_THRESHOLD) {
-      console.log(`⏭ Skipping — convs > ${PREWARM_CONVERSATION_THRESHOLD}`);
-      return res.json({ skip: true, reason: `conversations > ${PREWARM_CONVERSATION_THRESHOLD}` });
-    }
 
     // Groq: extract booking ID
     console.log(`🤖 Running Groq extraction...`);

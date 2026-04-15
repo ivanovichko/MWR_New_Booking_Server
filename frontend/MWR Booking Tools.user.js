@@ -632,11 +632,40 @@ async function showGuidedPrewarmModal() {
     card.appendChild(descEl);
     leftCol.appendChild(card);
 
-    // Fetch description immediately
+    // Fetch full ticket thread immediately
     gmGet(`${BACKEND_URL}/guided-prewarm/ticket/${t.id}`).then(({ ok, data: td }) => {
-      descEl.innerHTML = (ok && td.ticket)
-        ? (td.ticket.description || td.ticket.description_text || '(no description)')
-        : '(could not load description)';
+      if (!ok || !td.ticket) { descEl.innerHTML = '<span style="color:#999;">(could not load)</span>'; return; }
+
+      const strip = (html) => (html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      const msgStyle = (bg, border) =>
+        `margin-bottom:10px;padding:8px 10px;background:${bg};border-left:3px solid ${border};border-radius:3px;font-size:12px;line-height:1.5;`;
+
+      let html = '';
+
+      // Opening description (customer)
+      const desc = td.ticket.description || td.ticket.description_text || '';
+      if (desc) {
+        html += `<div style="${msgStyle('#f8f9fa','#6c757d')}">
+          <div style="font-size:10px;color:#999;margin-bottom:4px;">📩 Customer (opening)</div>
+          ${td.ticket.description ? td.ticket.description : strip(desc)}
+        </div>`;
+      }
+
+      // Conversations (replies + notes)
+      const convs = td.conversations || [];
+      convs.forEach(c => {
+        const isNote     = c.private;
+        const isIncoming = !isNote && c.incoming;
+        const label  = isNote ? '📌 Agent note' : isIncoming ? '📩 Customer' : '📤 Agent reply';
+        const bg     = isNote ? '#fffbf0' : isIncoming ? '#f8f9fa' : '#f0f4ff';
+        const border = isNote ? '#fd7e14'  : isIncoming ? '#6c757d'  : '#0056d2';
+        html += `<div style="${msgStyle(bg, border)}">
+          <div style="font-size:10px;color:#999;margin-bottom:4px;">${label}</div>
+          ${c.body || strip(c.body_text || '')}
+        </div>`;
+      });
+
+      descEl.innerHTML = html || '<span style="color:#999;">(no content)</span>';
     });
 
     let currentBookingId = null;
