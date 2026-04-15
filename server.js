@@ -962,6 +962,28 @@ app.post('/bulk-confirm', async (req, res) => {
   res.json({ success: true, bookings, errors, total: tickets.length });
 });
 
+// ─── Chat prep — resolve requester email from ticket ─────────────────────────
+app.get('/chat-prep/:ticketId', async (req, res) => {
+  const ticketId = req.params.ticketId;
+  const domain   = process.env.FRESHDESK_DOMAIN;
+  const apiKey   = process.env.FRESHDESK_API_KEY;
+  const auth     = 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64');
+  try {
+    const tRes = await fetch(`https://${domain}/api/v2/tickets/${ticketId}`, { headers: { Authorization: auth } });
+    if (!tRes.ok) return res.status(500).json({ error: 'Could not fetch ticket' });
+    const ticket = await tRes.json();
+    const requesterId = ticket.requester_id;
+    if (!requesterId) return res.status(404).json({ error: 'No requester on ticket' });
+
+    const cRes = await fetch(`https://${domain}/api/v2/contacts/${requesterId}`, { headers: { Authorization: auth } });
+    if (!cRes.ok) return res.status(500).json({ error: 'Could not fetch contact' });
+    const contact = await cRes.json();
+    res.json({ email: contact.email, name: contact.name, subject: ticket.subject });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── Settings: Prompts ────────────────────────────────────────────────────────
 app.get('/settings/prompts', async (req, res) => {
   try { res.json(await getPrompts()); }
@@ -1009,7 +1031,7 @@ app.delete('/settings/macros/:id', async (req, res) => {
 // ─── AI assist ────────────────────────────────────────────────────────────────
 app.post('/ai-assist', async (req, res) => {
   const { booking, details, user, supplier, prompt, freshdeskTicketId } = req.body;
-  if (!booking || !prompt) return res.status(400).json({ error: 'booking and prompt are required' });
+  if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
   console.log(`\n🤖 AI assist — prompt: "${prompt.slice(0, 60)}..."`);
   try {
