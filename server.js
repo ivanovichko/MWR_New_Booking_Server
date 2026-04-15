@@ -619,6 +619,7 @@ app.get('/guided-prewarm/analyse/:id', async (req, res) => {
 
     // Try to fetch booking
     let bookingData = null;
+    let cleanHtmlForNote = null;
     if (bookingId) {
       try {
         const cached = await (require('./services/dbService').getCachedBooking)(bookingId);
@@ -626,9 +627,12 @@ app.get('/guided-prewarm/analyse/:id', async (req, res) => {
           console.log(`⚡ Booking ${bookingId} from cache`);
           bookingData = cached.parsed;
           if (!bookingData.supplier) bookingData.supplier = lookupSupplier(bookingData.booking.supplierName);
+          if (cached.booking_html) cleanHtmlForNote = parseBookingHtml(cached.booking_html).cleanHtml;
         } else {
           console.log(`📡 Fetching booking ${bookingId} from TA...`);
-          bookingData = await fetchAndCacheBooking(bookingId);
+          const fetched = await fetchAndCacheBooking(bookingId);
+          bookingData = fetched;
+          cleanHtmlForNote = fetched.cleanHtml;
         }
       } catch (e) {
         console.warn(`⚠️ Could not fetch booking ${bookingId}: ${e.message}`);
@@ -638,7 +642,7 @@ app.get('/guided-prewarm/analyse/:id', async (req, res) => {
     // Attach noteHtml to bookingData
     if (bookingData) {
       const { booking, details, user, supplier } = bookingData;
-      bookingData.noteHtml = buildNoteHtml(booking, details, user, supplier || lookupSupplier(booking.supplierName));
+      bookingData.noteHtml = buildNoteHtml(booking, cleanHtmlForNote || '', details, user, supplier || lookupSupplier(booking.supplierName));
     }
 
     // Fallback: if no booking found, look up member by requester email
@@ -674,15 +678,19 @@ app.get('/guided-prewarm/booking/:id', async (req, res) => {
   const bookingId = req.params.id;
   try {
     let bookingData;
+    let cleanHtmlForNote = null;
     const cached = await (require('./services/dbService').getCachedBooking)(bookingId);
     if (cached && cached.parsed) {
       bookingData = cached.parsed;
       if (!bookingData.supplier) bookingData.supplier = lookupSupplier(bookingData.booking.supplierName);
+      if (cached.booking_html) cleanHtmlForNote = parseBookingHtml(cached.booking_html).cleanHtml;
     } else {
-      bookingData = await fetchAndCacheBooking(bookingId);
+      const fetched = await fetchAndCacheBooking(bookingId);
+      bookingData = fetched;
+      cleanHtmlForNote = fetched.cleanHtml;
     }
     const { booking, details, user, supplier } = bookingData;
-    bookingData.noteHtml = buildNoteHtml(booking, details, user, supplier || lookupSupplier(booking.supplierName));
+    bookingData.noteHtml = buildNoteHtml(booking, cleanHtmlForNote || '', details, user, supplier || lookupSupplier(booking.supplierName));
     res.json({ success: true, bookingData });
   } catch (err) {
     res.status(404).json({ error: err.message });
