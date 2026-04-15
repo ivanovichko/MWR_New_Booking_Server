@@ -388,7 +388,7 @@ app.post('/merge-ticket', async (req, res) => {
     if (!noteRes.ok) { const b = await noteRes.text(); throw new Error(`Note failed: ${b.slice(0,100)}`); }
 
     // Close source ticket
-    const closeBody = JSON.stringify({ status: 5, type: 'reservation' });
+    const closeBody = JSON.stringify({ status: 5, type: 'Reservations' });
     console.log(`🔒 Closing ticket ${sourceTicketId} with body: ${closeBody}`);
     const closeRes = await fetch(`https://${domain}/api/v2/tickets/${sourceTicketId}`, {
       method: 'PUT',
@@ -412,7 +412,7 @@ app.post('/close-ticket', async (req, res) => {
   try {
     const domain = process.env.FRESHDESK_DOMAIN;
     const apiKey = process.env.FRESHDESK_API_KEY;
-    const closeBody2 = JSON.stringify({ status: 5, type: 'reservation' });
+    const closeBody2 = JSON.stringify({ status: 5, type: 'Reservations' });
     console.log(`🔒 Closing ticket ${ticketId} with body: ${closeBody2}`);
     const r = await fetch(`https://${domain}/api/v2/tickets/${ticketId}`, {
       method: 'PUT',
