@@ -376,7 +376,8 @@ app.post('/merge-ticket', async (req, res) => {
 
   try {
     const sourceLink = `https://mwrlife.freshdesk.com/a/tickets/${sourceTicketId}`;
-    const noteHtml = `<p><a href="${sourceLink}">${sourceLink}</a></p><p>${(description || '').replace(/\n/g, '<br>')}</p>`;
+    const descHtml = description || '';
+    const noteHtml = `<p><a href="${sourceLink}">${sourceLink}</a></p>${descHtml}`;
 
     // Post note on target (duplicate) ticket
     const noteRes = await fetch(`https://${domain}/api/v2/tickets/${targetTicketId}/notes`, {
@@ -415,7 +416,7 @@ app.post('/close-ticket', async (req, res) => {
         'Authorization': 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64'),
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ status: 5 }), // 5 = Closed
+      body: JSON.stringify({ status: 5, type: 'reservation' }), // 5 = Closed
     });
     if (!r.ok) { const b = await r.text(); throw new Error(`${r.status}: ${b.slice(0,100)}`); }
     console.log(`✅ Closed ticket ${ticketId}`);
