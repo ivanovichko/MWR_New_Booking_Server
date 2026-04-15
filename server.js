@@ -8,7 +8,7 @@ const { lookupSupplier }                 = require('./services/supplierService')
 const { aiAssist, findHotelEmail }       = require('./services/aiService');
 const { addNote, sendEmail, setTicketPending, tagTicket, searchDuplicates, getTicketContext } = require('./services/freshdeskService');
 const { initDb, getCachedBooking, cacheBooking, storeSession, getPrompts, createPrompt, updatePrompt, deletePrompt, getMacros, createMacro, updateMacro, deleteMacro, storeFreshdeskSession } = require('./services/dbService');
-const { prewarm, fetchAndCacheBooking, extractBookingId, checkPendings } = require('./services/prewarmService');
+const { prewarm, fetchAndCacheBooking, extractBookingId, checkPendings, checkInPriority, setTicketPriority, postNote } = require('./services/prewarmService');
 const { taGet, taPost }                                        = require('./services/taAuthService');
 
 const app = express();
@@ -591,6 +591,153 @@ app.post('/send-reply', async (req, res) => {
   }
 });
 
+// ─── Guided prewarm ───────────────────────────────────────────────────────────
+
+// Fetch low-priority tickets for guided prewarm
+app.get('/guided-prewarm/tickets', async (req, res) => {
+  const domain  = process.env.FRESHDESK_DOMAIN;
+  const apiKey  = process.env.FRESHDESK_API_KEY;
+  const agentId = process.env.FRESHDESK_AGENT_ID;
+  if (!agentId) return res.status(500).json({ error: 'FRESHDESK_AGENT_ID not set' });
+  const auth = 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64');
+
+  let tickets = [];
+  for (let page = 1; page <= 10; page++) {
+    const r = await fetch(
+      `https://${domain}/api/v2/tickets?priority=1&assignee_id=${agentId}&per_page=100&page=${page}&order_by=created_at&order_type=asc`,
+      { headers: { Authorization: auth } }
+    );
+    if (!r.ok) { const b = await r.text(); return res.status(500).json({ error: `Freshdesk error: ${b.slice(0,200)}` }); }
+    const batch = await r.json();
+    if (!Array.isArray(batch) || batch.length === 0) break;
+    tickets.push(...batch);
+    if (batch.length < 100) break;
+  }
+  res.json({ tickets });
+});
+
+// Analyse a single ticket — conversation check + Groq booking ID extraction
+app.get('/guided-prewarm/analyse/:id', async (req, res) => {
+  const ticketId = req.params.id;
+  const domain   = process.env.FRESHDESK_DOMAIN;
+  const apiKey   = process.env.FRESHDESK_API_KEY;
+  const auth     = 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64');
+
+  try {
+    // Fetch full ticket
+    const tRes = await fetch(`https://${domain}/api/v2/tickets/${ticketId}`, { headers: { Authorization: auth } });
+    if (!tRes.ok) return res.status(500).json({ error: 'Could not fetch ticket' });
+    const ticket = await tRes.json();
+
+    // Fetch conversation count
+    const cRes = await fetch(`https://${domain}/api/v2/tickets/${ticketId}/conversations`, { headers: { Authorization: auth } });
+    const convData = cRes.ok ? await cRes.json() : [];
+    const conversationCount = Array.isArray(convData) ? convData.length : 0;
+
+    // If convs > 2, skip
+    if (conversationCount > 2) {
+      return res.json({ skip: true, reason: 'conversations > 2', ticket });
+    }
+
+    // Groq: extract booking ID
+    const { bookingId, isNewBooking } = await extractBookingId(ticket, conversationCount);
+
+    // Try to fetch booking if ID found
+    let bookingData = null;
+    if (bookingId) {
+      try {
+        const cached = await (require('./services/dbService').getCachedBooking)(bookingId);
+        if (cached && cached.parsed) {
+          bookingData = cached.parsed;
+        } else {
+          bookingData = await fetchAndCacheBooking(bookingId);
+        }
+      } catch (e) {
+        console.warn(`⚠️ Could not fetch booking ${bookingId}: ${e.message}`);
+      }
+    }
+
+    res.json({ skip: false, ticket, conversationCount, bookingId, isNewBooking, bookingData });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Fetch booking by ID (for manual entry)
+app.get('/guided-prewarm/booking/:id', async (req, res) => {
+  const bookingId = req.params.id;
+  try {
+    const cached = await (require('./services/dbService').getCachedBooking)(bookingId);
+    if (cached && cached.parsed) return res.json({ bookingData: cached.parsed });
+    const bookingData = await fetchAndCacheBooking(bookingId);
+    res.json({ bookingData });
+  } catch (err) {
+    res.status(404).json({ error: err.message });
+  }
+});
+
+// Execute actions for a confirmed ticket
+app.post('/guided-prewarm/confirm', async (req, res) => {
+  const { ticketId, bookingId, action } = req.body;
+  // action: 'hotel_email' | 'call_hotel' | 'voucher' | 'high_priority'
+  const domain = process.env.FRESHDESK_DOMAIN;
+  const apiKey = process.env.FRESHDESK_API_KEY;
+
+  try {
+    const cached = await (require('./services/dbService').getCachedBooking)(bookingId);
+    if (!cached || !cached.parsed) return res.status(404).json({ error: 'Booking not cached' });
+
+    const { booking, details, user } = cached.parsed;
+    const { lookupSupplier } = require('./services/supplierService');
+    const supplier = lookupSupplier(booking.supplierName);
+    const { buildNoteHtml } = require('./services/noteBuilder');
+
+    const results = { notePosted: false, emailSent: false, tagged: [], prioritySet: null, error: null };
+
+    if (action === 'hotel_email') {
+      // Post booking note
+      const noteHtml = buildNoteHtml(booking, cached.booking_html || '', details, user, supplier);
+      await postNote(ticketId, noteHtml);
+      results.notePosted = true;
+
+      // Find hotel email
+      const { findHotelEmail } = require('./services/aiService');
+      const emailResult = await findHotelEmail(details.hotelName || booking.supplierName, booking.locationTo, booking.destinationCountry);
+
+      if (emailResult && emailResult.email && emailResult.confidence !== 'low') {
+        await sendEmail(ticketId, emailResult.email, booking, details, user, supplier);
+        await setTicketPending(ticketId);
+        results.emailSent = true;
+        results.hotelEmail = emailResult.email;
+      } else {
+        // Fallback: tag call_hotel
+        await tagTicket(ticketId, [...(booking.tags || []), 'call_hotel']);
+        results.tagged.push('call_hotel');
+        results.fallback = true;
+      }
+    } else if (action === 'call_hotel') {
+      const noteHtml = buildNoteHtml(booking, cached.booking_html || '', details, user, supplier);
+      await postNote(ticketId, noteHtml);
+      results.notePosted = true;
+      await tagTicket(ticketId, [...(booking.tags || []), 'call_hotel']);
+      await setTicketPriority(ticketId, 3);
+      results.tagged.push('call_hotel');
+      results.prioritySet = 'high';
+    } else if (action === 'voucher') {
+      await tagTicket(ticketId, [...(booking.tags || []), 'voucher']);
+      results.tagged.push('voucher');
+    } else if (action === 'note_only') {
+      const noteHtml = buildNoteHtml(booking, cached.booking_html || '', details, user, supplier);
+      await postNote(ticketId, noteHtml);
+      results.notePosted = true;
+    }
+
+    res.json({ success: true, results });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── Bulk confirm ─────────────────────────────────────────────────────────────
 app.post('/bulk-confirm', async (req, res) => {
   const { tag } = req.body;
@@ -601,6 +748,13 @@ app.post('/bulk-confirm', async (req, res) => {
   const auth   = 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64');
 
   console.log(`🏨 Bulk confirm: fetching tickets with tag "${tag}"`);
+
+  // Debug: try bare tag query first
+  const testUrl = `https://${domain}/api/v2/search/tickets?query="tag:'${tag}'"`;
+  console.log(`🧪 Test query: ${testUrl}`);
+  const testR = await fetch(testUrl, { headers: { Authorization: auth } });
+  const testData = await testR.json();
+  console.log(`🧪 Bare tag results: ${testData.total || 0} total, ${(testData.results||[]).length} returned`);
 
   // Fetch open tickets with tag, then pending — merge results
   let tickets = [];
