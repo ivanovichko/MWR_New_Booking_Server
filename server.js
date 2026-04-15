@@ -365,6 +365,67 @@ app.post('/tag-ticket', async (req, res) => {
   }
 });
 
+// ─── Merge ticket ─────────────────────────────────────────────────────────────
+app.post('/merge-ticket', async (req, res) => {
+  const { sourceTicketId, targetTicketId, description } = req.body;
+  if (!sourceTicketId || !targetTicketId) return res.status(400).json({ error: 'sourceTicketId and targetTicketId required' });
+
+  const domain = process.env.FRESHDESK_DOMAIN;
+  const apiKey = process.env.FRESHDESK_API_KEY;
+  const auth   = 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64');
+
+  try {
+    const sourceLink = `https://mwrlife.freshdesk.com/a/tickets/${sourceTicketId}`;
+    const noteHtml = `<p><a href="${sourceLink}">${sourceLink}</a></p><p>${(description || '').replace(/\n/g, '<br>')}</p>`;
+
+    // Post note on target (duplicate) ticket
+    const noteRes = await fetch(`https://${domain}/api/v2/tickets/${targetTicketId}/notes`, {
+      method: 'POST',
+      headers: { 'Authorization': auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body: noteHtml, private: true }),
+    });
+    if (!noteRes.ok) { const b = await noteRes.text(); throw new Error(`Note failed: ${b.slice(0,100)}`); }
+
+    // Close source ticket
+    const closeRes = await fetch(`https://${domain}/api/v2/tickets/${sourceTicketId}`, {
+      method: 'PUT',
+      headers: { 'Authorization': auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 5 }),
+    });
+    if (!closeRes.ok) { const b = await closeRes.text(); throw new Error(`Close failed: ${b.slice(0,100)}`); }
+
+    console.log(`🔀 Merged ticket #${sourceTicketId} → #${targetTicketId}`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(`❌ Merge error: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Close ticket ─────────────────────────────────────────────────────────────
+app.post('/close-ticket', async (req, res) => {
+  const { ticketId } = req.body;
+  if (!ticketId) return res.status(400).json({ error: 'ticketId is required' });
+  try {
+    const domain = process.env.FRESHDESK_DOMAIN;
+    const apiKey = process.env.FRESHDESK_API_KEY;
+    const r = await fetch(`https://${domain}/api/v2/tickets/${ticketId}`, {
+      method: 'PUT',
+      headers: {
+        'Authorization': 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64'),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ status: 5 }), // 5 = Closed
+    });
+    if (!r.ok) { const b = await r.text(); throw new Error(`${r.status}: ${b.slice(0,100)}`); }
+    console.log(`✅ Closed ticket ${ticketId}`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(`❌ Close ticket error: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── Check for duplicate tickets ─────────────────────────────────────────────
 app.post('/check-duplicates', async (req, res) => {
   const { vendorConf, internalId, memberEmail, freshdeskTicketId } = req.body;
