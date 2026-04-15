@@ -8,6 +8,8 @@
 // @connect      mwr-new-booking-server.onrender.com
 // @connect      mwrlife.freshdesk.com
 // @require      https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js
+// @updateURL    https://raw.githubusercontent.com/ivanovichko/MWR_New_Booking_Server/main/frontend/MWR%20Booking%20Tools.user.js
+// @downloadURL  https://raw.githubusercontent.com/ivanovichko/MWR_New_Booking_Server/main/frontend/MWR%20Booking%20Tools.user.js
 // ==/UserScript==
 
 (function () {
