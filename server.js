@@ -388,12 +388,14 @@ app.post('/merge-ticket', async (req, res) => {
     if (!noteRes.ok) { const b = await noteRes.text(); throw new Error(`Note failed: ${b.slice(0,100)}`); }
 
     // Close source ticket
+    const closeBody = JSON.stringify({ status: 5, type: 'reservation' });
+    console.log(`🔒 Closing ticket ${sourceTicketId} with body: ${closeBody}`);
     const closeRes = await fetch(`https://${domain}/api/v2/tickets/${sourceTicketId}`, {
       method: 'PUT',
       headers: { 'Authorization': auth, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: 5 }),
+      body: closeBody,
     });
-    if (!closeRes.ok) { const b = await closeRes.text(); throw new Error(`Close failed: ${b.slice(0,100)}`); }
+    if (!closeRes.ok) { const b = await closeRes.text(); console.error(`❌ Close failed ${closeRes.status}: ${b}`); throw new Error(`Close failed: ${b.slice(0,200)}`); }
 
     console.log(`🔀 Merged ticket #${sourceTicketId} → #${targetTicketId}`);
     res.json({ success: true });
@@ -410,15 +412,17 @@ app.post('/close-ticket', async (req, res) => {
   try {
     const domain = process.env.FRESHDESK_DOMAIN;
     const apiKey = process.env.FRESHDESK_API_KEY;
+    const closeBody2 = JSON.stringify({ status: 5, type: 'reservation' });
+    console.log(`🔒 Closing ticket ${ticketId} with body: ${closeBody2}`);
     const r = await fetch(`https://${domain}/api/v2/tickets/${ticketId}`, {
       method: 'PUT',
       headers: {
         'Authorization': 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64'),
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ status: 5, type: 'reservation' }), // 5 = Closed
+      body: closeBody2,
     });
-    if (!r.ok) { const b = await r.text(); throw new Error(`${r.status}: ${b.slice(0,100)}`); }
+    if (!r.ok) { const b = await r.text(); console.error(`❌ Close failed ${r.status}: ${b}`); throw new Error(`${r.status}: ${b.slice(0,200)}`); }
     console.log(`✅ Closed ticket ${ticketId}`);
     res.json({ success: true });
   } catch (err) {
@@ -693,8 +697,8 @@ app.get('/guided-prewarm/analyse/:id', async (req, res) => {
   const auth     = 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64');
 
   try {
-    // Fetch full ticket
-    const tRes = await fetch(`https://${domain}/api/v2/tickets/${ticketId}`, { headers: { Authorization: auth } });
+    // Fetch full ticket with HTML description
+    const tRes = await fetch(`https://${domain}/api/v2/tickets/${ticketId}?include=description`, { headers: { Authorization: auth } });
     if (!tRes.ok) return res.status(500).json({ error: 'Could not fetch ticket' });
     const ticket = await tRes.json();
 
