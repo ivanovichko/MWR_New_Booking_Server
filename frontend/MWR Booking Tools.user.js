@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      2.3
+// @version      2.4
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -649,9 +649,26 @@ async function showGuidedPrewarmModal() {
     columns.appendChild(rightCol);
     body.appendChild(columns);
 
-    // Reply panel placeholder — populated when booking loads
+    // Reply panel placeholder — populated when booking loads, collapsed by default
     const replyPanelWrapper = document.createElement('div');
     replyPanelWrapper.style.cssText = 'display:none;border:1px solid #eee;border-radius:8px;overflow:hidden;flex-shrink:0;';
+
+    let replyPanelExpanded = false;
+    const replyPanelToggle = document.createElement('div');
+    replyPanelToggle.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:8px 14px;background:#f8f9fa;cursor:pointer;user-select:none;border-bottom:1px solid transparent;';
+    replyPanelToggle.innerHTML = '<span style="font-size:12px;font-weight:600;color:#555;">💬 Reply</span><span style="font-size:11px;color:#aaa;">▶ expand</span>';
+    const replyPanelContent = document.createElement('div');
+    replyPanelContent.style.display = 'none';
+
+    replyPanelToggle.onclick = () => {
+      replyPanelExpanded = !replyPanelExpanded;
+      replyPanelContent.style.display = replyPanelExpanded ? '' : 'none';
+      replyPanelToggle.style.borderBottomColor = replyPanelExpanded ? '#eee' : 'transparent';
+      replyPanelToggle.querySelector('span:last-child').textContent = replyPanelExpanded ? '▼ collapse' : '▶ expand';
+    };
+
+    replyPanelWrapper.appendChild(replyPanelToggle);
+    replyPanelWrapper.appendChild(replyPanelContent);
     body.appendChild(replyPanelWrapper);
 
     // Ticket card with description — fetch immediately (fast, no Groq)
@@ -812,8 +829,8 @@ async function showGuidedPrewarmModal() {
       bookingSection.appendChild(replyRowEl);
 
       // ── Inline reply panel ─────────────────────────────────────────────────
-      replyPanelWrapper.innerHTML = '';
       replyPanelWrapper.style.display = '';
+      replyPanelContent.innerHTML = '';
 
       const supplierObj    = bd.supplier || null;
       const customerEmail  = user && user.email ? user.email : null;
@@ -858,7 +875,7 @@ async function showGuidedPrewarmModal() {
           replyBody.appendChild(toRow);
 
           const suppTA = document.createElement('textarea');
-          suppTA.style.cssText = 'width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid #ddd;border-radius:6px;font-size:13px;font-family:system-ui,sans-serif;resize:vertical;min-height:140px;line-height:1.5;outline:none;margin-bottom:8px;';
+          suppTA.style.cssText = 'width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid #ddd;border-radius:6px;font-size:13px;font-family:system-ui,sans-serif;resize:vertical;min-height:200px;line-height:1.5;outline:none;margin-bottom:8px;';
           suppTA.value = buildReplySignature('supplier', booking, details, user);
           attachMacroTrigger(suppTA, booking, details, user);
           setTimeout(() => {
@@ -914,7 +931,8 @@ async function showGuidedPrewarmModal() {
       custTabBtn.onclick = () => setReplyTab('customer');
       suppTabBtn.onclick = () => setReplyTab('supplier');
       replyTabBar.appendChild(custTabBtn); replyTabBar.appendChild(suppTabBtn);
-      replyPanelWrapper.appendChild(replyTabBar); replyPanelWrapper.appendChild(replyBody);
+      replyPanelContent.innerHTML = '';
+      replyPanelContent.appendChild(replyTabBar); replyPanelContent.appendChild(replyBody);
       setReplyTab(customerEmail ? 'customer' : 'supplier');
 
       confirmBtn.onclick = async () => {
@@ -2202,7 +2220,7 @@ function showReplyComposer(recipientType, toEmail, booking, details, user, suppl
 
   // Editable reply textarea — pre-populated with greeting + signature
   const replyArea = document.createElement('textarea');
-  replyArea.style.cssText = 'width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid #ddd;border-radius:6px;font-size:13px;font-family:system-ui,sans-serif;resize:vertical;min-height:340px;line-height:1.5;outline:none;';
+  replyArea.style.cssText = 'width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid #ddd;border-radius:6px;font-size:13px;font-family:system-ui,sans-serif;resize:vertical;min-height:200px;line-height:1.5;outline:none;';
   replyArea.value = buildReplySignature(recipientType, booking, details, user);
   // Note: replyArea is appended inside the two-col layout below (customer) or directly (supplier)
   attachMacroTrigger(replyArea, booking, details, user);
@@ -2215,36 +2233,27 @@ function showReplyComposer(recipientType, toEmail, booking, details, user, suppl
     }
   }, 50);
 
-  // Translation panel — only for customer replies
+  container.appendChild(replyArea);
+
+  // Translation — only for customer replies, hidden until first use
   if (recipientType === 'customer') {
     const targetLang = countryToLanguage(user && user.country);
 
-    // Wrap both textareas in a flex row
-    const twoCol = document.createElement('div');
-    twoCol.style.cssText = 'display:flex;gap:8px;margin-top:8px;';
-
-    const leftCol = document.createElement('div');
-    leftCol.style.cssText = 'flex:2;display:flex;flex-direction:column;gap:6px;';
-    replyArea.style.marginTop = '0';
-    replyArea.style.minHeight = '160px';
-
-    const rightCol = document.createElement('div');
-    rightCol.style.cssText = 'flex:1;display:flex;flex-direction:column;gap:6px;';
-
     const translateBtn = document.createElement('button');
     translateBtn.textContent = '🌐 ' + (targetLang ? 'Translate to ' + targetLang : 'Translate');
-    translateBtn.style.cssText = 'padding:5px 12px;border:1px solid #17a2b8;border-radius:6px;background:#fff;color:#17a2b8;font-size:12px;cursor:pointer;font-weight:500;align-self:flex-start;';
+    translateBtn.style.cssText = 'margin-top:6px;padding:5px 12px;border:1px solid #17a2b8;border-radius:6px;background:#fff;color:#17a2b8;font-size:12px;cursor:pointer;font-weight:500;';
 
     const translationArea = document.createElement('textarea');
     translationArea.readOnly = true;
     translationArea.placeholder = (targetLang ? targetLang : 'Translation') + ' will appear here...';
-    translationArea.style.cssText = 'flex:1;width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid #17a2b8;border-radius:6px;font-size:13px;font-family:system-ui,sans-serif;resize:none;min-height:340px;line-height:1.5;background:#f8fffe;color:#333;';
+    translationArea.style.cssText = 'display:none;width:100%;box-sizing:border-box;margin-top:6px;padding:9px 12px;border:1px solid #17a2b8;border-radius:6px;font-size:13px;font-family:system-ui,sans-serif;resize:vertical;min-height:160px;line-height:1.5;background:#f8fffe;color:#333;';
 
     translateBtn.onclick = () => withButtonLoading(translateBtn, '⏳ Translating...', async () => {
       const body = replyArea.value.trim();
       if (!body) { showToast('Nothing to translate.', 'warning'); return; }
       const lang = targetLang || 'the customer\'s language';
       const prompt = 'Translate the following text to ' + lang + '. Translate everything including greetings and sign-offs. Return only the translated text — no explanation, no extra content.\n\n' + body;
+      translationArea.style.display = '';
       translationArea.value = 'Translating...';
       const { ok, data: aiData } = await gmPost(BACKEND_URL + '/ai-assist', {
         booking: booking || {}, details: details || {}, user, supplier: supplier || null,
@@ -2253,14 +2262,8 @@ function showReplyComposer(recipientType, toEmail, booking, details, user, suppl
       translationArea.value = (ok && aiData.text) ? aiData.text.trim() : 'Translation failed.';
     });
 
-    leftCol.appendChild(replyArea);
-    leftCol.appendChild(translateBtn);
-    rightCol.appendChild(translationArea);
-    twoCol.appendChild(leftCol);
-    twoCol.appendChild(rightCol);
-    container.appendChild(twoCol);
-  } else {
-    container.appendChild(replyArea);
+    container.appendChild(translateBtn);
+    container.appendChild(translationArea);
   }
 
   // Attachment picker
