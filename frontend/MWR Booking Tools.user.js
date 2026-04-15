@@ -7,6 +7,7 @@
 // @grant        GM_xmlhttpRequest
 // @connect      mwr-new-booking-server.onrender.com
 // @connect      mwrlife.freshdesk.com
+// @require      https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js
 // ==/UserScript==
 
 (function () {
@@ -97,6 +98,48 @@ function showToast(message, type = 'success', duration = 4000) {
   toast.textContent = message;
   document.body.appendChild(toast);
   setTimeout(() => toast.remove(), duration);
+}
+
+// ── Button loading state helper ───────────────────────────────────────────────
+async function withButtonLoading(btn, loadingLabel, fn) {
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = loadingLabel || '⏳ Loading...';
+  try { return await fn(); }
+  finally { btn.disabled = false; btn.textContent = orig; }
+}
+
+// ── Modal factory — creates a standard draggable modal shell ─────────────────
+// opts.style      — extra CSS appended to the modal container (position, width, etc.)
+// opts.bodyStyle  — extra CSS appended to the scrollable body div
+// Returns { modal, header, body, closeBtn }
+function createModal(id, title, opts = {}) {
+  document.getElementById(id)?.remove();
+  const modal = document.createElement('div');
+  modal.id = id;
+  modal.style.cssText = 'position:fixed;background:#fff;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,0.25);z-index:999999;font-family:system-ui,sans-serif;display:flex;flex-direction:column;' + (opts.style || '');
+
+  const header = document.createElement('div');
+  header.id = id + 'Handle';
+  header.style.cssText = 'padding:12px 16px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;cursor:move;';
+  const titleEl = document.createElement('span');
+  titleEl.style.cssText = 'font-weight:600;font-size:14px;color:#333;';
+  titleEl.textContent = title;
+  const closeBtn = document.createElement('button');
+  closeBtn.textContent = '×';
+  closeBtn.style.cssText = 'background:none;border:none;font-size:18px;color:#aaa;cursor:pointer;';
+  closeBtn.onclick = () => modal.remove();
+  header.appendChild(titleEl);
+  header.appendChild(closeBtn);
+
+  const body = document.createElement('div');
+  body.style.cssText = 'flex:1;overflow-y:auto;padding:16px;' + (opts.bodyStyle || '');
+
+  modal.appendChild(header);
+  modal.appendChild(body);
+  document.body.appendChild(modal);
+  makeDraggable(modal, header);
+  return { modal, header, body, closeBtn };
 }
 
 // ── Confirm modal (replaces confirm()) ────────────────────────────────────────
@@ -275,6 +318,7 @@ function showPreviewModal(bookingId, data, freshdeskTicketId) {
       <div style="display:flex;flex-direction:column;gap:8px;margin-top:14px;">
         <button id="taActFull"   style="padding:9px 14px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;background:#6f42c1;color:#fff;text-align:left;">📋 + ✉️ &nbsp; Post note &amp; send hotel email</button>
         <button id="taActNote"   style="padding:9px 14px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;background:#007bff;color:#fff;text-align:left;">📋 &nbsp; Post note only</button>
+        <button id="taActShortNote" style="padding:9px 14px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;background:#17a2b8;color:#fff;text-align:left;">📌 &nbsp; Post short note</button>
         <button id="taActEmail"  style="padding:9px 14px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;background:#28a745;color:#fff;text-align:left;">✉️ &nbsp; Send hotel email only</button>
         <div style="display:flex;gap:8px;">
           <button id="taActTag"      style="flex:1;padding:7px 14px;border:1px solid #fd7e14;border-radius:6px;cursor:pointer;font-size:13px;background:#fff;color:#fd7e14;font-weight:600;">🏷️ Tag ticket</button>
@@ -293,6 +337,7 @@ function showPreviewModal(bookingId, data, freshdeskTicketId) {
 
   document.getElementById('taActFull').onclick  = () => { close(); triggerActions(bookingId, freshdeskTicketId, data, 'full'); };
   document.getElementById('taActNote').onclick  = () => { close(); triggerActions(bookingId, freshdeskTicketId, data, 'note'); };
+  document.getElementById('taActShortNote').onclick = () => { close(); triggerActions(bookingId, freshdeskTicketId, data, 'short_note'); };
   document.getElementById('taActEmail').onclick = () => { close(); triggerActions(bookingId, freshdeskTicketId, data, 'email'); };
 
   document.getElementById('taActTag').onclick = () => {
@@ -323,6 +368,482 @@ function showNoteModal(noteHtml) {
   document.getElementById('taNoteClose').onclick = () => modal.remove();
 }
 
+
+// ── Chat modal ────────────────────────────────────────────────────────────────
+async function showChatModal(ticketId) {
+  const freshdeskTicketId = ticketId || getFreshdeskTicketId();
+  if (!freshdeskTicketId) { showToast('No ticket detected.', 'error'); return; }
+
+  document.getElementById('taChatModal')?.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'taChatModal';
+  modal.style.cssText = 'position:fixed;top:60px;right:24px;width:700px;max-width:calc(100vw - 48px);max-height:92vh;display:flex;flex-direction:column;background:#fff;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,0.3);z-index:999999;font-family:system-ui,sans-serif;resize:both;overflow:auto;min-width:400px;';
+
+  const header = document.createElement('div');
+  header.id = 'taChatHandle';
+  header.style.cssText = 'padding:12px 16px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;cursor:move;';
+  header.innerHTML = `<span style="font-weight:600;font-size:14px;color:#333;">💬 Chat — #${freshdeskTicketId}</span>`;
+  const closeBtn = document.createElement('button');
+  closeBtn.textContent = '×';
+  closeBtn.style.cssText = 'background:none;border:none;font-size:18px;color:#aaa;cursor:pointer;';
+  closeBtn.onclick = () => modal.remove();
+  header.appendChild(closeBtn);
+
+  const body = document.createElement('div');
+  body.style.cssText = 'flex:1;overflow-y:auto;padding:14px 16px;display:flex;flex-direction:column;gap:12px;';
+
+  // Member section
+  const memberSection = document.createElement('div');
+  memberSection.style.cssText = 'border:1px solid #eee;border-radius:8px;padding:12px 14px;';
+  memberSection.innerHTML = '<div style="color:#999;font-size:12px;">👤 Looking up member...</div>';
+  body.appendChild(memberSection);
+
+  // Chat translation section
+  const chatSection = document.createElement('div');
+  chatSection.style.cssText = 'border:1px solid #eee;border-radius:8px;padding:12px 14px;display:flex;flex-direction:column;gap:8px;';
+  const chatTitle = document.createElement('div');
+  chatTitle.style.cssText = 'font-weight:600;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.04em;';
+  chatTitle.textContent = '🌐 Translated Chat';
+  const chatTextarea = document.createElement('textarea');
+  chatTextarea.style.cssText = 'width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid #ddd;border-radius:6px;font-size:12px;font-family:system-ui,sans-serif;resize:vertical;min-height:220px;line-height:1.6;outline:none;white-space:pre-wrap;';
+  chatTextarea.value = '⏳ Translating chat...';
+  chatTextarea.readOnly = true;
+  const chatBtnRow = document.createElement('div');
+  chatBtnRow.style.cssText = 'display:flex;gap:8px;';
+  const postChatNoteBtn = document.createElement('button');
+  postChatNoteBtn.textContent = '📋 Post as Note';
+  postChatNoteBtn.disabled = true;
+  postChatNoteBtn.style.cssText = 'padding:7px 14px;border:none;border-radius:6px;background:#6f42c1;color:#fff;font-size:12px;font-weight:600;cursor:pointer;opacity:0.4;';
+  postChatNoteBtn.onclick = async () => {
+    const text = chatTextarea.value.trim();
+    if (!text) { showToast('Nothing to post.', 'warning'); return; }
+    postChatNoteBtn.disabled = true; postChatNoteBtn.textContent = '⏳ Posting...';
+    const noteHtml = '<p>' + text.replace(/\n/g, '<br>') + '</p>';
+    const { ok } = await gmPost(`${BACKEND_URL}/post-note`, { freshdeskTicketId, noteHtml });
+    postChatNoteBtn.disabled = false; postChatNoteBtn.textContent = '📋 Post as Note';
+    if (ok) { showToast('✅ Note posted!', 'success'); refreshFreshdeskTicket(); }
+    else showToast('❌ Failed to post note.', 'error');
+  };
+  chatBtnRow.appendChild(postChatNoteBtn);
+  chatSection.appendChild(chatTitle);
+  chatSection.appendChild(chatTextarea);
+  chatSection.appendChild(chatBtnRow);
+  body.appendChild(chatSection);
+
+  modal.appendChild(header);
+  modal.appendChild(body);
+  document.body.appendChild(modal);
+  makeDraggable(modal, header);
+
+  // 1. Get requester email from ticket
+  const { ok: prepOk, data: prepData } = await gmGet(`${BACKEND_URL}/chat-prep/${freshdeskTicketId}`);
+  if (!prepOk || !prepData.email) {
+    memberSection.innerHTML = '<div style="color:#dc3545;font-size:12px;">❌ Could not resolve requester email.</div>';
+  } else {
+    const email = prepData.email;
+
+    // 2a. Find User — async
+    gmPost(`${BACKEND_URL}/find-user`, { query: email }).then(async ({ ok: uok, data: udata }) => {
+      memberSection.innerHTML = '';
+      const results = uok && udata.results ? udata.results : [];
+      // Take first result whose email matches
+      const match = results.find(r => r.email && r.email.toLowerCase() === email.toLowerCase()) || results[0];
+      if (!match) {
+        memberSection.innerHTML = `<div style="color:#999;font-size:12px;">No member found for ${email}</div>`;
+        return;
+      }
+      // Fetch full profile
+      const { ok: profOk, data: profData } = await gmGet(`${BACKEND_URL}/user/${match.id}`);
+      const u = profOk && profData.user ? profData.user : match;
+      const titleEl = document.createElement('div');
+      titleEl.style.cssText = 'font-weight:600;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px;';
+      titleEl.textContent = '👤 Member';
+      memberSection.appendChild(titleEl);
+
+      const rows = [['Name', u.fullName||u.name], ['Email', u.email], ['Phone', u.phone], ['Country', u.country], ['Status', u.status], ['Instance', u.instance]].filter(([,v]) => v);
+      const table = document.createElement('table');
+      table.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px;margin-bottom:10px;';
+      rows.forEach(([label, val]) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<th style="padding:3px 8px;text-align:left;color:#888;font-weight:500;width:35%;white-space:nowrap;">${label}</th><td style="padding:3px 8px;color:#333;">${val}</td>`;
+        table.appendChild(tr);
+      });
+      memberSection.appendChild(table);
+
+      const btnRow = document.createElement('div');
+      btnRow.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;';
+      if (u.loginLink) {
+        const lb = document.createElement('a');
+        lb.href = u.loginLink; lb.target = '_blank';
+        lb.style.cssText = 'padding:4px 10px;border-radius:4px;background:#007bff;color:#fff;font-size:11px;text-decoration:none;';
+        lb.textContent = 'Login as User';
+        btnRow.appendChild(lb);
+      }
+      if (u.profileLink) {
+        const pb = document.createElement('a');
+        pb.href = u.profileLink; pb.target = '_blank';
+        pb.style.cssText = 'padding:4px 10px;border-radius:4px;background:#0056d2;color:#fff;font-size:11px;text-decoration:none;';
+        pb.textContent = 'Open Profile';
+        btnRow.appendChild(pb);
+      }
+      const noteBtn = document.createElement('button');
+      noteBtn.textContent = '📋 Post Member Note';
+      noteBtn.style.cssText = 'padding:4px 10px;border:none;border-radius:4px;background:#28a745;color:#fff;font-size:11px;cursor:pointer;';
+      noteBtn.onclick = async () => {
+        noteBtn.disabled = true; noteBtn.textContent = '⏳';
+        const { buildUserNoteHtml } = await (async () => {
+          // Build simple member note HTML inline
+          const v = val => val || '—';
+          const th = 'padding:5px 8px;background:#f5f5f5;border:1px solid #ddd;text-align:left;font-weight:600;font-size:12px;color:#444;';
+          const td = 'padding:5px 8px;border:1px solid #ddd;color:#222;font-size:12px;';
+          const rowsHtml = rows.map(([l,val]) => `<tr><th style="${th}">${l}</th><td style="${td}">${val}</td></tr>`).join('');
+          const noteHtml = `<div style="font-family:system-ui,sans-serif;"><h4 style="margin:0 0 8px;font-size:14px;">👤 Member — ${v(u.fullName||u.name)}</h4><table style="width:100%;border-collapse:collapse;">${rowsHtml}</table></div>`;
+          return { buildUserNoteHtml: () => noteHtml };
+        })();
+        const noteHtml = buildUserNoteHtml();
+        const { ok } = await gmPost(`${BACKEND_URL}/post-note`, { freshdeskTicketId, noteHtml });
+        noteBtn.disabled = false; noteBtn.textContent = '📋 Post Member Note';
+        if (ok) { showToast('✅ Member note posted!', 'success'); refreshFreshdeskTicket(); }
+        else showToast('❌ Failed.', 'error');
+      };
+      btnRow.appendChild(noteBtn);
+      memberSection.appendChild(btnRow);
+    });
+
+    // 2b. Translate Chat — fetch prompt from DB then send with ticket context
+    gmGet(`${BACKEND_URL}/settings/prompts`).then(async ({ ok: pok, data: pdata }) => {
+      const translatePrompt = (pok && Array.isArray(pdata))
+        ? pdata.find(p => p.label && p.label.toLowerCase().includes('translate chat'))
+        : null;
+      const promptText = translatePrompt ? translatePrompt.text : 'Clean and translate this chat transcript to English. Format as BOT/CUSTOMER/AGENT. Add a 2-sentence summary at the end.';
+
+      const { ok: aiOk, data: aiData } = await gmPost(`${BACKEND_URL}/ai-assist`, {
+        booking: {}, details: {}, user: null, supplier: null,
+        freshdeskTicketId, prompt: promptText,
+      });
+      if (aiOk && aiData.text) {
+        chatTextarea.value = aiData.text;
+        chatTextarea.readOnly = false;
+        postChatNoteBtn.disabled = false; postChatNoteBtn.style.opacity = '1';
+      } else {
+        chatTextarea.value = '❌ Translation failed.';
+      }
+    });
+  }
+}
+
+// ── Guided Prewarm ────────────────────────────────────────────────────────────
+async function showGuidedPrewarmModal() {
+  const { modal, body } = createModal('taGuidedModal', '🎯 Guided Prewarm', {
+    style: 'top:40px;left:50%;transform:translateX(-50%);width:1600px;max-width:calc(100vw - 24px);max-height:96vh;',
+    bodyStyle: 'display:flex;flex-direction:column;gap:12px;',
+  });
+  body.innerHTML = '<div style="color:#999;font-size:13px;">Loading tickets...</div>';
+
+  const { ok, data } = await gmGet(`${BACKEND_URL}/guided-prewarm/tickets`);
+  if (!ok || !data.tickets) {
+    body.innerHTML = '<div style="color:red;">❌ Could not load tickets.</div>';
+    return;
+  }
+
+  const tickets = data.tickets;
+  if (!tickets.length) { body.innerHTML = '<div style="color:#999;font-size:13px;">No low priority tickets found.</div>'; return; }
+
+  let idx = 0;
+  let stopped = false;
+
+  const renderTicket = async () => {
+    if (stopped || idx >= tickets.length) {
+      body.innerHTML = `<div style="font-size:13px;color:#333;text-align:center;padding:24px;">${stopped ? '🛑 Stopped.' : '✅ All tickets reviewed!'} (${idx}/${tickets.length})</div>`;
+      return;
+    }
+
+    const t = tickets[idx];
+    body.innerHTML = '';
+
+    const prog = document.createElement('div');
+    prog.style.cssText = 'font-size:12px;color:#999;margin-bottom:4px;';
+    prog.textContent = `Ticket ${idx + 1} of ${tickets.length} — #${t.id}`;
+    body.appendChild(prog);
+
+    const btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display:flex;gap:8px;margin-top:8px;flex-shrink:0;';
+    const confirmBtn = document.createElement('button');
+    confirmBtn.style.cssText = 'flex:1;padding:10px;border:none;border-radius:6px;background:#28a745;color:#fff;font-size:13px;font-weight:600;cursor:pointer;opacity:0.4;';
+    confirmBtn.textContent = '✅ Confirm';
+    confirmBtn.disabled = true;
+    const skipBtn = document.createElement('button');
+    skipBtn.style.cssText = 'padding:10px 18px;border:1px solid #ddd;border-radius:6px;background:#fff;color:#666;font-size:13px;cursor:pointer;';
+    skipBtn.textContent = '⏭ Skip';
+    skipBtn.onclick = () => { idx++; renderTicket(); };
+    const stopBtn = document.createElement('button');
+    stopBtn.style.cssText = 'padding:10px 18px;border:1px solid #dc3545;border-radius:6px;background:#fff;color:#dc3545;font-size:13px;cursor:pointer;';
+    stopBtn.textContent = '🛑 Stop';
+    stopBtn.onclick = () => { stopped = true; renderTicket(); };
+    const closeTicketBtn = document.createElement('button');
+    closeTicketBtn.style.cssText = 'padding:10px 14px;border:1px solid #6c757d;border-radius:6px;background:#fff;color:#6c757d;font-size:13px;cursor:pointer;';
+    closeTicketBtn.textContent = '✖ Close Ticket';
+    closeTicketBtn.onclick = async () => {
+      closeTicketBtn.disabled = true; closeTicketBtn.textContent = '⏳ Closing...';
+      const { ok } = await gmPost(`${BACKEND_URL}/close-ticket`, { ticketId: String(t.id) });
+      if (ok) { showToast('✅ Ticket closed.', 'success', 2000); idx++; setTimeout(() => renderTicket(), 1000); }
+      else { showToast('❌ Could not close ticket.', 'error'); closeTicketBtn.disabled = false; closeTicketBtn.textContent = '✖ Close Ticket'; }
+    };
+    const chatBtnEl = document.createElement('button');
+    chatBtnEl.textContent = '💬 Chat';
+    chatBtnEl.style.cssText = 'padding:10px 14px;border:1px solid #e83e8c;border-radius:6px;background:#fff;color:#e83e8c;font-size:13px;font-weight:600;cursor:pointer;';
+    chatBtnEl.onclick = () => showChatModal(String(t.id));
+    btnRow.appendChild(confirmBtn);
+    btnRow.appendChild(skipBtn);
+    btnRow.appendChild(closeTicketBtn);
+    btnRow.appendChild(chatBtnEl);
+    btnRow.appendChild(stopBtn);
+
+    // Two-column layout built immediately
+    const columns = document.createElement('div');
+    columns.style.cssText = 'display:flex;gap:12px;flex:1;min-height:0;';
+    const leftCol = document.createElement('div');
+    leftCol.style.cssText = 'flex:1;display:flex;flex-direction:column;gap:8px;min-width:0;';
+    const rightCol = document.createElement('div');
+    rightCol.style.cssText = 'width:520px;flex-shrink:0;display:flex;gap:8px;';
+    const bookingSection = document.createElement('div');
+    bookingSection.style.cssText = 'flex:1;border:1px solid #eee;border-radius:8px;padding:12px 14px;font-size:12px;overflow-y:auto;max-height:360px;';
+    bookingSection.innerHTML = '<div style="color:#999;font-size:11px;">⏳ Loading booking...</div>';
+    const customerSection = document.createElement('div');
+    customerSection.style.cssText = 'width:180px;flex-shrink:0;border:1px solid #eee;border-radius:8px;padding:12px 14px;font-size:12px;overflow-y:auto;max-height:360px;';
+    customerSection.innerHTML = '<div style="color:#999;font-size:11px;">No member data</div>';
+    rightCol.appendChild(bookingSection);
+    rightCol.appendChild(customerSection);
+    columns.appendChild(leftCol);
+    columns.appendChild(rightCol);
+    body.appendChild(columns);
+
+    // Ticket card with description — fetch immediately (fast, no Groq)
+    const card = document.createElement('div');
+    card.style.cssText = 'border:1px solid #eee;border-radius:8px;overflow:hidden;display:flex;flex-direction:column;flex:1;';
+    const cardHeader = document.createElement('div');
+    cardHeader.style.cssText = 'background:#f8f9fa;padding:10px 14px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;';
+    cardHeader.innerHTML = `<span style="font-weight:600;font-size:13px;color:#333;">#${t.id} — ${t.subject || '(no subject)'}</span><a href="https://mwrlife.freshdesk.com/a/tickets/${t.id}" target="_blank" style="font-size:11px;color:#007bff;">Open ↗</a>`;
+    const descEl = document.createElement('div');
+    descEl.style.cssText = 'padding:12px 14px;font-size:12px;color:#555;line-height:1.6;overflow-y:auto;flex:1;max-height:320px;';
+    descEl.innerHTML = '<div style="color:#999;">⏳ Loading...</div>';
+    card.appendChild(cardHeader);
+    card.appendChild(descEl);
+    leftCol.appendChild(card);
+
+    // Fetch description immediately
+    gmGet(`${BACKEND_URL}/guided-prewarm/ticket/${t.id}`).then(({ ok, data: td }) => {
+      descEl.innerHTML = (ok && td.ticket)
+        ? (td.ticket.description || td.ticket.description_text || '(no description)')
+        : '(could not load description)';
+    });
+
+    let currentBookingId = null;
+    let currentAction = null;
+
+    const renderBookingSection = (bd) => {
+      bookingSection.innerHTML = '';
+      customerSection.innerHTML = '<div style="color:#999;font-size:11px;">No member data</div>';
+
+      if (!bd) {
+        const msg = document.createElement('div');
+        msg.style.cssText = 'color:#dc3545;font-size:12px;margin-bottom:8px;';
+        msg.textContent = currentBookingId ? `⚠️ Could not fetch booking for "${currentBookingId}".` : '⚠️ No booking ID found in this ticket.';
+        bookingSection.appendChild(msg);
+        const manualRow = document.createElement('div');
+        manualRow.style.cssText = 'display:flex;gap:6px;';
+        const manualInput = document.createElement('input');
+        manualInput.type = 'text'; manualInput.placeholder = 'Enter booking ID manually...';
+        manualInput.value = currentBookingId || '';
+        manualInput.style.cssText = 'flex:1;padding:6px 10px;border:1px solid #ddd;border-radius:5px;font-size:12px;';
+        const fetchManualBtn = document.createElement('button');
+        fetchManualBtn.textContent = '🔍 Fetch';
+        fetchManualBtn.style.cssText = 'padding:6px 12px;border:none;border-radius:5px;background:#6f42c1;color:#fff;font-size:12px;cursor:pointer;';
+        fetchManualBtn.onclick = async () => {
+          const id = manualInput.value.trim(); if (!id) return;
+          fetchManualBtn.disabled = true; fetchManualBtn.textContent = '⏳';
+          const { ok: fok, data: fd } = await gmGet(`${BACKEND_URL}/guided-prewarm/booking/${encodeURIComponent(id)}`);
+          fetchManualBtn.disabled = false; fetchManualBtn.textContent = '🔍 Fetch';
+          if (fok && fd.bookingData) { currentBookingId = id; renderBookingSection(fd.bookingData); }
+          else showToast('Booking not found in TA.', 'error');
+        };
+        manualInput.addEventListener('keydown', e => { if (e.key === 'Enter') fetchManualBtn.click(); });
+        manualRow.appendChild(manualInput); manualRow.appendChild(fetchManualBtn);
+        bookingSection.appendChild(manualRow);
+        confirmBtn.disabled = true; confirmBtn.style.opacity = '0.4';
+        return;
+      }
+
+      const { booking, details, user } = bd;
+      const productType = (booking.productType || '').toLowerCase();
+      const isHotel    = productType.includes('hotel');
+      const isFlight   = productType.includes('flight');
+      const isTransfer = productType.includes('transfer') || productType.includes('ground');
+
+      let daysUntil = null;
+      if (booking.checkIn) {
+        const months = {january:0,february:1,march:2,april:3,may:4,june:5,july:6,august:7,september:8,october:9,november:10,december:11};
+        const m = booking.checkIn.match(/([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})/);
+        if (m) {
+          const mi = months[m[1].toLowerCase()];
+          if (mi !== undefined) {
+            const now = new Date(); now.setHours(0,0,0,0);
+            const ci = new Date(parseInt(m[3]), mi, parseInt(m[2]));
+            daysUntil = Math.round((ci - now) / 86400000);
+          }
+        }
+      }
+
+      let actionLabel = '📋 Post Note'; let actionColor = '#007bff';
+      if (isHotel) {
+        if (daysUntil !== null && daysUntil < 3) { currentAction = 'call_hotel'; actionLabel = '📞 Tag Call Hotel + High Priority'; actionColor = '#dc3545'; }
+        else { currentAction = 'hotel_email'; actionLabel = '✅ Confirm & Send Email'; actionColor = '#28a745'; }
+      } else if (isTransfer) { currentAction = 'voucher'; actionLabel = '🏷️ Tag Voucher & Move On'; actionColor = '#6c757d'; }
+      else { currentAction = 'note_only'; }
+
+      confirmBtn.textContent = actionLabel; confirmBtn.style.background = actionColor;
+      confirmBtn.disabled = false; confirmBtn.style.opacity = '1';
+
+      const rows = [
+        ['Booking ID', booking.internalBookingId || '—'], ['Supplier Ref', booking.supplierId || '—'],
+        ['Type', booking.productType || '—'],
+        isHotel ? ['Hotel', (details && details.hotelName) || booking.supplierName || '—'] : null,
+        isFlight ? ['Airline', (details && details.departAirline) || '—'] : null,
+        ['Guest', booking.guestName || '—'], ['Check-In', booking.checkIn || '—'], ['Check-Out', booking.checkOut || '—'],
+        daysUntil !== null ? ['Days until', `${daysUntil} days`] : null,
+        booking.mwrRoomType ? ['Room Type', booking.mwrRoomType] : null,
+      ].filter(Boolean);
+      const table = document.createElement('table');
+      table.style.cssText = 'width:100%;border-collapse:collapse;';
+      rows.forEach(([label, val]) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<th style="padding:3px 8px;text-align:left;color:#888;font-weight:500;width:35%;white-space:nowrap;">${label}</th><td style="padding:3px 8px;color:#333;">${val}</td>`;
+        table.appendChild(tr);
+      });
+      bookingSection.appendChild(table);
+
+      if (user) {
+        customerSection.innerHTML = '';
+        const ct = document.createElement('div');
+        ct.style.cssText = 'font-weight:600;font-size:11px;color:#888;margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em;';
+        ct.textContent = 'Member'; customerSection.appendChild(ct);
+        const uRows = [['Name', user.fullName||user.name],['Email',user.email],['Phone',user.phone],['Country',user.country],['Status',user.status]].filter(([,v])=>v);
+        const uTable = document.createElement('table'); uTable.style.cssText = 'width:100%;border-collapse:collapse;';
+        uRows.forEach(([label,val]) => { const tr = document.createElement('tr'); tr.innerHTML = `<th style="padding:3px 4px;text-align:left;color:#aaa;font-weight:500;font-size:11px;white-space:nowrap;">${label}</th><td style="padding:3px 4px;color:#333;font-size:11px;word-break:break-all;">${val}</td>`; uTable.appendChild(tr); });
+        customerSection.appendChild(uTable);
+      }
+
+      const replyRowEl = document.createElement('div'); replyRowEl.style.cssText = 'margin-top:10px;display:flex;gap:6px;';
+      const postNoteBtn = document.createElement('button');
+      postNoteBtn.textContent = '📋 Post Note';
+      postNoteBtn.style.cssText = 'flex:1;padding:7px;border:1px solid #6f42c1;border-radius:5px;background:#fff;color:#6f42c1;font-size:12px;font-weight:600;cursor:pointer;';
+      postNoteBtn.onclick = () => withButtonLoading(postNoteBtn, '⏳ Posting...', async () => {
+        const { ok, data: cr } = await gmPost(`${BACKEND_URL}/guided-prewarm/confirm`, { ticketId: String(t.id), bookingId: currentBookingId, action: 'note_only' });
+        if (ok) { showToast('✅ Note posted!', 'success', 2000); refreshFreshdeskTicket(); }
+        else showToast('❌ ' + (cr?.error || 'Error'), 'error');
+      });
+      const replyBtnEl = document.createElement('button');
+      replyBtnEl.textContent = '💬 Reply';
+      replyBtnEl.style.cssText = 'flex:1;padding:7px;border:1px solid #0056d2;border-radius:5px;background:#fff;color:#0056d2;font-size:12px;font-weight:600;cursor:pointer;';
+      replyBtnEl.onclick = () => {
+        if (bd.booking && bd.user) {
+          const cacheKey = bd.booking.internalBookingId || currentBookingId;
+          bookingCache.set(cacheKey, { booking: bd.booking, details: bd.details, user: bd.user, supplier: bd.supplier || null, noteHtml: '' });
+          lastViewedBookingId = cacheKey; lastViewedUserSummary = bd.user;
+          activateViewButton('taReplyBtn'); showReplyModal(String(t.id));
+        } else showToast('No member data available for reply.', 'warning');
+      };
+      replyRowEl.appendChild(postNoteBtn); replyRowEl.appendChild(replyBtnEl);
+      bookingSection.appendChild(replyRowEl);
+
+      confirmBtn.onclick = async () => {
+        confirmBtn.disabled = true; confirmBtn.textContent = '⏳ Processing...';
+        const { ok: cok, data: cr } = await gmPost(`${BACKEND_URL}/guided-prewarm/confirm`, { ticketId: String(t.id), bookingId: currentBookingId, action: currentAction });
+        if (!cok) { showToast('❌ Error: ' + (cr?.error || 'Server error'), 'error'); confirmBtn.disabled = false; confirmBtn.textContent = actionLabel; return; }
+        const r = cr.results; const msgs = [];
+        if (r.notePosted) msgs.push('note posted');
+        if (r.emailSent) msgs.push(`email → ${r.hotelEmail}`);
+        if (r.fallback) msgs.push('no email → tagged call_hotel');
+        if (r.tagged?.length) msgs.push('tagged: ' + r.tagged.join(', '));
+        if (r.prioritySet) msgs.push('priority: ' + r.prioritySet);
+        showToast('✅ ' + (msgs.join(' · ') || 'Done'), 'success', 3000);
+        refreshFreshdeskTicket(); idx++; setTimeout(() => renderTicket(), 1200);
+      };
+    };
+
+    // Analyse async — Groq + booking
+    gmGet(`${BACKEND_URL}/guided-prewarm/analyse/${t.id}`).then(({ ok: aok, data: analysis }) => {
+      if (!aok) { bookingSection.innerHTML = '<div style="color:red;font-size:12px;">❌ Analysis failed.</div>'; return; }
+      if (analysis.skip) { prog.textContent += ` — skipped (${analysis.reason})`; idx++; renderTicket(); return; }
+
+      currentBookingId = analysis.bookingId;
+      renderBookingSection(analysis.bookingData);
+
+      if (analysis.bookingId && analysis.bookingData) {
+        const dupSection = document.createElement('div');
+        dupSection.style.cssText = 'border:1px solid #eee;border-radius:8px;padding:10px 14px;font-size:12px;';
+        dupSection.innerHTML = '<div style="color:#999;font-size:11px;">Checking for open threads...</div>';
+        body.appendChild(dupSection);
+        const { booking, user } = analysis.bookingData;
+        gmPost(`${BACKEND_URL}/check-duplicates`, {
+          vendorConf: booking.supplierId, internalId: booking.internalBookingId,
+          memberEmail: user?.email || null, freshdeskTicketId: String(t.id),
+        }).then(({ ok, data: dd }) => {
+          dupSection.innerHTML = '';
+          const dups = (ok && dd.duplicates) ? dd.duplicates : [];
+          if (!dups.length) { dupSection.innerHTML = '<div style="color:#28a745;font-size:11px;">No open threads found.</div>'; return; }
+          const hdr = document.createElement('div');
+          hdr.style.cssText = 'font-weight:600;font-size:11px;color:#856404;margin-bottom:6px;';
+          hdr.textContent = `⚠️ ${dups.length} open thread${dups.length > 1 ? 's' : ''} found`;
+          dupSection.appendChild(hdr);
+          dups.forEach(dup => {
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid #f5f5f5;';
+            row.innerHTML = `<a href="https://mwrlife.freshdesk.com/a/tickets/${dup.id}" target="_blank" style="color:#007bff;font-weight:600;font-size:12px;white-space:nowrap;">#${dup.id}</a><span style="flex:1;color:#555;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${dup.subject||'—'}</span><span style="color:#aaa;font-size:10px;white-space:nowrap;">${(dup.matchedBy||[]).join(', ')}</span>`;
+            const previewBtn = document.createElement('button');
+            previewBtn.textContent = 'Preview';
+            previewBtn.style.cssText = 'padding:2px 8px;border:1px solid #ddd;border-radius:4px;background:#fff;color:#555;font-size:11px;cursor:pointer;flex-shrink:0;';
+            previewBtn.onclick = async () => {
+              previewBtn.textContent = '⏳';
+              const { ok: tok, data: td } = await gmGet(`${BACKEND_URL}/guided-prewarm/ticket/${dup.id}`);
+              previewBtn.textContent = 'Preview';
+              if (!tok || !td.ticket) { showToast('Could not load ticket.', 'error'); return; }
+              const pop = document.createElement('div');
+              pop.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:600px;max-width:90vw;max-height:70vh;background:#fff;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,0.3);z-index:1000001;font-family:system-ui,sans-serif;display:flex;flex-direction:column;';
+              const popHeader = document.createElement('div');
+              popHeader.style.cssText = 'padding:10px 14px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;';
+              const popTitle = document.createElement('span'); popTitle.style.cssText = 'font-weight:600;font-size:13px;'; popTitle.textContent = `#${dup.id} — ${td.ticket.subject||''}`;
+              const popClose = document.createElement('button'); popClose.textContent = '×'; popClose.style.cssText = 'background:none;border:none;font-size:18px;color:#aaa;cursor:pointer;'; popClose.onclick = () => pop.remove();
+              popHeader.appendChild(popTitle); popHeader.appendChild(popClose);
+              const popBody = document.createElement('div'); popBody.style.cssText = 'padding:12px 14px;overflow-y:auto;flex:1;font-size:12px;color:#555;line-height:1.6;';
+              popBody.innerHTML = td.ticket.description || td.ticket.description_text || '(no description)';
+              pop.appendChild(popHeader); pop.appendChild(popBody); document.body.appendChild(pop);
+            };
+            const mergeBtn = document.createElement('button');
+            mergeBtn.textContent = 'Merge';
+            mergeBtn.style.cssText = 'padding:2px 8px;border:1px solid #fd7e14;border-radius:4px;background:#fff;color:#fd7e14;font-size:11px;cursor:pointer;flex-shrink:0;';
+            mergeBtn.onclick = async () => {
+              if (!confirm(`Merge #${t.id} into #${dup.id}? This will post a note on #${dup.id} and close #${t.id}.`)) return;
+              mergeBtn.disabled = true; mergeBtn.textContent = '⏳';
+              const { ok: ftok, data: ftd } = await gmGet(`${BACKEND_URL}/guided-prewarm/ticket/${t.id}`);
+              const desc = (ftok && ftd.ticket) ? (ftd.ticket.description || ftd.ticket.description_text || '') : '';
+              const { ok, data: mr } = await gmPost(`${BACKEND_URL}/merge-ticket`, { sourceTicketId: String(t.id), targetTicketId: String(dup.id), description: desc });
+              if (ok) { showToast(`✅ Merged into #${dup.id} — ticket closed.`, 'success', 3000); idx++; setTimeout(() => renderTicket(), 1200); }
+              else { showToast('❌ Merge failed: ' + (mr?.error || 'Server error'), 'error'); mergeBtn.disabled = false; mergeBtn.textContent = 'Merge'; }
+            };
+            row.appendChild(previewBtn); row.appendChild(mergeBtn); dupSection.appendChild(row);
+          });
+        });
+      }
+    });
+
+    body.appendChild(btnRow);
+  };
+
+  renderTicket();
+}
+
 // ── Prewarm progress modal ────────────────────────────────────────────────────
 function showPrewarmModal() {
   document.getElementById('taPrewarmModal')?.remove();
@@ -332,7 +853,10 @@ function showPrewarmModal() {
   modal.innerHTML = `
     <div id="taPrewarmHandle" style="padding:12px 16px 10px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;">
       <span style="font-weight:600;font-size:13px;">🔄 Pre-warming bookings...</span>
-      <button id="taPrewarmClose" style="background:none;border:none;font-size:18px;color:#aaa;cursor:pointer;" disabled>×</button>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <button id="taPrewarmStop" style="padding:3px 10px;border:1px solid #dc3545;border-radius:4px;background:#fff;color:#dc3545;font-size:12px;cursor:pointer;font-weight:500;">Stop</button>
+        <button id="taPrewarmClose" style="background:none;border:none;font-size:18px;color:#aaa;cursor:pointer;" disabled>×</button>
+      </div>
     </div>
     <div id="taPrewarmLog" style="max-height:280px;overflow-y:auto;font-size:12px;font-family:monospace;background:#f8f8f8;padding:10px 12px;line-height:1.8;border-radius:0 0 10px 10px;"></div>`;
   document.body.appendChild(modal);
@@ -340,7 +864,12 @@ function showPrewarmModal() {
 
   const log      = document.getElementById('taPrewarmLog');
   const closeBtn = document.getElementById('taPrewarmClose');
+  const stopBtn  = document.getElementById('taPrewarmStop');
   closeBtn.onclick = () => modal.remove();
+  stopBtn.onclick = () => {
+    stopBtn.disabled = true; stopBtn.textContent = 'Stopping...';
+    GM_xmlhttpRequest({ method: 'POST', url: `${BACKEND_URL}/prewarm/stop`, headers: { 'Content-Type': 'application/json' }, data: '{}', onload: () => {} });
+  };
 
   let lastLogLength = 0;
   let pollInterval  = null;
@@ -357,6 +886,7 @@ function showPrewarmModal() {
     if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
     closeBtn.disabled = false;
     closeBtn.style.color = '#333';
+    stopBtn.disabled = true; stopBtn.style.opacity = '0.4';
   };
 
   const poll = () => {
@@ -404,6 +934,237 @@ function showPrewarmModal() {
       log.innerHTML += '<div style="color:red;">❌ Could not reach server</div>';
       stopPolling();
     },
+  });
+}
+
+// ── Bulk Confirm modal ────────────────────────────────────────────────────────
+function showBulkConfirmModal() {
+  document.getElementById('taBulkModal')?.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'taBulkModal';
+  modal.style.cssText = 'position:fixed;top:60px;left:50%;transform:translateX(-50%);width:1100px;max-width:calc(100vw - 48px);max-height:92vh;display:flex;flex-direction:column;background:#fff;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,0.25);z-index:999999;font-family:system-ui,sans-serif;resize:both;overflow:auto;min-width:500px;';
+
+  const header = document.createElement('div');
+  header.id = 'taBulkHandle';
+  header.style.cssText = 'padding:12px 16px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;cursor:move;';
+  header.innerHTML = '<span style="font-weight:600;font-size:14px;color:#333;">🏨 Bulk Confirm</span>';
+  const closeBtn = document.createElement('button');
+  closeBtn.textContent = '×';
+  closeBtn.style.cssText = 'background:none;border:none;font-size:18px;color:#aaa;cursor:pointer;';
+  closeBtn.onclick = () => modal.remove();
+  header.appendChild(closeBtn);
+
+  // Tag input row
+  const inputRow = document.createElement('div');
+  inputRow.style.cssText = 'padding:12px 16px;border-bottom:1px solid #eee;display:flex;gap:8px;align-items:center;flex-shrink:0;';
+  const tagInput = document.createElement('input');
+  tagInput.type = 'text';
+  tagInput.placeholder = 'Enter Freshdesk tag (e.g. belenli)';
+  tagInput.style.cssText = 'flex:1;padding:8px 12px;border:1px solid #ddd;border-radius:6px;font-size:13px;';
+  const fetchBtn = document.createElement('button');
+  fetchBtn.textContent = '🔍 Fetch Bookings';
+  fetchBtn.style.cssText = 'padding:8px 16px;border:none;border-radius:6px;background:#795548;color:#fff;font-size:13px;font-weight:600;cursor:pointer;';
+  inputRow.appendChild(tagInput);
+  inputRow.appendChild(fetchBtn);
+
+  // Output area
+  const outputArea = document.createElement('div');
+  outputArea.style.cssText = 'flex:1;overflow-y:auto;padding:14px 16px;display:flex;flex-direction:column;gap:16px;';
+
+  fetchBtn.onclick = () => withButtonLoading(fetchBtn, '⏳ Fetching...', async () => {
+    const tag = tagInput.value.trim();
+    if (!tag) { showToast('Enter a tag first.', 'warning'); return; }
+    outputArea.innerHTML = '<div style="color:#999;font-size:13px;">Loading...</div>';
+
+    const { ok, data } = await gmPost(`${BACKEND_URL}/bulk-confirm`, { tag });
+
+    if (!ok) { outputArea.innerHTML = `<div style="color:red;">❌ Error: ${data?.error || 'Server error'}</div>`; return; }
+
+    const { bookings, errors, total } = data;
+    outputArea.innerHTML = '';
+
+    // Status line
+    const statusLine = document.createElement('div');
+    statusLine.style.cssText = 'font-size:12px;color:#666;';
+    statusLine.textContent = `Found ${total} tickets — ${bookings.length} fetched, ${errors.length} skipped`;
+    outputArea.appendChild(statusLine);
+
+    if (errors.length > 0) {
+      const errDiv = document.createElement('div');
+      errDiv.style.cssText = 'background:#fff3cd;border:1px solid #ffc107;border-radius:6px;padding:10px 14px;font-size:12px;color:#856404;';
+      errDiv.innerHTML = '<strong>⚠️ Skipped tickets:</strong><br>' +
+        errors.map(e => `#${e.ticketId} — ${e.subject?.slice(0,50) || '?'} (${e.reason})`).join('<br>');
+      outputArea.appendChild(errDiv);
+    }
+
+    if (bookings.length === 0) { outputArea.innerHTML += '<div style="color:#999;font-size:13px;">No bookings fetched.</div>'; return; }
+
+    // ── Internal note output ────────────────────────────────────────────────
+    const fdBase = 'https://mwrlife.freshdesk.com/a/tickets/';
+    const noteSection = document.createElement('div');
+    noteSection.innerHTML = '<div style="font-weight:600;font-size:13px;margin-bottom:6px;">📋 Internal Note</div>';
+    const noteTable = `<table style="width:100%;border-collapse:collapse;font-size:12px;">
+      <thead><tr style="background:#f5f5f5;">
+        <th style="padding:5px 8px;border:1px solid #ddd;text-align:left;">Ticket</th>
+        <th style="padding:5px 8px;border:1px solid #ddd;text-align:left;">Supplier Ref</th>
+        <th style="padding:5px 8px;border:1px solid #ddd;text-align:left;">TA Booking ID</th>
+        <th style="padding:5px 8px;border:1px solid #ddd;text-align:left;">Guest</th>
+      </tr></thead>
+      <tbody>${bookings.map(b =>
+        `<tr>
+          <td style="padding:5px 8px;border:1px solid #ddd;"><a href="${fdBase}${b.ticketId}" target="_blank">#${b.ticketId}</a></td>
+          <td style="padding:5px 8px;border:1px solid #ddd;">${b.supplierId || '—'}</td>
+          <td style="padding:5px 8px;border:1px solid #ddd;">${b.internalId || '—'}</td>
+          <td style="padding:5px 8px;border:1px solid #ddd;">${b.guestName || '—'}</td>
+        </tr>`).join('')}
+      </tbody></table>`;
+
+    const notePlain = bookings.map(b =>
+      `#${b.ticketId} (${fdBase}${b.ticketId}) | Supplier: ${b.supplierId || '—'} | TA: ${b.internalId || '—'} | Guest: ${b.guestName || '—'}`
+    ).join('\n');
+
+    const noteCopyBtn = document.createElement('button');
+    noteCopyBtn.textContent = '📋 Copy';
+    noteCopyBtn.style.cssText = 'margin-top:6px;padding:5px 12px;border:1px solid #6c757d;border-radius:5px;background:#fff;color:#6c757d;font-size:12px;cursor:pointer;';
+    noteCopyBtn.onclick = () => { navigator.clipboard.writeText(notePlain); showToast('Copied!', 'success', 1500); };
+
+    noteSection.innerHTML += noteTable;
+    noteSection.appendChild(noteCopyBtn);
+    outputArea.appendChild(noteSection);
+
+    // ── Hotel email output ──────────────────────────────────────────────────
+    const emailSection = document.createElement('div');
+    emailSection.innerHTML = '<div style="font-weight:600;font-size:13px;margin-bottom:6px;">✉️ Hotel Email</div>';
+
+    const emailTable = `<table style="width:100%;border-collapse:collapse;font-size:12px;">
+      <thead><tr style="background:#f5f5f5;">
+        <th style="padding:5px 8px;border:1px solid #ddd;text-align:left;">Guest Name</th>
+        <th style="padding:5px 8px;border:1px solid #ddd;text-align:left;">Check-In</th>
+        <th style="padding:5px 8px;border:1px solid #ddd;text-align:left;">Check-Out</th>
+        <th style="padding:5px 8px;border:1px solid #ddd;text-align:left;">Room Type</th>
+        <th style="padding:5px 8px;border:1px solid #ddd;text-align:left;">Guests</th>
+        <th style="padding:5px 8px;border:1px solid #ddd;text-align:left;">Special Requests</th>
+      </tr></thead>
+      <tbody>${bookings.map(b =>
+        `<tr>
+          <td style="padding:5px 8px;border:1px solid #ddd;">${b.guestName || '—'}</td>
+          <td style="padding:5px 8px;border:1px solid #ddd;">${b.checkIn || '—'}</td>
+          <td style="padding:5px 8px;border:1px solid #ddd;">${b.checkOut || '—'}</td>
+          <td style="padding:5px 8px;border:1px solid #ddd;">${b.roomType || '—'}</td>
+          <td style="padding:5px 8px;border:1px solid #ddd;">${b.paxLine || '—'}</td>
+          <td style="padding:5px 8px;border:1px solid #ddd;">${b.requests || '—'}</td>
+        </tr>`).join('')}
+      </tbody></table>`;
+
+    const emailBody = `Dear ${bookings[0]?.hotelName || 'Hotel Team'},\n\nWe would like to request confirmation for the following reservations:\n\n` +
+      bookings.map(b =>
+        `Guest: ${b.guestName || '—'}\nCheck-In: ${b.checkIn || '—'} | Check-Out: ${b.checkOut || '—'}\nRoom Type: ${b.roomType || '—'}\nGuests: ${b.paxLine || '—'}\nSpecial Requests: ${b.requests || 'None'}\n`
+      ).join('\n---\n\n') +
+      `\nPlease confirm each reservation at your earliest convenience.\n\nBest regards,\nTravel Advantage Support`;
+
+    const emailCopyBtn = document.createElement('button');
+    emailCopyBtn.textContent = '📋 Copy Email';
+    emailCopyBtn.style.cssText = 'margin-top:6px;padding:5px 12px;border:1px solid #28a745;border-radius:5px;background:#fff;color:#28a745;font-size:12px;cursor:pointer;';
+    emailCopyBtn.onclick = () => { navigator.clipboard.writeText(emailBody); showToast('Email copied!', 'success', 1500); };
+
+    emailSection.innerHTML += emailTable;
+    emailSection.appendChild(emailCopyBtn);
+    outputArea.appendChild(emailSection);
+  });
+
+  tagInput.addEventListener('keydown', e => { if (e.key === 'Enter') fetchBtn.click(); });
+
+  modal.appendChild(header);
+  modal.appendChild(inputRow);
+  modal.appendChild(outputArea);
+  document.body.appendChild(modal);
+  makeDraggable(modal, header);
+  setTimeout(() => tagInput.focus(), 100);
+}
+
+// ── Check Pendings modal ──────────────────────────────────────────────────────
+function showCheckPendingsModal() {
+  document.getElementById('taPendingsModal')?.remove();
+  const modal = document.createElement('div');
+  modal.id = 'taPendingsModal';
+  modal.style.cssText = 'position:fixed;bottom:24px;right:24px;width:440px;background:#fff;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,0.25);z-index:999999;font-family:system-ui,sans-serif;';
+  modal.innerHTML = `
+    <div id="taPendingsHandle" style="padding:12px 16px 10px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;">
+      <span style="font-weight:600;font-size:13px;">📋 Checking pending tickets...</span>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <button id="taPendingsStop" style="padding:3px 10px;border:1px solid #dc3545;border-radius:4px;background:#fff;color:#dc3545;font-size:12px;cursor:pointer;font-weight:500;">Stop</button>
+        <button id="taPendingsClose" style="background:none;border:none;font-size:18px;color:#aaa;cursor:pointer;" disabled>×</button>
+      </div>
+    </div>
+    <div id="taPendingsLog" style="max-height:280px;overflow-y:auto;font-size:12px;font-family:monospace;background:#f8f8f8;padding:10px 12px;line-height:1.8;border-radius:0 0 10px 10px;"></div>`;
+  document.body.appendChild(modal);
+  makeDraggable(modal, document.getElementById('taPendingsHandle'));
+
+  const log      = document.getElementById('taPendingsLog');
+  const closeBtn = document.getElementById('taPendingsClose');
+  const stopBtn  = document.getElementById('taPendingsStop');
+  closeBtn.onclick = () => modal.remove();
+  stopBtn.onclick = () => {
+    stopBtn.disabled = true; stopBtn.textContent = 'Stopping...';
+    GM_xmlhttpRequest({ method: 'POST', url: `${BACKEND_URL}/check-pendings/stop`, headers: { 'Content-Type': 'application/json' }, data: '{}', onload: () => {} });
+  };
+
+  let lastLogLength = 0;
+  let pollInterval  = null;
+
+  const addLines = (lines) => {
+    lines.slice(lastLogLength).forEach(msg => { log.innerHTML += `<div>${msg}</div>`; });
+    lastLogLength = lines.length;
+    log.scrollTop = log.scrollHeight;
+  };
+
+  const stopPolling = () => {
+    if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+    closeBtn.disabled = false;
+    closeBtn.style.color = '#333';
+    stopBtn.disabled = true; stopBtn.style.opacity = '0.4';
+  };
+
+  const poll = () => {
+    GM_xmlhttpRequest({
+      method: 'GET',
+      url: `${BACKEND_URL}/check-pendings/status`,
+      onload: (res) => {
+        try {
+          const d = JSON.parse(res.responseText);
+          addLines(d.log || []);
+          if (d.done || d.error) {
+            stopPolling();
+            log.innerHTML += `<div style="margin-top:8px;font-weight:600;">${d.error ? '❌ ' + d.error : '✅ Done!'}</div>`;
+            log.scrollTop = log.scrollHeight;
+          }
+        } catch (e) { console.warn('Pendings poll parse error', e); }
+      },
+      onerror: () => { stopPolling(); log.innerHTML += '<div style="color:red;">❌ Connection lost</div>'; },
+    });
+  };
+
+  GM_xmlhttpRequest({
+    method: 'POST',
+    url: `${BACKEND_URL}/check-pendings/start`,
+    headers: { 'Content-Type': 'application/json' },
+    data: '{}',
+    onload: (res) => {
+      try {
+        const d = JSON.parse(res.responseText);
+        if (!d.success) {
+          log.innerHTML += `<div style="color:red;">❌ Failed to start: ${d.error || 'unknown'}</div>`;
+          stopPolling(); return;
+        }
+        pollInterval = setInterval(poll, 2000);
+        poll();
+      } catch (e) {
+        log.innerHTML += '<div style="color:red;">❌ Failed to start check</div>';
+        stopPolling();
+      }
+    },
+    onerror: () => { log.innerHTML += '<div style="color:red;">❌ Could not reach server</div>'; stopPolling(); },
   });
 }
 
@@ -500,7 +1261,7 @@ async function showUserProfileModal(userSummary) {
   lastViewedUserId      = userSummary.id;
   lastViewedUserSummary = userSummary;
   activateViewButton('taViewUserBtn');
-  activateViewButton('taAiBtn');
+  activateViewButton('taAiBtn'); activateViewButton('taReplyBtn');
 
   const modal = document.createElement('div');
   modal.id = 'taUserProfileModal';
@@ -742,6 +1503,124 @@ function substituteVars(text, booking, details, user) {
   });
 }
 
+// ── Reply modal ───────────────────────────────────────────────────────────────
+function showReplyModal(overrideTicketId = null) {
+  document.getElementById('taReplyModal')?.remove();
+
+  const hasBooking = lastViewedBookingId && bookingCache.has(lastViewedBookingId);
+  const hasUser    = lastViewedUserSummary !== null;
+  if (!hasBooking && !hasUser) { showToast('Load a booking or user first.', 'warning'); return; }
+
+  const data     = hasBooking ? bookingCache.get(lastViewedBookingId) : {};
+  const booking  = data.booking  || null;
+  const details  = data.details  || null;
+  const supplier = data.supplier || null;
+  const user     = (hasBooking && data.user) ? data.user
+    : (lastViewedUserId && userCache.has(lastViewedUserId) ? userCache.get(lastViewedUserId) : lastViewedUserSummary);
+
+  const supplierEmail = supplier && supplier.email ? supplier.email : null;
+  const customerEmail = user && user.email ? user.email : null;
+
+  if (!supplierEmail && !customerEmail) { showToast('No email addresses available.', 'warning'); return; }
+
+  const modal = document.createElement('div');
+  modal.id = 'taReplyModal';
+  modal.style.cssText = 'position:fixed;top:60px;right:24px;width:960px;max-width:calc(100vw - 48px);max-height:92vh;display:flex;flex-direction:column;background:#fff;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,0.25);z-index:999999;font-family:system-ui,sans-serif;resize:both;overflow:auto;min-width:500px;min-height:300px;';
+
+  // ── Header ──────────────────────────────────────────────────────────────────
+  const header = document.createElement('div');
+  header.id = 'taReplyHandle';
+  header.style.cssText = 'padding:12px 16px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;cursor:move;';
+  const closeBtn = document.createElement('button');
+  closeBtn.textContent = '×';
+  closeBtn.style.cssText = 'background:none;border:none;font-size:18px;color:#aaa;cursor:pointer;';
+  closeBtn.onclick = () => modal.remove();
+
+  const selectorRow = document.createElement('div');
+  selectorRow.style.cssText = 'display:flex;gap:8px;align-items:center;';
+  const titleEl = document.createElement('span');
+  titleEl.style.cssText = 'font-weight:600;font-size:14px;color:#333;';
+  titleEl.textContent = '💬 Reply';
+  selectorRow.appendChild(titleEl);
+
+  // ── Context bar ─────────────────────────────────────────────────────────────
+  const contextBar = document.createElement('div');
+  contextBar.style.cssText = 'padding:10px 16px;background:#f8f9fa;border-bottom:1px solid #eee;flex-shrink:0;display:flex;gap:24px;flex-wrap:wrap;font-size:12px;color:#555;';
+
+  const ctxItems = [];
+
+  // Customer info
+  if (user) {
+    const name = user.fullName || user.name || null;
+    if (name) ctxItems.push({ label: 'Customer', value: name });
+    if (user.country) ctxItems.push({ label: 'Country', value: user.country });
+  }
+
+  // Booking info
+  if (booking) {
+    if (booking.internalBookingId) ctxItems.push({ label: 'Booking', value: booking.internalBookingId });
+    const productType = (booking.productType || '').toLowerCase();
+    if (productType === 'hotel' || !productType) {
+      if (details && details.hotelName) ctxItems.push({ label: 'Hotel', value: details.hotelName });
+      if (booking.mwrRoomType) ctxItems.push({ label: 'Room', value: booking.mwrRoomType });
+    } else if (productType === 'flight') {
+      if (details && details.departAirline) ctxItems.push({ label: 'Airline', value: details.departAirline });
+      if (booking.locationTo) ctxItems.push({ label: 'Destination', value: booking.locationTo });
+    } else {
+      if (booking.supplierName) ctxItems.push({ label: 'Supplier', value: booking.supplierName });
+    }
+    if (booking.checkIn) ctxItems.push({ label: 'Check-in', value: booking.checkIn });
+  }
+
+  ctxItems.forEach(({ label, value }) => {
+    const item = document.createElement('div');
+    item.style.cssText = 'display:flex;gap:4px;align-items:baseline;';
+    item.innerHTML = `<span style="color:#999;font-weight:500;">${label}:</span><span style="color:#333;font-weight:500;">${value}</span>`;
+    contextBar.appendChild(item);
+  });
+
+  const body = document.createElement('div');
+  body.style.cssText = 'padding:14px 16px;overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:8px;';
+
+  const renderComposer = (type) => {
+    body.innerHTML = '';
+    const email = type === 'supplier' ? supplierEmail : customerEmail;
+    showReplyComposer(type, email, booking, details, user, supplier, body, null, overrideTicketId);
+  };
+
+  if (supplierEmail) {
+    const sBtn = document.createElement('button');
+    sBtn.textContent = '↗ Supplier';
+    sBtn.style.cssText = 'padding:4px 10px;border:1px solid #28a745;border-radius:14px;background:#fff;color:#28a745;font-size:12px;cursor:pointer;font-weight:500;';
+    sBtn.title = supplierEmail;
+    sBtn.onmouseover = () => { sBtn.style.background = '#28a745'; sBtn.style.color = '#fff'; };
+    sBtn.onmouseout  = () => { sBtn.style.background = '#fff'; sBtn.style.color = '#28a745'; };
+    sBtn.onclick = () => renderComposer('supplier');
+    selectorRow.appendChild(sBtn);
+  }
+  if (customerEmail) {
+    const cBtn = document.createElement('button');
+    cBtn.textContent = '↙ Customer';
+    cBtn.style.cssText = 'padding:4px 10px;border:1px solid #007bff;border-radius:14px;background:#fff;color:#007bff;font-size:12px;cursor:pointer;font-weight:500;';
+    cBtn.title = customerEmail;
+    cBtn.onmouseover = () => { cBtn.style.background = '#007bff'; cBtn.style.color = '#fff'; };
+    cBtn.onmouseout  = () => { cBtn.style.background = '#fff'; cBtn.style.color = '#007bff'; };
+    cBtn.onclick = () => renderComposer('customer');
+    selectorRow.appendChild(cBtn);
+  }
+
+  header.appendChild(selectorRow);
+  header.appendChild(closeBtn);
+  modal.appendChild(header);
+  if (ctxItems.length > 0) modal.appendChild(contextBar);
+  modal.appendChild(body);
+  document.body.appendChild(modal);
+  makeDraggable(modal, header);
+
+  if (customerEmail) renderComposer('customer');
+  else renderComposer('supplier');
+}
+
 // ── AI Assist modal ───────────────────────────────────────────────────────────
 function showAiModal() {
   document.getElementById('taAiModal')?.remove();
@@ -837,30 +1716,6 @@ function showAiModal() {
   extractBtn.onclick = () => runExtractBookingId(extractBtn, outputArea);
   promptBar.appendChild(extractBtn);
 
-  // Message Supplier button
-  const supplierEmail = (data.supplier && data.supplier.email) || null;
-  if (hasBooking && supplierEmail) {
-    const msgSupplierBtn = document.createElement('button');
-    msgSupplierBtn.textContent = '↗ Message Supplier';
-    msgSupplierBtn.style.cssText = 'padding:5px 11px;border:1px solid #28a745;border-radius:16px;background:#fff;color:#28a745;font-size:12px;cursor:pointer;font-weight:500;';
-    msgSupplierBtn.onmouseover = () => { msgSupplierBtn.style.background = '#28a745'; msgSupplierBtn.style.color = '#fff'; msgSupplierBtn.title = supplierEmail; };
-    msgSupplierBtn.onmouseout  = () => { msgSupplierBtn.style.background = '#fff';    msgSupplierBtn.style.color = '#28a745'; };
-    msgSupplierBtn.onclick = () => showReplyComposer('supplier', supplierEmail, booking, details, user, supplier, outputArea, actionsArea);
-    promptBar.appendChild(msgSupplierBtn);
-  }
-
-  // Message Customer button
-  const customerEmail = (user && user.email) || null;
-  if (customerEmail) {
-    const msgCustomerBtn = document.createElement('button');
-    msgCustomerBtn.textContent = '↙ Message Customer';
-    msgCustomerBtn.style.cssText = 'padding:5px 11px;border:1px solid #007bff;border-radius:16px;background:#fff;color:#007bff;font-size:12px;cursor:pointer;font-weight:500;';
-    msgCustomerBtn.onmouseover = () => { msgCustomerBtn.style.background = '#007bff'; msgCustomerBtn.style.color = '#fff'; msgCustomerBtn.title = customerEmail; };
-    msgCustomerBtn.onmouseout  = () => { msgCustomerBtn.style.background = '#fff';    msgCustomerBtn.style.color = '#007bff'; };
-    msgCustomerBtn.onclick = () => showReplyComposer('customer', customerEmail, booking, details, user, supplier, outputArea, actionsArea);
-    promptBar.appendChild(msgCustomerBtn);
-  }
-
   // Prompt input area
   const inputArea = document.createElement('div');
   inputArea.style.cssText = 'padding:10px 16px;border-bottom:1px solid #eee;flex-shrink:0;display:flex;flex-direction:column;gap:8px;';
@@ -891,9 +1746,9 @@ function showAiModal() {
 
   modal.appendChild(header);
   modal.appendChild(promptBar);
-  modal.appendChild(inputArea);
   modal.appendChild(outputArea);
   modal.appendChild(actionsArea);
+  modal.appendChild(inputArea);
   document.body.appendChild(modal);
   makeDraggable(modal, header);
   promptArea.focus();
@@ -920,7 +1775,16 @@ async function runAiPrompt(prompt, booking, details, user, supplier, outputArea,
     return;
   }
 
-  outputArea.textContent = data.text;
+  const hasMarkdown = /^#{1,6}\s|^\*{1,2}[^*]|\*{1,2}[^*].*\*{1,2}|^[-*+]\s|\[.+\]\(.+\)|^```|^>/m.test(data.text);
+  try {
+    if (hasMarkdown && typeof marked !== 'undefined') {
+      outputArea.innerHTML = marked.parse(data.text);
+      outputArea.style.whiteSpace = 'normal';
+    } else {
+      outputArea.textContent = data.text;
+      outputArea.style.whiteSpace = 'pre-wrap';
+    }
+  } catch(e) { outputArea.textContent = data.text; outputArea.style.whiteSpace = 'pre-wrap'; }
 
   // Show action buttons
   actionsArea.innerHTML = '';
@@ -1050,7 +1914,7 @@ async function runExtractBookingId(triggerBtn, outputArea) {
     bookingCache.set(bookingId, fullData);
     lastViewedBookingId = bookingId;
     activateViewButton('taViewBookingBtn');
-    activateViewButton('taAiBtn');
+    activateViewButton('taAiBtn'); activateViewButton('taReplyBtn');
     outputArea.textContent = '✅ Booking #' + bookingId + ' loaded — ' + (bData.booking.productType || '') + ' · ' + (bData.booking.guestName || '') + ' · ' + (bData.booking.checkIn || '') + ' → ' + (bData.booking.checkOut || '');
   } else {
     outputArea.textContent = '✅ Booking ID extracted: ' + bookingId + ' (server cached, reload preview to view)';
@@ -1122,22 +1986,25 @@ function countryToLanguage(countryCode) {
 }
 
 // ── Reply composer (supplier / customer) ──────────────────────────────────────
-function showReplyComposer(recipientType, toEmail, booking, details, user, supplier, outputArea, actionsArea) {
+function showReplyComposer(recipientType, toEmail, booking, details, user, supplier, bodyEl, _unused, overrideTicketId = null) {
   const label = recipientType === 'supplier' ? 'Supplier' : 'Customer';
+  bodyEl.innerHTML = '';
+  const container = bodyEl;
 
-  outputArea.innerHTML = '';
-  actionsArea.innerHTML = '';
-  actionsArea.style.display = 'none';
+  // To: header
+  const toInfo = document.createElement('div');
+  toInfo.style.cssText = 'font-size:12px;color:#666;margin-bottom:6px;';
+  toInfo.innerHTML = '<strong>To:</strong> ' + toEmail;
+  container.appendChild(toInfo);
+
+  const actionsArea = document.createElement('div');
+  actionsArea.style.cssText = 'display:flex;gap:8px;flex-shrink:0;';
 
   // Header info
-  const info = document.createElement('div');
-  info.style.cssText = 'font-size:12px;color:var(--color-text-secondary, #666);margin-bottom:8px;';
-  info.innerHTML = '<strong>To:</strong> ' + toEmail;
-  outputArea.appendChild(info);
 
   // Editable reply textarea — pre-populated with greeting + signature
   const replyArea = document.createElement('textarea');
-  replyArea.style.cssText = 'width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid #ddd;border-radius:6px;font-size:13px;font-family:system-ui,sans-serif;resize:vertical;min-height:200px;line-height:1.5;outline:none;';
+  replyArea.style.cssText = 'width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid #ddd;border-radius:6px;font-size:13px;font-family:system-ui,sans-serif;resize:vertical;min-height:340px;line-height:1.5;outline:none;';
   replyArea.value = buildReplySignature(recipientType, booking, details, user);
   // Note: replyArea is appended inside the two-col layout below (customer) or directly (supplier)
   attachMacroTrigger(replyArea, booking, details, user);
@@ -1158,14 +2025,11 @@ function showReplyComposer(recipientType, toEmail, booking, details, user, suppl
     const twoCol = document.createElement('div');
     twoCol.style.cssText = 'display:flex;gap:8px;margin-top:8px;';
 
-    // Move replyArea into left column
     const leftCol = document.createElement('div');
-    leftCol.style.cssText = 'flex:1;display:flex;flex-direction:column;gap:6px;';
+    leftCol.style.cssText = 'flex:2;display:flex;flex-direction:column;gap:6px;';
     replyArea.style.marginTop = '0';
     replyArea.style.minHeight = '160px';
-    leftCol.appendChild(replyArea);
 
-    // Right column — translate button + read-only output
     const rightCol = document.createElement('div');
     rightCol.style.cssText = 'flex:1;display:flex;flex-direction:column;gap:6px;';
 
@@ -1176,35 +2040,34 @@ function showReplyComposer(recipientType, toEmail, booking, details, user, suppl
     const translationArea = document.createElement('textarea');
     translationArea.readOnly = true;
     translationArea.placeholder = (targetLang ? targetLang : 'Translation') + ' will appear here...';
-    translationArea.style.cssText = 'flex:1;width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid #17a2b8;border-radius:6px;font-size:13px;font-family:system-ui,sans-serif;resize:none;min-height:160px;line-height:1.5;background:#f8fffe;color:#333;';
+    translationArea.style.cssText = 'flex:1;width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid #17a2b8;border-radius:6px;font-size:13px;font-family:system-ui,sans-serif;resize:none;min-height:340px;line-height:1.5;background:#f8fffe;color:#333;';
 
-    translateBtn.onclick = async () => {
+    translateBtn.onclick = () => withButtonLoading(translateBtn, '⏳ Translating...', async () => {
       const body = replyArea.value.trim();
       if (!body) { showToast('Nothing to translate.', 'warning'); return; }
       const lang = targetLang || 'the customer\'s language';
       const prompt = 'Translate the following text to ' + lang + '. Translate everything including greetings and sign-offs. Return only the translated text — no explanation, no extra content.\n\n' + body;
-      translateBtn.disabled = true; translateBtn.textContent = '⏳ Translating...';
       translationArea.value = 'Translating...';
       const { ok, data: aiData } = await gmPost(BACKEND_URL + '/ai-assist', {
         booking: booking || {}, details: details || {}, user, supplier: supplier || null,
         freshdeskTicketId: getFreshdeskTicketId(), prompt,
       });
-      translateBtn.disabled = false;
-      translateBtn.textContent = '🌐 ' + (targetLang ? 'Translate to ' + targetLang : 'Translate');
       translationArea.value = (ok && aiData.text) ? aiData.text.trim() : 'Translation failed.';
-    };
+    });
 
-    rightCol.appendChild(translateBtn);
+    leftCol.appendChild(replyArea);
+    leftCol.appendChild(translateBtn);
     rightCol.appendChild(translationArea);
     twoCol.appendChild(leftCol);
     twoCol.appendChild(rightCol);
-    outputArea.appendChild(twoCol);
+    container.appendChild(twoCol);
   } else {
-    outputArea.appendChild(replyArea);
+    container.appendChild(replyArea);
   }
 
   // Send + cancel actions
   actionsArea.style.display = 'flex';
+  container.appendChild(actionsArea);
 
   const sendBtn = document.createElement('button');
   sendBtn.textContent = '📤 Send to ' + label;
@@ -1212,7 +2075,7 @@ function showReplyComposer(recipientType, toEmail, booking, details, user, suppl
   sendBtn.onclick = async () => {
     const body = replyArea.value.trim();
     if (!body) { showToast('Message is empty.', 'warning'); return; }
-    const tid = getFreshdeskTicketId();
+    const tid = overrideTicketId || getFreshdeskTicketId();
     if (!tid) { showToast('No ticket detected.', 'error'); return; }
     sendBtn.disabled = true; sendBtn.textContent = 'Sending...';
     const noteHtml = '<p>' + body.replace(/\n/g, '<br>') + '</p>';
@@ -1513,12 +2376,19 @@ function addFindBookingButton() {
       btn.style.cssText = 'background:#6f42c1;color:white;border:none;padding:8px 14px;border-radius:6px;margin-left:10px;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,0.2);';
       btn.onclick = () => showBookingSearchModal();
 
-      // 🔄 Pre-warm
+      // 🔄 Pre-warm (batch)
       const prewarmBtn = document.createElement('button');
       prewarmBtn.id = 'taPrewarmBtn';
       prewarmBtn.textContent = '🔄 Pre-warm';
       prewarmBtn.style.cssText = 'background:#17a2b8;color:white;border:none;padding:8px 14px;border-radius:6px;margin-left:6px;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,0.2);';
       prewarmBtn.onclick = () => showPrewarmModal();
+
+      // 🎯 Guided prewarm
+      const guidedBtn = document.createElement('button');
+      guidedBtn.id = 'taGuidedBtn';
+      guidedBtn.textContent = '🎯 Guided';
+      guidedBtn.style.cssText = 'background:#6f42c1;color:white;border:none;padding:8px 14px;border-radius:6px;margin-left:6px;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,0.2);';
+      guidedBtn.onclick = () => showGuidedPrewarmModal();
 
       // 📂 View Booking
       const viewBookingBtn = document.createElement('button');
@@ -1541,6 +2411,20 @@ function addFindBookingButton() {
         showUserProfileModal(lastViewedUserSummary);
       };
 
+      // 🏨 Bulk Confirm
+      const bulkBtn = document.createElement('button');
+      bulkBtn.id = 'taBulkBtn';
+      bulkBtn.textContent = '🏨 Bulk';
+      bulkBtn.style.cssText = 'background:#795548;color:white;border:none;padding:8px 14px;border-radius:6px;margin-left:6px;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,0.2);';
+      bulkBtn.onclick = () => showBulkConfirmModal();
+
+      // 📋 Check Pendings
+      const pendingsBtn = document.createElement('button');
+      pendingsBtn.id = 'taPendingsBtn';
+      pendingsBtn.textContent = '📋 Pendings';
+      pendingsBtn.style.cssText = 'background:#6c757d;color:white;border:none;padding:8px 14px;border-radius:6px;margin-left:6px;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,0.2);';
+      pendingsBtn.onclick = () => showCheckPendingsModal();
+
       // 🤖 AI Assist
       const aiBtn = document.createElement('button');
       aiBtn.id = 'taAiBtn';
@@ -1548,12 +2432,23 @@ function addFindBookingButton() {
       aiBtn.style.cssText = 'background:#343a40;color:white;border:none;padding:8px 14px;border-radius:6px;margin-left:6px;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,0.2);opacity:0.45;';
       aiBtn.onclick = () => showAiModal();
 
+      // 💬 Reply
+      const replyBtn = document.createElement('button');
+      replyBtn.id = 'taReplyBtn';
+      replyBtn.textContent = '💬 Reply';
+      replyBtn.style.cssText = 'background:#0056d2;color:white;border:none;padding:8px 14px;border-radius:6px;margin-left:6px;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,0.2);opacity:0.45;';
+      replyBtn.onclick = () => showReplyModal();
+
       container.appendChild(btn);
       container.appendChild(prewarmBtn);
+      container.appendChild(guidedBtn);
       container.appendChild(viewBookingBtn);
       container.appendChild(viewUserBtn);
+      container.appendChild(bulkBtn);
+      container.appendChild(pendingsBtn);
       container.appendChild(aiBtn);
-      activateViewButton('taAiBtn');
+      container.appendChild(replyBtn);
+      activateViewButton('taAiBtn'); activateViewButton('taReplyBtn');
       clearInterval(check);
     }
   }, 1000);
@@ -1702,10 +2597,56 @@ function gmGet(url) {
 }
 
 // ── triggerActions: runs note/email actions using already-fetched data ─────────
+// ── Short note builder (client-side) ─────────────────────────────────────────
+function buildShortNoteHtml(booking, details) {
+  const v = (val) => (val !== null && val !== undefined && val !== '' && val !== '-') ? val : '—';
+  const tableStyle = 'width:100%;border-collapse:collapse;margin-bottom:12px;font-size:13px;';
+  const thStyle    = 'padding:5px 10px;background:#f5f5f5;border:1px solid #ddd;text-align:left;font-weight:600;white-space:nowrap;width:38%;color:#444;';
+  const tdStyle    = 'padding:5px 10px;border:1px solid #ddd;color:#222;';
+  const productType = (booking.productType || '').toLowerCase();
+  const isFlight    = productType.includes('flight');
+
+  const rows = [
+    ['Booking ID (TA)',        v(booking.internalBookingId)],
+    ['Booking ID (Supplier)', v(booking.supplierId)],
+    ['Supplier',              v(booking.supplierName)],
+    isFlight
+      ? ['Airline', v(details && details.departAirline ? details.departAirline : booking.supplierName)]
+      : ['Hotel',   v(details && details.hotelName    ? details.hotelName    : booking.supplierName)],
+    !isFlight && booking.mwrRoomType ? ['Room Type', v(booking.mwrRoomType)] : null,
+    ['Guest',     v(booking.guestName)],
+    ['Check-In',  v(booking.checkIn)],
+    ['Check-Out', v(booking.checkOut)],
+    isFlight && booking.locationTo  ? ['Destination', v(booking.locationTo)]  : null,
+    booking.destinationCity         ? ['City',         v(booking.destinationCity)] : null,
+  ].filter(Boolean);
+
+  const tableHtml = '<table style="' + tableStyle + '"><tbody>' +
+    rows.map(([label, val]) =>
+      '<tr><th style="' + thStyle + '">' + label + '</th><td style="' + tdStyle + '">' + val + '</td></tr>'
+    ).join('') + '</tbody></table>';
+
+  return '<div style="font-family:system-ui,-apple-system,sans-serif;font-size:13px;color:#222;max-width:900px;">' +
+    '<h4 style="margin:0 0 10px;font-size:14px;color:#1a1a1a;border-bottom:2px solid #17a2b8;padding-bottom:4px;">📌 ' +
+    v(booking.productType) + ' — #' + v(booking.internalBookingId) + '</h4>' +
+    tableHtml + '</div>';
+}
+
 async function triggerActions(bookingId, freshdeskTicketId, serverData, mode) {
   const doNote  = mode === 'full' || mode === 'note';
   const doEmail = mode === 'full' || mode === 'email';
   const { noteHtml, booking, details, hotelName, productType } = serverData;
+
+  // ── Short note (booking info only, no confirmation modal) ─────────────────
+  if (mode === 'short_note') {
+    showLoader('📌 Posting short note...');
+    const shortHtml = buildShortNoteHtml(booking, details);
+    const { ok, data: result } = await gmPost(`${BACKEND_URL}/post-note`, { freshdeskTicketId, noteHtml: shortHtml });
+    hideLoader();
+    if (!ok) showToast(`❌ Failed to post note: ${result?.error || 'Server error'}`, 'error');
+    else { showToast('📌 Short note posted!'); refreshFreshdeskTicket(); }
+    return;
+  }
 
   // ── Post note ─────────────────────────────────────────────────────────────
   const postNote = () => new Promise((resolve) => {
@@ -1791,7 +2732,7 @@ async function triggerNewBookingFlow(bookingId, freshdeskTicketId) {
       console.log(`⚡ Frontend cache hit: ${bookingId}`);
       lastViewedBookingId = bookingId;
       activateViewButton('taViewBookingBtn');
-      activateViewButton('taAiBtn');
+      activateViewButton('taAiBtn'); activateViewButton('taReplyBtn');
       const cached = bookingCache.get(bookingId);
       showPreviewModal(bookingId, cached, freshdeskTicketId);
       return;
@@ -1815,7 +2756,7 @@ async function triggerNewBookingFlow(bookingId, freshdeskTicketId) {
     bookingCache.set(bookingId, fullData);
     lastViewedBookingId = bookingId;
     activateViewButton('taViewBookingBtn');
-    activateViewButton('taAiBtn');
+    activateViewButton('taAiBtn'); activateViewButton('taReplyBtn');
     console.log(`💾 Cached in frontend: ${bookingId}`);
 
     showPreviewModal(bookingId, fullData, freshdeskTicketId);

@@ -70,7 +70,7 @@ async function setTicketPending(ticketId) {
       'Content-Type': 'application/json',
       'Authorization': getAuthHeader(),
     },
-    body: JSON.stringify({ status: 3 }),
+    body: JSON.stringify({ status: FD_STATUS.PENDING }),
   });
 
   if (!response.ok) {
@@ -117,6 +117,7 @@ async function tagTicket(ticketId, tags, type) {
  * Returns array of matching tickets (excluding the current ticket).
  */
 const { getFreshdeskSession } = require('./dbService');
+const { FD_STATUS } = require('../config');
 
 /**
  * GET using Freshdesk internal session cookie — for api/_ endpoints.
@@ -156,7 +157,7 @@ async function searchDuplicates(ref, excludeTicketId, isEmail = false) {
       console.log(`🔍 email result sample:`, JSON.stringify(results[0]).slice(0, 400));
     }
     const filtered = Array.isArray(results)
-      ? results.filter(t => String(t.id) !== String(excludeTicketId) && (t.status === 2 || t.status === 3))
+      ? results.filter(t => String(t.id) !== String(excludeTicketId) && (t.status === FD_STATUS.OPEN || t.status === FD_STATUS.PENDING))
       : [];
     console.log(`🔍 searchDuplicates: ${filtered.length} found (excluding current)`);
     return filtered;
@@ -204,4 +205,4 @@ async function getTicketContext(ticketId) {
   };
 }
 
-module.exports = { addNote, sendEmail, setTicketPending, updateTicket, tagTicket, searchDuplicates, getTicketContext };
+module.exports = { getAuthHeader, addNote, sendEmail, setTicketPending, updateTicket, tagTicket, searchDuplicates, getTicketContext };

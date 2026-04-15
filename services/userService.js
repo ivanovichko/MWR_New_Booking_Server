@@ -1,4 +1,5 @@
 const { JSDOM } = require('jsdom');
+const { taPost } = require('./taAuthService');
 
 /**
  * Parses the TravelAdvantage user profile page HTML.
@@ -107,4 +108,77 @@ function parseUserHtml(html) {
   };
 }
 
-module.exports = { parseUserHtml };
+/**
+ * Searches TravelAdvantage for primary and secondary members matching the query.
+ * Returns a merged, deduplicated array of user objects.
+ */
+async function findUser(query) {
+  const primaryParams = (searchValue) => {
+    const p = new URLSearchParams({
+      draw: '1', start: '0', length: '10',
+      'order[0][column]': '1', 'order[0][dir]': 'desc',
+      'search[value]': searchValue, 'search[regex]': 'false',
+    });
+    const nonOrderable = [0, 8, 9, 10, 12, 14];
+    for (let i = 0; i < 15; i++) {
+      p.append(`columns[${i}][data]`, i.toString());
+      p.append(`columns[${i}][name]`, '');
+      p.append(`columns[${i}][searchable]`, 'true');
+      p.append(`columns[${i}][orderable]`, nonOrderable.includes(i) ? 'false' : 'true');
+      p.append(`columns[${i}][search][value]`, '');
+      p.append(`columns[${i}][search][regex]`, 'false');
+    }
+    return p.toString();
+  };
+
+  const secondaryParams = new URLSearchParams({
+    draw: '1', start: '0', length: '10',
+    'order[0][column]': '1', 'order[0][dir]': 'desc',
+    'search[value]': query, 'search[regex]': 'false',
+  });
+  for (let i = 0; i < 10; i++) {
+    secondaryParams.append(`columns[${i}][data]`, i.toString());
+    secondaryParams.append(`columns[${i}][name]`, '');
+    secondaryParams.append(`columns[${i}][searchable]`, 'true');
+    secondaryParams.append(`columns[${i}][orderable]`, (i === 0 || i === 9) ? 'false' : 'true');
+    secondaryParams.append(`columns[${i}][search][value]`, '');
+    secondaryParams.append(`columns[${i}][search][regex]`, 'false');
+  }
+
+  const primaryUrl = `https://traveladvantage.com/admin/account/customersList/All/All/null/null/All/All/${query.replace(/\//g, '%2F')}`;
+  const [primaryRes, secondaryRes] = await Promise.all([
+    taPost(primaryUrl, primaryParams(''), { 'Referer': 'https://traveladvantage.com/admin/account/manageCustomers' }),
+    taPost('https://traveladvantage.com/admin/account/travelersList', secondaryParams.toString(), { 'Referer': 'https://traveladvantage.com/admin/account/manageTravelers' }),
+  ]);
+
+  const strip = (s) => (s || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  const extractCustomerId = (cell) => { const m = (cell || '').match(/viewCustomer\/(\d+)/); return m ? m[1] : null; };
+  const extractTravelerId = (cell) => { const m = (cell || '').match(/editTraveler\((\d+)\)/); return m ? m[1] : null; };
+
+  const primary = (primaryRes.data || []).map(row => ({
+    type:     'primary',
+    id:       extractCustomerId(row[0]),
+    name:     strip(row[2]),
+    memberId: strip(row[3]),
+    instance: strip(row[4]),
+    email:    strip(row[5]),
+    phone:    strip(row[6]),
+    country:  strip(row[7]),
+    status:   strip(row[11]),
+  })).filter(u => u.id);
+
+  const secondary = (secondaryRes.data || []).map(row => ({
+    type:          'secondary',
+    id:            extractTravelerId(row[0]),
+    name:          strip(row[2]),
+    primaryMember: strip(row[3]),
+    instance:      strip(row[4]),
+    email:         strip(row[5]),
+    phone:         strip(row[6]),
+    status:        strip(row[7]),
+  })).filter(u => u.id);
+
+  return [...primary, ...secondary];
+}
+
+module.exports = { parseUserHtml, findUser };

@@ -4,7 +4,8 @@ const { parseDataRow, parseBookingHtml } = require('./parserService');
 const { parseUserHtml } = require('./userService');
 const { buildNoteHtml } = require('./noteBuilder');
 const { lookupSupplier } = require('./supplierService');
-const { searchDuplicates } = require('./freshdeskService');
+const { getAuthHeader, searchDuplicates } = require('./freshdeskService');
+const { FD_STATUS, PREWARM_CONVERSATION_THRESHOLD } = require('../config');
 const { cacheBooking, storeTicketSummary, getCachedBooking } = require('./dbService');
 
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
@@ -12,13 +13,12 @@ const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 // ─── Fetch LOW priority tickets assigned to agent ────────────────────────────
 async function fetchLowPriorityTickets() {
   const domain  = process.env.FRESHDESK_DOMAIN;
-  const apiKey  = process.env.FRESHDESK_API_KEY;
   const agentId = process.env.FRESHDESK_AGENT_ID;
 
   if (!agentId) throw new Error('FRESHDESK_AGENT_ID not set in environment');
 
   const headers = {
-    'Authorization': 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64'),
+    'Authorization': getAuthHeader(),
   };
 
   let allTickets = [];
@@ -220,13 +220,9 @@ function checkInPriority(checkInStr) {
 // ─── Set Freshdesk ticket priority ───────────────────────────────────────────
 async function setTicketPriority(ticketId, priority) {
   const domain = process.env.FRESHDESK_DOMAIN;
-  const apiKey = process.env.FRESHDESK_API_KEY;
   await fetch(`https://${domain}/api/v2/tickets/${ticketId}`, {
     method: 'PUT',
-    headers: {
-      'Authorization': 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64'),
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Authorization': getAuthHeader(), 'Content-Type': 'application/json' },
     body: JSON.stringify({ priority }),
   });
 }
@@ -234,13 +230,9 @@ async function setTicketPriority(ticketId, priority) {
 // ─── Post Freshdesk note ──────────────────────────────────────────────────────
 async function postNote(ticketId, bodyHtml) {
   const domain = process.env.FRESHDESK_DOMAIN;
-  const apiKey = process.env.FRESHDESK_API_KEY;
   await fetch(`https://${domain}/api/v2/tickets/${ticketId}/notes`, {
     method: 'POST',
-    headers: {
-      'Authorization': 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64'),
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Authorization': getAuthHeader(), 'Content-Type': 'application/json' },
     body: JSON.stringify({ body: bodyHtml, private: true }),
   });
 }
@@ -248,15 +240,11 @@ async function postNote(ticketId, bodyHtml) {
 // ─── Set Freshdesk ticket status ─────────────────────────────────────────────
 async function setTicketStatus(ticketId, status, priority = null) {
   const domain = process.env.FRESHDESK_DOMAIN;
-  const apiKey = process.env.FRESHDESK_API_KEY;
   const body = { status };
   if (priority !== null) body.priority = priority;
   await fetch(`https://${domain}/api/v2/tickets/${ticketId}`, {
     method: 'PUT',
-    headers: {
-      'Authorization': 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64'),
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Authorization': getAuthHeader(), 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
 }
@@ -310,18 +298,17 @@ Return ONLY a JSON object, no markdown: { "date": "YYYY-MM-DD or null" }`;
 async function checkPendings(onProgress, isStopped = () => false) {
   const progress = (msg) => { console.log(msg); onProgress?.(msg); };
   const domain  = process.env.FRESHDESK_DOMAIN;
-  const apiKey  = process.env.FRESHDESK_API_KEY;
   const agentId = process.env.FRESHDESK_AGENT_ID;
   if (!agentId) throw new Error('FRESHDESK_AGENT_ID not set');
 
   progress('📋 Fetching pending tickets...');
-  const query = encodeURIComponent(`status:3 AND agent_id:${agentId}`);
+  const query = encodeURIComponent(`status:${FD_STATUS.PENDING} AND agent_id:${agentId}`);
   const tickets = [];
   let page = 1;
   while (true) {
     const res = await fetch(
       `https://${domain}/api/v2/search/tickets?query="${query}"&page=${page}`,
-      { headers: { 'Authorization': 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64') } }
+      { headers: { 'Authorization': getAuthHeader() } }
     );
     if (!res.ok) {
       const body = await res.text();
@@ -397,9 +384,8 @@ async function prewarm(onProgress, isStopped = () => false) {
       let fullTicket = ticket;
       if (!ticket.description_text && !ticket.description) {
         const domain = process.env.FRESHDESK_DOMAIN;
-        const apiKey = process.env.FRESHDESK_API_KEY;
         const res = await fetch(`https://${domain}/api/v2/tickets/${ticket.id}`, {
-          headers: { 'Authorization': 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64') },
+          headers: { 'Authorization': getAuthHeader() },
         });
         if (res.ok) fullTicket = await res.json();
       }
@@ -410,9 +396,8 @@ async function prewarm(onProgress, isStopped = () => false) {
       let conversationCount = null;
       try {
         const domain = process.env.FRESHDESK_DOMAIN;
-        const apiKey = process.env.FRESHDESK_API_KEY;
         const convRes = await fetch(`https://${domain}/api/v2/tickets/${ticket.id}/conversations`, {
-          headers: { 'Authorization': 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64') },
+          headers: { 'Authorization': getAuthHeader() },
         });
         if (convRes.ok) {
           const convData = await convRes.json();
@@ -427,10 +412,9 @@ async function prewarm(onProgress, isStopped = () => false) {
         // Tag the ticket with new_booking
         try {
           const domain = process.env.FRESHDESK_DOMAIN;
-          const apiKey = process.env.FRESHDESK_API_KEY;
           // First get existing tags to avoid overwriting
           const tRes = await fetch(`https://${domain}/api/v2/tickets/${ticket.id}`, {
-            headers: { 'Authorization': 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64') },
+            headers: { 'Authorization': getAuthHeader() },
           });
           if (tRes.ok) {
             const tData = await tRes.json();
@@ -438,10 +422,7 @@ async function prewarm(onProgress, isStopped = () => false) {
             if (!existingTags.includes('new_booking')) {
               await fetch(`https://${domain}/api/v2/tickets/${ticket.id}`, {
                 method: 'PUT',
-                headers: {
-                  'Authorization': 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64'),
-                  'Content-Type': 'application/json',
-                },
+                headers: { 'Authorization': getAuthHeader(), 'Content-Type': 'application/json' },
                 body: JSON.stringify({ tags: [...existingTags, 'new_booking'] }),
               });
             }

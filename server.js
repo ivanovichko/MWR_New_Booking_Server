@@ -2,14 +2,17 @@ require('dotenv').config();
 const express = require('express');
 const path    = require('path');
 const { parseDataRow, parseBookingHtml } = require('./services/parserService');
-const { parseUserHtml }                  = require('./services/userService');
+const { parseUserHtml, findUser }        = require('./services/userService');
 const { buildNoteHtml }                  = require('./services/noteBuilder');
 const { lookupSupplier }                 = require('./services/supplierService');
 const { aiAssist, findHotelEmail }       = require('./services/aiService');
-const { addNote, sendEmail, setTicketPending, tagTicket, searchDuplicates, getTicketContext } = require('./services/freshdeskService');
+const { getAuthHeader, addNote, sendEmail, setTicketPending, tagTicket, searchDuplicates, getTicketContext } = require('./services/freshdeskService');
 const { initDb, getCachedBooking, cacheBooking, storeSession, getPrompts, createPrompt, updatePrompt, deletePrompt, getMacros, createMacro, updateMacro, deleteMacro, storeFreshdeskSession } = require('./services/dbService');
 const { prewarm, fetchAndCacheBooking, extractBookingId, checkPendings, checkInPriority, setTicketPriority, postNote } = require('./services/prewarmService');
-const { taGet, taPost }                                        = require('./services/taAuthService');
+const { taGet, taPost }                  = require('./services/taAuthService');
+const { buildHotelEmailHtml }            = require('./services/hotelEmailBuilder');
+const { confirmTicket }                  = require('./services/ticketActionService');
+const { FD_STATUS, PREWARM_CONVERSATION_THRESHOLD } = require('./config');
 
 const app = express();
 app.use(express.json({ limit: '5mb' }));
@@ -285,70 +288,6 @@ app.post('/send-hotel-email', async (req, res) => {
   }
 });
 
-// ─── Hotel confirmation email builder ─────────────────────────────────────────
-function buildHotelEmailHtml(booking, details = {}) {
-  const v = (val) => val || '—';
-
-  // Room details: MWR room type | board (from details.roomDetails which has full string)
-  // details.roomDetails = "Standard room (standard room land view) | All-Inclusive x 1"
-  // We want just the MWR part from booking.mwrRoomType + board from roomDetails
-  let roomLine = null;
-  if (details.roomDetails) {
-    // Strip supplier room type in parentheses: "Standard room (standard room land view) | AI x 1"
-    // → "Standard room | AI x 1"
-    roomLine = details.roomDetails.replace(/\s*\([^)]*\)/, '').replace(/\s+/g, ' ').trim();
-  } else if (booking.mwrRoomType) {
-    roomLine = booking.mwrRoomType;
-  }
-
-  const lines = [
-    details.hotelName    ? `<strong>${details.hotelName}</strong>` : null,
-    details.hotelAddress ? details.hotelAddress : null,
-    details.hotelPhone   ? details.hotelPhone   : null,
-    ``,
-    `<strong>Check-in:</strong> ${v(details.checkIn  || booking.checkIn)}`,
-    `<strong>Check-out:</strong> ${v(details.checkOut || booking.checkOut)}`,
-    roomLine             ? `<strong>Room Details:</strong> ${roomLine}` : null,
-    details.bedTypes     ? `<strong>Bed Types:</strong> ${details.bedTypes}` : null,
-    details.paxLine      ? details.paxLine : null,
-    `<strong>Guest Name(s):</strong> ${v(details.guestName || booking.guestName)}`,
-    details.requests     ? `<strong>Requests for the hotel:</strong> ${details.requests}` : null,
-    details.arrivalTime  ? `<strong>Estimated Time of Arrival:</strong> ${details.arrivalTime}` : null,
-    ``,
-    `<strong>Vendor Confirmation Number:</strong> ${v(details.vendorConf || booking.supplierId)}`,
-    `<strong>Reservation:</strong> ${v(details.reservation || booking.internalBookingId)}`,
-  ].filter(l => l !== null);
-
-  const signature = `
-<br>
-<p>Sincerely,<br>
-Ivan K.<br>
-Travel Advantage Support<br>
-<span style="border-top:1px solid #ccc;display:block;padding-top:6px;margin-top:6px;">
-member@traveladvantage.com<br>
-Belgium: +32 71-96-32-66<br>
-Colombia: +571 514-1218<br>
-France: +33 27-68-63-387<br>
-Germany: +49 911 96 959 007<br>
-Italy: +39 02-94-755-846<br>
-Peru: +511 707-3968<br>
-Portugal: +35 13-0880-2148<br>
-Spain: +34 95-156-81-76<br>
-USA: +1 857 763 2085<br>
-<a href="https://www.traveladvantage.com/">https://www.traveladvantage.com/</a>
-</span></p>`;
-
-  return `
-<p>Hi, dear hotel team,</p>
-<p>My name is Ivan, and I'm here with TravelAdvantage support team. I'm contacting you to confirm the prepaid reservation.</p>
-<p>The details are as follows:</p>
-<p>${lines.join('<br>')}</p>
-<p>Kindly double-check and confirm the reservation, including the room and bed type, and please make a note of the customer arrival time or special requests (if listed).</p>
-<p>Please let me know if you need any additional information from my end.</p>
-<p>Thanks and looking forward to your reply</p>
-${signature}`.trim();
-}
-
 // ─── Tag ticket + set type ────────────────────────────────────────────────────
 app.post('/tag-ticket', async (req, res) => {
   const { freshdeskTicketId, tags, type } = req.body;
@@ -371,8 +310,7 @@ app.post('/merge-ticket', async (req, res) => {
   if (!sourceTicketId || !targetTicketId) return res.status(400).json({ error: 'sourceTicketId and targetTicketId required' });
 
   const domain = process.env.FRESHDESK_DOMAIN;
-  const apiKey = process.env.FRESHDESK_API_KEY;
-  const auth   = 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64');
+  const auth   = getAuthHeader();
 
   try {
     const sourceLink = `https://mwrlife.freshdesk.com/a/tickets/${sourceTicketId}`;
@@ -399,7 +337,7 @@ app.post('/merge-ticket', async (req, res) => {
     if (!sourceNoteRes.ok) { const b = await sourceNoteRes.text(); console.warn(`⚠️ Note on source failed: ${b.slice(0,100)}`); }
 
     // Close source ticket
-    const closeBody = JSON.stringify({ status: 5, type: 'Reservations' });
+    const closeBody = JSON.stringify({ status: FD_STATUS.CLOSED, type: 'Reservations' });
     console.log(`🔒 Closing ticket ${sourceTicketId} with body: ${closeBody}`);
     const closeRes = await fetch(`https://${domain}/api/v2/tickets/${sourceTicketId}`, {
       method: 'PUT',
@@ -422,13 +360,12 @@ app.post('/close-ticket', async (req, res) => {
   if (!ticketId) return res.status(400).json({ error: 'ticketId is required' });
   try {
     const domain = process.env.FRESHDESK_DOMAIN;
-    const apiKey = process.env.FRESHDESK_API_KEY;
-    const closeBody2 = JSON.stringify({ status: 5, type: 'Reservations' });
+    const closeBody2 = JSON.stringify({ status: FD_STATUS.CLOSED, type: 'Reservations' });
     console.log(`🔒 Closing ticket ${ticketId} with body: ${closeBody2}`);
     const r = await fetch(`https://${domain}/api/v2/tickets/${ticketId}`, {
       method: 'PUT',
       headers: {
-        'Authorization': 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64'),
+        'Authorization': getAuthHeader(),
         'Content-Type': 'application/json',
       },
       body: closeBody2,
@@ -471,90 +408,11 @@ app.post('/check-duplicates', async (req, res) => {
 app.post('/find-user', async (req, res) => {
   const { query } = req.body;
   if (!query) return res.status(400).json({ error: 'query is required' });
-
   console.log(`\n👤 User search — "${query}"`);
-
   try {
-    // Primary: name in URL path, email in POST body search[value]
-    // Run both in parallel and merge results
-    const primaryParams = (searchValue) => {
-      const p = new URLSearchParams({
-        draw: '1', start: '0', length: '10',
-        'order[0][column]': '1', 'order[0][dir]': 'desc',
-        'search[value]': searchValue, 'search[regex]': 'false',
-      });
-      const nonOrderable = [0, 8, 9, 10, 12, 14];
-      for (let i = 0; i < 15; i++) {
-        p.append(`columns[${i}][data]`, i.toString());
-        p.append(`columns[${i}][name]`, '');
-        p.append(`columns[${i}][searchable]`, 'true');
-        p.append(`columns[${i}][orderable]`, nonOrderable.includes(i) ? 'false' : 'true');
-        p.append(`columns[${i}][search][value]`, '');
-        p.append(`columns[${i}][search][regex]`, 'false');
-      }
-      return p.toString();
-    };
-
-    // Secondary: query always goes in search[value] body
-    // Orderable: only cols 1-8 are orderable (0 and 9 are not)
-    const secondaryParams = new URLSearchParams({
-      draw: '1', start: '0', length: '10',
-      'order[0][column]': '1', 'order[0][dir]': 'desc',
-      'search[value]': query, 'search[regex]': 'false',
-    });
-    for (let i = 0; i < 10; i++) {
-      secondaryParams.append(`columns[${i}][data]`, i.toString());
-      secondaryParams.append(`columns[${i}][name]`, '');
-      secondaryParams.append(`columns[${i}][searchable]`, 'true');
-      secondaryParams.append(`columns[${i}][orderable]`, (i === 0 || i === 9) ? 'false' : 'true');
-      secondaryParams.append(`columns[${i}][search][value]`, '');
-      secondaryParams.append(`columns[${i}][search][regex]`, 'false');
-    }
-
-    const primaryUrl = `https://traveladvantage.com/admin/account/customersList/All/All/null/null/All/All/${query.replace(/\//g, '%2F')}`;
-
-    const primaryReferer   = { 'Referer': 'https://traveladvantage.com/admin/account/manageCustomers' };
-    const secondaryReferer = { 'Referer': 'https://traveladvantage.com/admin/account/manageTravelers' };
-
-    const [primaryRes, secondaryRes] = await Promise.all([
-      taPost(primaryUrl, primaryParams(''), primaryReferer),
-      taPost(`https://traveladvantage.com/admin/account/travelersList`, secondaryParams.toString(), secondaryReferer),
-    ]);
-
-    console.log(`👤 Primary: recordsFiltered=${primaryRes.recordsFiltered}, rows=${(primaryRes.data||[]).length}`);
-    console.log(`👤 Secondary: recordsFiltered=${secondaryRes.recordsFiltered}, rows=${(secondaryRes.data||[]).length}`);
-
-    const strip = (s) => (s || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-    const extractCustomerId = (cell) => { const m = (cell||'').match(/viewCustomer\/(\d+)/); return m ? m[1] : null; };
-    const extractTravelerId = (cell) => { const m = (cell||'').match(/editTraveler\((\d+)\)/); return m ? m[1] : null; };
-
-    const primary = (primaryRes.data || []).map(row => ({
-      type:     'primary',
-      id:       extractCustomerId(row[0]),
-      name:     strip(row[2]),
-      memberId: strip(row[3]),
-      instance: strip(row[4]),
-      email:    strip(row[5]),
-      phone:    strip(row[6]),
-      country:  strip(row[7]),
-      status:   strip(row[11]),
-    })).filter(u => u.id);
-
-    const secondary = (secondaryRes.data || []).map(row => ({
-      type:          'secondary',
-      id:            extractTravelerId(row[0]),
-      name:          strip(row[2]),
-      primaryMember: strip(row[3]),
-      instance:      strip(row[4]),
-      email:         strip(row[5]),
-      phone:         strip(row[6]),
-      status:        strip(row[7]),
-    })).filter(u => u.id);
-
-    const results = [...primary, ...secondary];
-    console.log(`✅ User search: ${primary.length} primary, ${secondary.length} secondary`);
+    const results = await findUser(query);
+    console.log(`✅ User search: ${results.length} result(s)`);
     res.json({ success: true, results });
-
   } catch (err) {
     console.error('❌ Error in /find-user:', err.message);
     res.status(500).json({ error: err.message });
@@ -672,26 +530,24 @@ app.post('/send-reply', async (req, res) => {
 app.get('/guided-prewarm/ticket/:id', async (req, res) => {
   const ticketId = req.params.id;
   const domain   = process.env.FRESHDESK_DOMAIN;
-  const apiKey   = process.env.FRESHDESK_API_KEY;
-  const auth     = 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64');
+  const auth     = getAuthHeader();
   const tRes = await fetch(`https://${domain}/api/v2/tickets/${ticketId}`, { headers: { Authorization: auth } });
   if (!tRes.ok) return res.status(500).json({ error: 'Could not fetch ticket' });
   const ticket = await tRes.json();
-  res.json({ ticket });
+  res.json({ success: true, ticket });
 });
 
 
 app.get('/guided-prewarm/tickets', async (req, res) => {
   const domain  = process.env.FRESHDESK_DOMAIN;
-  const apiKey  = process.env.FRESHDESK_API_KEY;
   const agentId = process.env.FRESHDESK_AGENT_ID;
   if (!agentId) return res.status(500).json({ error: 'FRESHDESK_AGENT_ID not set' });
-  const auth = 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64');
+  const auth = getAuthHeader();
   console.log(`🎯 Guided prewarm: fetching low-priority tickets for agent ${agentId}`);
 
   let tickets = [];
   for (let page = 1; page <= 10; page++) {
-    const q = `priority:1 AND agent_id:${agentId} AND status:2`;
+    const q = `priority:1 AND agent_id:${agentId} AND status:${FD_STATUS.OPEN}`;
     const url = `https://${domain}/api/v2/search/tickets?query="${q.replace(/ /g, '%20')}"&page=${page}`;
     console.log(`🔍 Fetching: ${url}`);
     const r = await fetch(url, { headers: { Authorization: auth } });
@@ -707,15 +563,14 @@ app.get('/guided-prewarm/tickets', async (req, res) => {
     if (batch.length < 30) break;
   }
   console.log(`📋 Total: ${tickets.length} tickets`);
-  res.json({ tickets });
+  res.json({ success: true, tickets });
 });
 
 // Analyse a single ticket — conversation check + Groq booking ID extraction
 app.get('/guided-prewarm/analyse/:id', async (req, res) => {
   const ticketId = req.params.id;
   const domain   = process.env.FRESHDESK_DOMAIN;
-  const apiKey   = process.env.FRESHDESK_API_KEY;
-  const auth     = 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64');
+  const auth     = getAuthHeader();
   console.log(`🎯 Analysing ticket #${ticketId}`);
 
   try {
@@ -730,9 +585,9 @@ app.get('/guided-prewarm/analyse/:id', async (req, res) => {
     const conversationCount = Array.isArray(convData) ? convData.length : 0;
     console.log(`💬 Conversations: ${conversationCount}`);
 
-    if (conversationCount > 2) {
-      console.log(`⏭ Skipping — convs > 2`);
-      return res.json({ skip: true, reason: 'conversations > 2' });
+    if (conversationCount > PREWARM_CONVERSATION_THRESHOLD) {
+      console.log(`⏭ Skipping — convs > ${PREWARM_CONVERSATION_THRESHOLD}`);
+      return res.json({ skip: true, reason: `conversations > ${PREWARM_CONVERSATION_THRESHOLD}` });
     }
 
     // Groq: extract booking ID
@@ -769,9 +624,9 @@ app.get('/guided-prewarm/booking/:id', async (req, res) => {
   const bookingId = req.params.id;
   try {
     const cached = await (require('./services/dbService').getCachedBooking)(bookingId);
-    if (cached && cached.parsed) return res.json({ bookingData: cached.parsed });
+    if (cached && cached.parsed) return res.json({ success: true, bookingData: cached.parsed });
     const bookingData = await fetchAndCacheBooking(bookingId);
-    res.json({ bookingData });
+    res.json({ success: true, bookingData });
   } catch (err) {
     res.status(404).json({ error: err.message });
   }
@@ -780,88 +635,9 @@ app.get('/guided-prewarm/booking/:id', async (req, res) => {
 // Execute actions for a confirmed ticket
 app.post('/guided-prewarm/confirm', async (req, res) => {
   const { ticketId, bookingId, action } = req.body;
-  // action: 'hotel_email' | 'call_hotel' | 'voucher' | 'high_priority'
-  const domain = process.env.FRESHDESK_DOMAIN;
-  const apiKey = process.env.FRESHDESK_API_KEY;
-
+  if (!ticketId || !bookingId || !action) return res.status(400).json({ error: 'ticketId, bookingId, and action are required' });
   try {
-    const cached = await (require('./services/dbService').getCachedBooking)(bookingId);
-    if (!cached || !cached.parsed) return res.status(404).json({ error: 'Booking not cached' });
-
-    const { booking, details, user } = cached.parsed;
-    const { lookupSupplier } = require('./services/supplierService');
-    const supplier = lookupSupplier(booking.supplierName);
-    const { buildNoteHtml } = require('./services/noteBuilder');
-    const { parseBookingHtml } = require('./services/parserService');
-    const { cleanHtml: cachedCleanHtml } = cached.booking_html ? parseBookingHtml(cached.booking_html) : { cleanHtml: '' };
-
-    const results = { notePosted: false, emailSent: false, tagged: [], prioritySet: null, error: null };
-
-    // Build standard tags (same as autoTagTicket)
-    const buildTags = (bk) => {
-      const existing = bk.tags || [];
-      const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-      let monthTag = null;
-      if (bk.checkIn) {
-        const m = bk.checkIn.match(/([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})/);
-        if (m) {
-          const mi = ['january','february','march','april','may','june','july','august','september','october','november','december'].indexOf(m[1].toLowerCase());
-          if (mi >= 0) monthTag = `${months[mi]}-${m[2].padStart(2,'0')}`;
-        }
-      }
-      const country = bk.destinationCountry || null;
-      return [...new Set([...existing, monthTag, country].filter(Boolean))];
-    };
-
-    if (action === 'hotel_email') {
-      // Post booking note
-      const noteHtml = buildNoteHtml(booking, cachedCleanHtml, details, user, supplier);
-      await postNote(ticketId, noteHtml);
-      results.notePosted = true;
-
-      // Tag ticket
-      const tags = buildTags(booking);
-      await tagTicket(ticketId, tags, 'Reservations');
-      results.tagged.push(...tags);
-
-      // Find hotel email
-      const { findHotelEmail } = require('./services/aiService');
-      const emailResult = await findHotelEmail(details.hotelName || booking.supplierName, booking.locationTo, booking.destinationCountry);
-
-      if (emailResult && emailResult.email && emailResult.confidence !== 'low') {
-        const emailBody = buildHotelEmailHtml(booking, details || {});
-        await sendEmail(ticketId, emailResult.email, null, emailBody);
-        await setTicketPending(ticketId);
-        results.emailSent = true;
-        results.hotelEmail = emailResult.email;
-      } else {
-        // Fallback: tag call_hotel
-        await tagTicket(ticketId, [...buildTags(booking), 'call_hotel'], 'Reservations');
-        results.tagged.push('call_hotel');
-        results.fallback = true;
-      }
-    } else if (action === 'call_hotel') {
-      const noteHtml = buildNoteHtml(booking, cachedCleanHtml, details, user, supplier);
-      await postNote(ticketId, noteHtml);
-      results.notePosted = true;
-      const tags = [...buildTags(booking), 'call_hotel'];
-      await tagTicket(ticketId, tags, 'Reservations');
-      await setTicketPriority(ticketId, 3);
-      results.tagged.push(...tags);
-      results.prioritySet = 'high';
-    } else if (action === 'voucher') {
-      const tags = [...buildTags(booking), 'voucher'];
-      await tagTicket(ticketId, tags, 'Reservations');
-      results.tagged.push(...tags);
-    } else if (action === 'note_only') {
-      const noteHtml = buildNoteHtml(booking, cachedCleanHtml, details, user, supplier);
-      await postNote(ticketId, noteHtml);
-      results.notePosted = true;
-      const tags = buildTags(booking);
-      await tagTicket(ticketId, tags, 'Reservations');
-      results.tagged.push(...tags);
-    }
-
+    const results = await confirmTicket(ticketId, bookingId, action);
     res.json({ success: true, results });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -874,8 +650,7 @@ app.post('/bulk-confirm', async (req, res) => {
   if (!tag) return res.status(400).json({ error: 'tag is required' });
 
   const domain = process.env.FRESHDESK_DOMAIN;
-  const apiKey = process.env.FRESHDESK_API_KEY;
-  const auth   = 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64');
+  const auth   = getAuthHeader();
 
   console.log(`🏨 Bulk confirm: fetching tickets with tag "${tag}"`);
 
@@ -966,8 +741,7 @@ app.post('/bulk-confirm', async (req, res) => {
 app.get('/chat-prep/:ticketId', async (req, res) => {
   const ticketId = req.params.ticketId;
   const domain   = process.env.FRESHDESK_DOMAIN;
-  const apiKey   = process.env.FRESHDESK_API_KEY;
-  const auth     = 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64');
+  const auth     = getAuthHeader();
   try {
     const tRes = await fetch(`https://${domain}/api/v2/tickets/${ticketId}`, { headers: { Authorization: auth } });
     if (!tRes.ok) return res.status(500).json({ error: 'Could not fetch ticket' });
@@ -978,7 +752,7 @@ app.get('/chat-prep/:ticketId', async (req, res) => {
     const cRes = await fetch(`https://${domain}/api/v2/contacts/${requesterId}`, { headers: { Authorization: auth } });
     if (!cRes.ok) return res.status(500).json({ error: 'Could not fetch contact' });
     const contact = await cRes.json();
-    res.json({ email: contact.email, name: contact.name, subject: ticket.subject });
+    res.json({ success: true, email: contact.email, name: contact.name, subject: ticket.subject });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
