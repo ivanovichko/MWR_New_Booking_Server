@@ -695,25 +695,35 @@ app.get('/guided-prewarm/analyse/:id', async (req, res) => {
   const domain   = process.env.FRESHDESK_DOMAIN;
   const apiKey   = process.env.FRESHDESK_API_KEY;
   const auth     = 'Basic ' + Buffer.from(`${apiKey}:X`).toString('base64');
+  console.log(`🎯 Analysing ticket #${ticketId}`);
 
   try {
     // Fetch full ticket with HTML description
     const tRes = await fetch(`https://${domain}/api/v2/tickets/${ticketId}?include=description`, { headers: { Authorization: auth } });
-    if (!tRes.ok) return res.status(500).json({ error: 'Could not fetch ticket' });
+    if (!tRes.ok) {
+      const b = await tRes.text();
+      console.error(`❌ Ticket fetch failed ${tRes.status}: ${b.slice(0,200)}`);
+      return res.status(500).json({ error: `Could not fetch ticket: ${tRes.status}` });
+    }
     const ticket = await tRes.json();
+    console.log(`📋 Ticket fetched: "${ticket.subject?.slice(0,50)}"`);
 
     // Fetch conversation count
     const cRes = await fetch(`https://${domain}/api/v2/tickets/${ticketId}/conversations`, { headers: { Authorization: auth } });
     const convData = cRes.ok ? await cRes.json() : [];
     const conversationCount = Array.isArray(convData) ? convData.length : 0;
+    console.log(`💬 Conversations: ${conversationCount}`);
 
     // If convs > 2, skip
     if (conversationCount > 2) {
+      console.log(`⏭ Skipping — convs > 2`);
       return res.json({ skip: true, reason: 'conversations > 2', ticket });
     }
 
     // Groq: extract booking ID
+    console.log(`🤖 Running Groq extraction...`);
     const { bookingId, isNewBooking } = await extractBookingId(ticket, conversationCount);
+    console.log(`📦 bookingId=${bookingId} isNewBooking=${isNewBooking}`);
 
     // Try to fetch booking if ID found
     let bookingData = null;
@@ -721,8 +731,10 @@ app.get('/guided-prewarm/analyse/:id', async (req, res) => {
       try {
         const cached = await (require('./services/dbService').getCachedBooking)(bookingId);
         if (cached && cached.parsed) {
+          console.log(`⚡ Booking ${bookingId} from cache`);
           bookingData = cached.parsed;
         } else {
+          console.log(`📡 Fetching booking ${bookingId} from TA...`);
           bookingData = await fetchAndCacheBooking(bookingId);
         }
       } catch (e) {
@@ -732,6 +744,7 @@ app.get('/guided-prewarm/analyse/:id', async (req, res) => {
 
     res.json({ skip: false, ticket, conversationCount, bookingId, isNewBooking, bookingData });
   } catch (err) {
+    console.error(`❌ Analyse error for ticket #${ticketId}: ${err.message}`, err.stack);
     res.status(500).json({ error: err.message });
   }
 });
