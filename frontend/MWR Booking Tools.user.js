@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      4.1
+// @version      4.2
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -1300,32 +1300,25 @@ async function showGuidedPrewarmModal() {
           toRow.appendChild(toLabel); toRow.appendChild(toInput);
           replyBody.appendChild(toRow);
 
-          const suppTA = document.createElement('textarea');
-          suppTA.style.cssText = 'width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid #ddd;border-radius:6px;font-size:13px;font-family:system-ui,sans-serif;resize:vertical;min-height:200px;line-height:1.5;outline:none;margin-bottom:8px;';
-          suppTA.value = buildReplySignature('supplier', booking, details, user);
+          const suppTA = document.createElement('div');
+          suppTA.contentEditable = 'true';
+          suppTA.style.cssText = 'width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid #ddd;border-radius:6px;font-size:13px;font-family:system-ui,sans-serif;min-height:200px;line-height:1.5;outline:none;margin-bottom:8px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;';
+          suppTA.textContent = buildReplySignature('supplier', booking, details, user);
+          suppTA.innerHTML = suppTA.innerHTML.replace(/\n/g, '<br>');
           attachMacroTrigger(suppTA, booking, details, user);
           setTimeout(() => {
-            const pos = suppTA.value.indexOf('[your message here]');
-            if (pos !== -1) { suppTA.focus(); suppTA.setSelectionRange(pos, pos + '[your message here]'.length); }
+            const walker = document.createTreeWalker(suppTA, NodeFilter.SHOW_TEXT, null, false);
+            let node;
+            while ((node = walker.nextNode())) {
+              const idx = node.textContent.indexOf('[your message here]');
+              if (idx !== -1) {
+                const range = document.createRange();
+                range.setStart(node, idx); range.setEnd(node, idx + '[your message here]'.length);
+                const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
+                suppTA.focus(); break;
+              }
+            }
           }, 50);
-          replyBody.appendChild(suppTA);
-
-          // Pasted images for supplier tab
-          const suppPastedImages = [];
-          const suppImagesContainer = document.createElement('div');
-          suppImagesContainer.style.cssText = 'display:none;flex-wrap:wrap;gap:6px;margin-bottom:6px;padding:6px 8px;border:1px dashed #ddd;border-radius:5px;background:#fafafa;';
-          const refreshSuppImages = () => {
-            suppImagesContainer.innerHTML = '';
-            if (!suppPastedImages.length) { suppImagesContainer.style.display = 'none'; return; }
-            suppImagesContainer.style.display = 'flex';
-            suppPastedImages.forEach((src, i) => {
-              const wrap = document.createElement('div'); wrap.style.cssText = 'position:relative;display:inline-block;';
-              const img = document.createElement('img'); img.src = src; img.style.cssText = 'max-width:120px;max-height:90px;border-radius:4px;border:1px solid #ddd;display:block;';
-              const rb = document.createElement('button'); rb.textContent = '×'; rb.style.cssText = 'position:absolute;top:-5px;right:-5px;width:16px;height:16px;border-radius:50%;border:none;background:#dc3545;color:#fff;font-size:10px;line-height:1;cursor:pointer;padding:0;display:flex;align-items:center;justify-content:center;';
-              rb.onclick = () => { suppPastedImages.splice(i, 1); refreshSuppImages(); };
-              wrap.appendChild(img); wrap.appendChild(rb); suppImagesContainer.appendChild(wrap);
-            });
-          };
           suppTA.addEventListener('paste', (e) => {
             const items = e.clipboardData && e.clipboardData.items;
             if (!items) return;
@@ -1333,13 +1326,21 @@ async function showGuidedPrewarmModal() {
               if (item.type.startsWith('image/')) {
                 e.preventDefault();
                 const reader = new FileReader();
-                reader.onload = (ev) => { suppPastedImages.push(ev.target.result); refreshSuppImages(); };
-                reader.readAsDataURL(item.getAsFile());
-                return;
+                reader.onload = (ev) => {
+                  const img = document.createElement('img');
+                  img.src = ev.target.result;
+                  img.style.cssText = 'max-width:100%;height:auto;display:block;margin:4px 0;border-radius:3px;';
+                  const sel = window.getSelection();
+                  if (sel && sel.rangeCount) {
+                    const range = sel.getRangeAt(0); range.deleteContents(); range.insertNode(img);
+                    range.setStartAfter(img); range.collapse(true); sel.removeAllRanges(); sel.addRange(range);
+                  } else { suppTA.appendChild(img); }
+                };
+                reader.readAsDataURL(item.getAsFile()); return;
               }
             }
           });
-          replyBody.appendChild(suppImagesContainer);
+          replyBody.appendChild(suppTA);
 
           const { el: suppAttachEl, getFiles: getSuppFiles } = buildAttachmentUI();
           replyBody.appendChild(suppAttachEl);
@@ -1351,13 +1352,12 @@ async function showGuidedPrewarmModal() {
           suppSendBtn.textContent = '📤 Send to Supplier';
           suppSendBtn.style.cssText = 'padding:7px 14px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;background:#28a745;color:#fff;';
           suppSendBtn.onclick = async () => {
-            const msgBody = suppTA.value.trim();
+            const msgBody = suppTA.innerText.trim();
             const toEmail = toInput.value.trim();
             if (!msgBody) { showToast('Message is empty.', 'warning'); return; }
             if (!toEmail) { showToast('Enter supplier email.', 'warning'); return; }
             suppSendBtn.disabled = true; suppSendBtn.textContent = 'Sending...';
-            const suppImagesHtml = suppPastedImages.map(src => `<p><img src="${src}" style="max-width:100%;height:auto;border-radius:3px;"></p>`).join('');
-            const noteHtml = '<p>' + msgBody.replace(/\n/g, '<br>') + '</p>' + suppImagesHtml;
+            const noteHtml = suppTA.innerHTML;
             const attachedFiles = getSuppFiles();
             var ok;
             if (attachedFiles.length > 0) {
@@ -1378,7 +1378,7 @@ async function showGuidedPrewarmModal() {
           suppCopyBtn.textContent = '📋 Copy';
           suppCopyBtn.style.cssText = 'padding:7px 14px;border:1px solid #ddd;border-radius:6px;cursor:pointer;font-size:13px;background:#fff;color:#555;';
           suppCopyBtn.onclick = () => {
-            navigator.clipboard.writeText(suppTA.value).then(() => { suppCopyBtn.textContent = '✅ Copied!'; setTimeout(() => { suppCopyBtn.textContent = '📋 Copy'; }, 2000); });
+            navigator.clipboard.writeText(suppTA.innerText).then(() => { suppCopyBtn.textContent = '✅ Copied!'; setTimeout(() => { suppCopyBtn.textContent = '📋 Copy'; }, 2000); });
           };
 
           suppActions.appendChild(suppSendBtn); suppActions.appendChild(suppCopyBtn);
@@ -2885,63 +2885,60 @@ function showReplyComposer(recipientType, toEmail, booking, details, user, suppl
 
   // Header info
 
-  // Editable reply textarea — pre-populated with greeting + signature
-  const replyArea = document.createElement('textarea');
-  replyArea.style.cssText = 'width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid #ddd;border-radius:6px;font-size:13px;font-family:system-ui,sans-serif;resize:vertical;min-height:200px;line-height:1.5;outline:none;';
-  replyArea.value = buildReplySignature(recipientType, booking, details, user);
-  // Note: replyArea is appended inside the two-col layout below (customer) or directly (supplier)
+  // Editable reply area (contenteditable — preserves pasted HTML, images, links)
+  const replyArea = document.createElement('div');
+  replyArea.contentEditable = 'true';
+  replyArea.style.cssText = 'width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid #ddd;border-radius:6px;font-size:13px;font-family:system-ui,sans-serif;min-height:200px;line-height:1.5;outline:none;overflow-y:auto;white-space:pre-wrap;word-break:break-word;';
+  // Set initial signature as plain text, converting newlines to <br>
+  replyArea.textContent = buildReplySignature(recipientType, booking, details, user);
+  replyArea.innerHTML = replyArea.innerHTML.replace(/\n/g, '<br>');
   attachMacroTrigger(replyArea, booking, details, user);
-  // Place cursor at the [your message here] placeholder
+  // Place cursor at [your message here]
   setTimeout(() => {
-    const pos = replyArea.value.indexOf('[your message here]');
-    if (pos !== -1) {
-      replyArea.focus();
-      replyArea.setSelectionRange(pos, pos + '[your message here]'.length);
+    const walker = document.createTreeWalker(replyArea, NodeFilter.SHOW_TEXT, null, false);
+    let node;
+    while ((node = walker.nextNode())) {
+      const idx = node.textContent.indexOf('[your message here]');
+      if (idx !== -1) {
+        const range = document.createRange();
+        range.setStart(node, idx);
+        range.setEnd(node, idx + '[your message here]'.length);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        replyArea.focus();
+        break;
+      }
     }
   }, 50);
 
-  container.appendChild(replyArea);
-
-  // ── Pasted images strip ────────────────────────────────────────────────────
-  const pastedImages = []; // array of base64 data URLs
-  const pastedImagesContainer = document.createElement('div');
-  pastedImagesContainer.style.cssText = 'display:none;flex-wrap:wrap;gap:6px;margin-top:6px;padding:6px 8px;border:1px dashed #ddd;border-radius:5px;background:#fafafa;';
-
-  const refreshImagesContainer = () => {
-    pastedImagesContainer.innerHTML = '';
-    if (!pastedImages.length) { pastedImagesContainer.style.display = 'none'; return; }
-    pastedImagesContainer.style.display = 'flex';
-    pastedImages.forEach((src, i) => {
-      const wrap = document.createElement('div');
-      wrap.style.cssText = 'position:relative;display:inline-block;';
-      const img = document.createElement('img');
-      img.src = src;
-      img.style.cssText = 'max-width:120px;max-height:90px;border-radius:4px;border:1px solid #ddd;display:block;';
-      const removeBtn = document.createElement('button');
-      removeBtn.textContent = '×';
-      removeBtn.style.cssText = 'position:absolute;top:-5px;right:-5px;width:16px;height:16px;border-radius:50%;border:none;background:#dc3545;color:#fff;font-size:10px;line-height:1;cursor:pointer;padding:0;display:flex;align-items:center;justify-content:center;';
-      removeBtn.onclick = () => { pastedImages.splice(i, 1); refreshImagesContainer(); };
-      wrap.appendChild(img); wrap.appendChild(removeBtn);
-      pastedImagesContainer.appendChild(wrap);
-    });
-  };
-
+  // Intercept image-file pastes — convert blob URL to base64 so images survive in email
   replyArea.addEventListener('paste', (e) => {
     const items = e.clipboardData && e.clipboardData.items;
     if (!items) return;
     for (const item of items) {
       if (item.type.startsWith('image/')) {
         e.preventDefault();
-        const file = item.getAsFile();
         const reader = new FileReader();
-        reader.onload = (ev) => { pastedImages.push(ev.target.result); refreshImagesContainer(); };
-        reader.readAsDataURL(file);
+        reader.onload = (ev) => {
+          const img = document.createElement('img');
+          img.src = ev.target.result;
+          img.style.cssText = 'max-width:100%;height:auto;display:block;margin:4px 0;border-radius:3px;';
+          const sel = window.getSelection();
+          if (sel && sel.rangeCount) {
+            const range = sel.getRangeAt(0);
+            range.deleteContents(); range.insertNode(img);
+            range.setStartAfter(img); range.collapse(true);
+            sel.removeAllRanges(); sel.addRange(range);
+          } else { replyArea.appendChild(img); }
+        };
+        reader.readAsDataURL(item.getAsFile());
         return;
       }
     }
   });
 
-  container.appendChild(pastedImagesContainer);
+  container.appendChild(replyArea);
 
   // Translation — only for customer replies, hidden until first use
   if (recipientType === 'customer') {
@@ -2957,7 +2954,7 @@ function showReplyComposer(recipientType, toEmail, booking, details, user, suppl
     translationArea.style.cssText = 'display:none;width:100%;box-sizing:border-box;margin-top:6px;padding:9px 12px;border:1px solid #17a2b8;border-radius:6px;font-size:13px;font-family:system-ui,sans-serif;resize:vertical;min-height:160px;line-height:1.5;background:#f8fffe;color:#333;';
 
     translateBtn.onclick = () => withButtonLoading(translateBtn, '⏳ Translating...', async () => {
-      const body = replyArea.value.trim();
+      const body = replyArea.innerText.trim();
       if (!body) { showToast('Nothing to translate.', 'warning'); return; }
       const lang = targetLang || 'the customer\'s language';
       const prompt = 'Translate the following text to ' + lang + '. Translate everything including greetings and sign-offs. Return only the translated text — no explanation, no extra content.\n\n' + body;
@@ -2986,13 +2983,12 @@ function showReplyComposer(recipientType, toEmail, booking, details, user, suppl
   sendBtn.textContent = '📤 Send to ' + label;
   sendBtn.style.cssText = 'padding:7px 14px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;background:#28a745;color:#fff;';
   sendBtn.onclick = async () => {
-    const body = replyArea.value.trim();
+    const body = replyArea.innerText.trim();
     if (!body) { showToast('Message is empty.', 'warning'); return; }
     const tid = overrideTicketId || getFreshdeskTicketId();
     if (!tid) { showToast('No ticket detected.', 'error'); return; }
     sendBtn.disabled = true; sendBtn.textContent = 'Sending...';
-    const imagesHtml = pastedImages.map(src => `<p><img src="${src}" style="max-width:100%;height:auto;border-radius:3px;"></p>`).join('');
-    const noteHtml = '<p>' + body.replace(/\n/g, '<br>') + '</p>' + imagesHtml;
+    const noteHtml = replyArea.innerHTML;
     const attachedFiles = getFiles();
     var ok;
     if (attachedFiles.length > 0) {
@@ -3013,7 +3009,7 @@ function showReplyComposer(recipientType, toEmail, booking, details, user, suppl
   copyBtn.textContent = '📋 Copy';
   copyBtn.style.cssText = 'padding:7px 14px;border:1px solid #ddd;border-radius:6px;cursor:pointer;font-size:13px;background:#fff;color:#555;';
   copyBtn.onclick = () => {
-    navigator.clipboard.writeText(replyArea.value).then(() => { copyBtn.textContent = '✅ Copied!'; setTimeout(() => { copyBtn.textContent = '📋 Copy'; }, 2000); });
+    navigator.clipboard.writeText(replyArea.innerText).then(() => { copyBtn.textContent = '✅ Copied!'; setTimeout(() => { copyBtn.textContent = '📋 Copy'; }, 2000); });
   };
 
   actionsArea.appendChild(sendBtn);
@@ -3228,22 +3224,55 @@ function showAiSettingsModal(booking, details, user, supplier) {
 }
 
 // ── Macro # trigger ───────────────────────────────────────────────────────────
-function attachMacroTrigger(textarea, booking, details, user) {
+function attachMacroTrigger(el, booking, details, user) {
+  const isCE = el.isContentEditable;
   let macroQuery = null;
   let dropdown = null;
 
-  const dismissDropdown = () => {
-    dropdown?.remove();
-    dropdown = null;
-    macroQuery = null;
+  const dismissDropdown = () => { dropdown?.remove(); dropdown = null; macroQuery = null; };
+
+  const getTextBeforeCursor = () => {
+    if (!isCE) return el.value.slice(0, el.selectionStart);
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return '';
+    const range = sel.getRangeAt(0).cloneRange();
+    range.selectNodeContents(el);
+    range.setEnd(sel.focusNode, sel.focusOffset);
+    return range.toString();
   };
 
-  textarea.addEventListener('keyup', async (e) => {
-    const val = textarea.value;
-    const pos = textarea.selectionStart;
-    const before = val.slice(0, pos);
-    const match = before.match(/#(\w*)$/);
+  const insertMacro = (substituted) => {
+    if (!isCE) {
+      const cur = el.value;
+      const curPos = el.selectionStart;
+      const hashPos = cur.slice(0, curPos).lastIndexOf('#');
+      el.value = cur.slice(0, hashPos) + substituted + cur.slice(curPos);
+      el.selectionStart = el.selectionEnd = hashPos + substituted.length;
+    } else {
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount) return;
+      const range = sel.getRangeAt(0);
+      const node = range.endContainer;
+      const offset = range.endOffset;
+      if (node.nodeType === Node.TEXT_NODE) {
+        const before = node.textContent.slice(0, offset);
+        const hashIdx = before.lastIndexOf('#');
+        if (hashIdx !== -1) {
+          node.textContent = node.textContent.slice(0, hashIdx) + substituted + node.textContent.slice(offset);
+          const nr = document.createRange();
+          nr.setStart(node, hashIdx + substituted.length);
+          nr.collapse(true);
+          sel.removeAllRanges();
+          sel.addRange(nr);
+        }
+      }
+    }
+    el.focus();
+  };
 
+  el.addEventListener('keyup', async (e) => {
+    const before = getTextBeforeCursor();
+    const match = before.match(/#(\w*)$/);
     if (!match) { dismissDropdown(); return; }
     macroQuery = match[1].toLowerCase();
 
@@ -3256,9 +3285,7 @@ function attachMacroTrigger(textarea, booking, details, user) {
 
     dropdown = document.createElement('div');
     dropdown.style.cssText = 'position:fixed;background:#fff;border:1px solid #ddd;border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,0.15);z-index:1000001;min-width:240px;max-height:200px;overflow-y:auto;font-family:system-ui,sans-serif;font-size:13px;';
-
-    // Position above textarea
-    const rect = textarea.getBoundingClientRect();
+    const rect = el.getBoundingClientRect();
     dropdown.style.left = rect.left + 'px';
     dropdown.style.bottom = (window.innerHeight - rect.top + 4) + 'px';
 
@@ -3270,14 +3297,8 @@ function attachMacroTrigger(textarea, booking, details, user) {
       item.onmouseout  = () => { item.style.background = ''; };
       item.onmousedown = (ev) => {
         ev.preventDefault();
-        const substituted = substituteVars(m.text, booking, details, user);
-        const cur = textarea.value;
-        const curPos = textarea.selectionStart;
-        const hashPos = cur.slice(0, curPos).lastIndexOf('#');
-        textarea.value = cur.slice(0, hashPos) + substituted + cur.slice(curPos);
-        textarea.selectionStart = textarea.selectionEnd = hashPos + substituted.length;
+        insertMacro(substituteVars(m.text, booking, details, user));
         dismissDropdown();
-        textarea.focus();
       };
       dropdown.appendChild(item);
     });
@@ -3285,8 +3306,8 @@ function attachMacroTrigger(textarea, booking, details, user) {
     document.body.appendChild(dropdown);
   });
 
-  textarea.addEventListener('keydown', (e) => { if (e.key === 'Escape') dismissDropdown(); });
-  textarea.addEventListener('blur', () => setTimeout(dismissDropdown, 150));
+  el.addEventListener('keydown', (e) => { if (e.key === 'Escape') dismissDropdown(); });
+  el.addEventListener('blur', () => setTimeout(dismissDropdown, 150));
 }
 
 function addFindBookingButton() {
