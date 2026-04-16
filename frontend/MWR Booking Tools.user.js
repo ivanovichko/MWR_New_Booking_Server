@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      4.3
+// @version      4.4
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -542,9 +542,34 @@ async function showGuidedPrewarmModal() {
     bodyStyle: 'display:flex;flex-direction:column;gap:12px;',
   });
 
+  // ── Resume state ───────────────────────────────────────────────────────────
+  const GUIDED_STATE_KEY = 'ta_guided_state';
+  const savedState = (() => { try { return JSON.parse(localStorage.getItem(GUIDED_STATE_KEY)); } catch { return null; } })();
+
   // ── Priority picker ────────────────────────────────────────────────────────
-  const filterKey = await new Promise((resolve) => {
+  const { filterKey, resumeTicketId } = await new Promise((resolve) => {
     body.innerHTML = '';
+
+    // Resume banner
+    if (savedState && savedState.filterKey && savedState.ticketId) {
+      const filterLabels = { high: '🔴 High', medium: '🟡 Medium', low: '🟢 Low', pending: '⏳ Pending' };
+      const banner = document.createElement('div');
+      banner.style.cssText = 'background:#f0f5ff;border:1px solid #0056d2;border-radius:8px;padding:10px 16px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:12px;';
+      const bannerText = document.createElement('span');
+      bannerText.style.cssText = 'font-size:12px;color:#0056d2;';
+      bannerText.innerHTML = `<strong>Resume?</strong> Last session: ${filterLabels[savedState.filterKey] || savedState.filterKey} queue — ticket <strong>#${savedState.ticketId}</strong>`;
+      const resumeBtn = document.createElement('button');
+      resumeBtn.textContent = '▶ Resume';
+      resumeBtn.style.cssText = 'padding:6px 14px;border:none;border-radius:6px;background:#0056d2;color:#fff;font-size:12px;font-weight:600;cursor:pointer;flex-shrink:0;';
+      resumeBtn.onclick = () => resolve({ filterKey: savedState.filterKey, resumeTicketId: String(savedState.ticketId) });
+      const discardBtn = document.createElement('button');
+      discardBtn.textContent = 'Start fresh';
+      discardBtn.style.cssText = 'padding:6px 12px;border:1px solid #aaa;border-radius:6px;background:#fff;color:#666;font-size:12px;cursor:pointer;flex-shrink:0;';
+      discardBtn.onclick = () => { localStorage.removeItem(GUIDED_STATE_KEY); banner.remove(); };
+      banner.appendChild(bannerText); banner.appendChild(resumeBtn); banner.appendChild(discardBtn);
+      body.appendChild(banner);
+    }
+
     const label = document.createElement('div');
     label.style.cssText = 'font-size:13px;color:#555;margin-bottom:8px;text-align:center;';
     label.textContent = 'Which queue would you like to work on?';
@@ -563,7 +588,7 @@ async function showGuidedPrewarmModal() {
       const btn = document.createElement('button');
       btn.style.cssText = 'padding:14px 22px;border:2px solid ' + opt.color + ';border-radius:8px;background:' + opt.bg + ';color:' + opt.color + ';font-size:14px;font-weight:600;cursor:pointer;min-width:100px;';
       btn.innerHTML = opt.icon + '<br><span style="font-size:13px;">' + opt.label + '</span>';
-      btn.onclick = function() { resolve(opt.key); };
+      btn.onclick = function() { resolve({ filterKey: opt.key, resumeTicketId: null }); };
       grid.appendChild(btn);
     });
     body.appendChild(grid);
@@ -581,15 +606,21 @@ async function showGuidedPrewarmModal() {
   if (!tickets.length) { body.innerHTML = '<div style="color:#999;font-size:13px;">No ' + filterKey + ' tickets found.</div>'; return; }
 
   let idx = 0;
+  if (resumeTicketId) {
+    const ri = tickets.findIndex(t => String(t.id) === resumeTicketId);
+    if (ri >= 0) idx = ri;
+  }
   let stopped = false;
 
   const renderTicket = async () => {
     if (stopped || idx >= tickets.length) {
+      localStorage.removeItem(GUIDED_STATE_KEY);
       body.innerHTML = `<div style="font-size:13px;color:#333;text-align:center;padding:24px;">${stopped ? '🛑 Stopped.' : '✅ All tickets reviewed!'} (${idx}/${tickets.length})</div>`;
       return;
     }
 
     const t = tickets[idx];
+    localStorage.setItem(GUIDED_STATE_KEY, JSON.stringify({ filterKey, ticketId: String(t.id) }));
     body.innerHTML = '';
 
     const prog = document.createElement('div');
