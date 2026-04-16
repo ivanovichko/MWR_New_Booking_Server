@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      4.2
+// @version      4.3
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -1422,21 +1422,11 @@ async function showGuidedPrewarmModal() {
         dupSection.innerHTML = '<div style="color:#999;font-size:11px;">Checking for open threads...</div>';
         body.appendChild(dupSection);
         const { booking, user } = analysis.bookingData;
-        gmPost(`${BACKEND_URL}/check-duplicates`, {
-          vendorConf: booking.supplierId, internalId: booking.internalBookingId,
-          memberEmail: user?.email || null, freshdeskTicketId: String(t.id),
-        }).then(({ ok, data: dd }) => {
-          dupSection.innerHTML = '';
-          const dups = (ok && dd.duplicates) ? dd.duplicates : [];
-          if (!dups.length) { dupSection.innerHTML = '<div style="color:#28a745;font-size:11px;">No open threads found.</div>'; return; }
-          const hdr = document.createElement('div');
-          hdr.style.cssText = 'font-weight:600;font-size:11px;color:#856404;margin-bottom:6px;';
-          hdr.textContent = `⚠️ ${dups.length} open thread${dups.length > 1 ? 's' : ''} found`;
-          dupSection.appendChild(hdr);
-          dups.forEach(dup => {
-            const row = document.createElement('div');
-            row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid #f5f5f5;';
-            row.innerHTML = `<a href="https://mwrlife.freshdesk.com/a/tickets/${dup.id}" target="_blank" style="color:#007bff;font-weight:600;font-size:12px;white-space:nowrap;">#${dup.id}</a><span style="flex:1;color:#555;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${dup.subject||'—'}</span><span style="color:#aaa;font-size:10px;white-space:nowrap;">${(dup.matchedBy||[]).join(', ')}</span>`;
+        // Helper: build a dup row with Preview/Merge and Merge out buttons
+        const buildDupRow = (dup) => {
+          const row = document.createElement('div');
+          row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid #f5f5f5;';
+          row.innerHTML = `<a href="https://mwrlife.freshdesk.com/a/tickets/${dup.id}" target="_blank" style="color:#007bff;font-weight:600;font-size:12px;white-space:nowrap;">#${dup.id}</a><span style="flex:1;color:#555;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${dup.subject||'—'}</span><span style="color:#aaa;font-size:10px;white-space:nowrap;">${(dup.matchedBy||[]).join(', ')}</span>`;
             const previewBtn = document.createElement('button');
             previewBtn.textContent = 'Preview / Merge';
             previewBtn.style.cssText = 'padding:2px 8px;border:1px solid #fd7e14;border-radius:4px;background:#fff;color:#fd7e14;font-size:11px;cursor:pointer;flex-shrink:0;font-weight:500;';
@@ -1577,8 +1567,78 @@ async function showGuidedPrewarmModal() {
               if (mok) { showToast(`✅ Merged #${t.id} into #${dup.id} — ticket closed.`, 'success', 3000); idx++; setTimeout(() => renderTicket(), 1200); }
               else { showToast('❌ Merge failed: ' + (mr?.error || 'Server error'), 'error'); mergeOutBtn.disabled = false; mergeOutBtn.textContent = '📤 Merge out'; }
             };
-            row.appendChild(previewBtn); row.appendChild(mergeOutBtn); dupSection.appendChild(row);
-          });
+          row.appendChild(previewBtn); row.appendChild(mergeOutBtn);
+          return row;
+        };
+
+        gmPost(`${BACKEND_URL}/check-duplicates`, {
+          vendorConf: booking.supplierId, internalId: booking.internalBookingId,
+          memberEmail: user?.email || null, freshdeskTicketId: String(t.id),
+        }).then(({ ok, data: dd }) => {
+          dupSection.innerHTML = '';
+          const dups = (ok && dd.duplicates) ? dd.duplicates : [];
+          if (dups.length) {
+            const hdr = document.createElement('div');
+            hdr.style.cssText = 'font-weight:600;font-size:11px;color:#856404;margin-bottom:6px;';
+            hdr.textContent = `⚠️ ${dups.length} open thread${dups.length > 1 ? 's' : ''} found`;
+            dupSection.appendChild(hdr);
+            dups.forEach(dup => dupSection.appendChild(buildDupRow(dup)));
+          } else {
+            const noRes = document.createElement('div');
+            noRes.style.cssText = 'color:#28a745;font-size:11px;margin-bottom:6px;';
+            noRes.textContent = 'No open threads found.';
+            dupSection.appendChild(noRes);
+          }
+
+          // ── Manual search ──────────────────────────────────────────────────
+          const divider = document.createElement('div');
+          divider.style.cssText = 'border-top:1px solid #eee;margin:8px 0 6px;';
+          dupSection.appendChild(divider);
+
+          const searchRow = document.createElement('div');
+          searchRow.style.cssText = 'display:flex;align-items:center;gap:6px;flex-wrap:wrap;';
+
+          const searchInput = document.createElement('input');
+          searchInput.type = 'text'; searchInput.placeholder = 'Search tickets to merge…';
+          searchInput.style.cssText = 'flex:1;min-width:120px;padding:4px 8px;border:1px solid #ddd;border-radius:4px;font-size:11px;';
+
+          const closedChk = document.createElement('input');
+          closedChk.type = 'checkbox'; closedChk.id = 'manualSearchClosed_' + t.id;
+          const closedLbl = document.createElement('label');
+          closedLbl.htmlFor = closedChk.id;
+          closedLbl.textContent = 'incl. closed';
+          closedLbl.style.cssText = 'font-size:10px;color:#888;white-space:nowrap;cursor:pointer;';
+
+          const searchBtn = document.createElement('button');
+          searchBtn.textContent = '🔍 Search';
+          searchBtn.style.cssText = 'padding:4px 10px;border:none;border-radius:4px;background:#6f42c1;color:#fff;font-size:11px;cursor:pointer;';
+
+          const manualResults = document.createElement('div');
+          manualResults.style.cssText = 'width:100%;margin-top:4px;';
+
+          const doSearch = async () => {
+            const q = searchInput.value.trim(); if (!q) return;
+            searchBtn.disabled = true; searchBtn.textContent = '⏳';
+            const { ok: sok, data: sd } = await gmPost(`${BACKEND_URL}/search-tickets`, {
+              query: q, includeClosed: closedChk.checked, freshdeskTicketId: String(t.id),
+            });
+            searchBtn.disabled = false; searchBtn.textContent = '🔍 Search';
+            manualResults.innerHTML = '';
+            const found = (sok && sd.duplicates) ? sd.duplicates : [];
+            if (!found.length) {
+              manualResults.innerHTML = '<div style="color:#999;font-size:11px;padding:2px 0;">No results.</div>';
+              return;
+            }
+            found.forEach(dup => manualResults.appendChild(buildDupRow(dup)));
+          };
+          searchBtn.onclick = doSearch;
+          searchInput.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+
+          searchRow.appendChild(searchInput);
+          searchRow.appendChild(closedChk); searchRow.appendChild(closedLbl);
+          searchRow.appendChild(searchBtn);
+          dupSection.appendChild(searchRow);
+          dupSection.appendChild(manualResults);
         });
       }
     });

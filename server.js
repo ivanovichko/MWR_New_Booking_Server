@@ -418,6 +418,21 @@ app.post('/check-duplicates', async (req, res) => {
   }
 });
 
+// ─── Manual ticket search (for merge) ────────────────────────────────────────
+app.post('/search-tickets', async (req, res) => {
+  const { query, includeClosed, freshdeskTicketId } = req.body;
+  if (!query) return res.status(400).json({ error: 'query required' });
+  try {
+    const results = await searchDuplicates(query, freshdeskTicketId || null, false, !!includeClosed);
+    const duplicates = results.map(t => ({ ...t, matchedBy: ['manual search'] }));
+    console.log(`🔍 Manual ticket search "${query}": ${duplicates.length} found`);
+    res.json({ success: true, duplicates });
+  } catch (err) {
+    console.error('❌ Error in /search-tickets:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── Find user (search primary + secondary) ───────────────────────────────────
 app.post('/find-user', async (req, res) => {
   const { query } = req.body;

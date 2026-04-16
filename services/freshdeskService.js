@@ -148,7 +148,7 @@ async function fdGet(path) {
  * Search for duplicate tickets using Freshdesk internal full-text search.
  * Falls back to empty array on session errors so callers degrade gracefully.
  */
-async function searchDuplicates(ref, excludeTicketId, isEmail = false) {
+async function searchDuplicates(ref, excludeTicketId, isEmail = false, includeClosed = false) {
   if (!ref) return [];
   console.log(`🔍 searchDuplicates: ref="${ref}"`);
   try {
@@ -158,7 +158,11 @@ async function searchDuplicates(ref, excludeTicketId, isEmail = false) {
       console.log(`🔍 email result sample:`, JSON.stringify(results[0]).slice(0, 400));
     }
     const filtered = Array.isArray(results)
-      ? results.filter(t => String(t.id) !== String(excludeTicketId) && (t.status === FD_STATUS.OPEN || t.status === FD_STATUS.PENDING))
+      ? results.filter(t => {
+          if (String(t.id) === String(excludeTicketId)) return false;
+          if (includeClosed) return true;
+          return t.status === FD_STATUS.OPEN || t.status === FD_STATUS.PENDING;
+        })
       : [];
     console.log(`🔍 searchDuplicates: ${filtered.length} found (excluding current)`);
     return filtered;
