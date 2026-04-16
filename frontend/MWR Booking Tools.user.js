@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      2.9
+// @version      3.0
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -1223,37 +1223,92 @@ async function showGuidedPrewarmModal() {
             row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid #f5f5f5;';
             row.innerHTML = `<a href="https://mwrlife.freshdesk.com/a/tickets/${dup.id}" target="_blank" style="color:#007bff;font-weight:600;font-size:12px;white-space:nowrap;">#${dup.id}</a><span style="flex:1;color:#555;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${dup.subject||'—'}</span><span style="color:#aaa;font-size:10px;white-space:nowrap;">${(dup.matchedBy||[]).join(', ')}</span>`;
             const previewBtn = document.createElement('button');
-            previewBtn.textContent = 'Preview';
-            previewBtn.style.cssText = 'padding:2px 8px;border:1px solid #ddd;border-radius:4px;background:#fff;color:#555;font-size:11px;cursor:pointer;flex-shrink:0;';
+            previewBtn.textContent = 'Preview / Merge';
+            previewBtn.style.cssText = 'padding:2px 8px;border:1px solid #fd7e14;border-radius:4px;background:#fff;color:#fd7e14;font-size:11px;cursor:pointer;flex-shrink:0;font-weight:500;';
             previewBtn.onclick = async () => {
-              previewBtn.textContent = '⏳';
+              previewBtn.disabled = true; previewBtn.textContent = '⏳';
               const { ok: tok, data: td } = await gmGet(`${BACKEND_URL}/guided-prewarm/ticket/${dup.id}`);
-              previewBtn.textContent = 'Preview';
+              previewBtn.disabled = false; previewBtn.textContent = 'Preview / Merge';
               if (!tok || !td.ticket) { showToast('Could not load ticket.', 'error'); return; }
+
               const pop = document.createElement('div');
-              pop.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:600px;max-width:90vw;max-height:70vh;background:#fff;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,0.3);z-index:1000001;font-family:system-ui,sans-serif;display:flex;flex-direction:column;';
+              pop.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:660px;max-width:92vw;max-height:78vh;background:#fff;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,0.3);z-index:1000001;font-family:system-ui,sans-serif;display:flex;flex-direction:column;';
               const popHeader = document.createElement('div');
-              popHeader.style.cssText = 'padding:10px 14px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;';
-              const popTitle = document.createElement('span'); popTitle.style.cssText = 'font-weight:600;font-size:13px;'; popTitle.textContent = `#${dup.id} — ${td.ticket.subject||''}`;
-              const popClose = document.createElement('button'); popClose.textContent = '×'; popClose.style.cssText = 'background:none;border:none;font-size:18px;color:#aaa;cursor:pointer;'; popClose.onclick = () => pop.remove();
-              popHeader.appendChild(popTitle); popHeader.appendChild(popClose);
-              const popBody = document.createElement('div'); popBody.style.cssText = 'padding:12px 14px;overflow-y:auto;flex:1;font-size:12px;color:#555;line-height:1.6;';
-              popBody.innerHTML = td.ticket.description || td.ticket.description_text || '(no description)';
-              pop.appendChild(popHeader); pop.appendChild(popBody); document.body.appendChild(pop);
+              popHeader.style.cssText = 'padding:10px 14px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;background:#fff8f0;border-radius:10px 10px 0 0;';
+              const popTitle = document.createElement('span');
+              popTitle.style.cssText = 'font-weight:600;font-size:13px;color:#333;';
+              popTitle.textContent = `#${dup.id} — ${td.ticket.subject || ''}`;
+              const popSubtitle = document.createElement('span');
+              popSubtitle.style.cssText = 'font-size:11px;color:#888;margin-left:8px;';
+              popSubtitle.textContent = '← click a message to merge it into #' + t.id;
+              const popClose = document.createElement('button');
+              popClose.textContent = '×'; popClose.style.cssText = 'background:none;border:none;font-size:18px;color:#aaa;cursor:pointer;margin-left:8px;';
+              popClose.onclick = () => pop.remove();
+              const titleWrap = document.createElement('div');
+              titleWrap.style.cssText = 'display:flex;align-items:center;min-width:0;overflow:hidden;';
+              titleWrap.appendChild(popTitle); titleWrap.appendChild(popSubtitle);
+              popHeader.appendChild(titleWrap); popHeader.appendChild(popClose);
+
+              const popBody = document.createElement('div');
+              popBody.style.cssText = 'padding:12px 14px;overflow-y:auto;flex:1;font-size:12px;color:#555;line-height:1.6;';
+
+              const strip = (html) => (html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+              const msgStyle = (bg, border) =>
+                `margin-bottom:10px;padding:8px 10px;background:${bg};border-left:3px solid ${border};border-radius:3px;font-size:12px;line-height:1.5;`;
+
+              const addPopMsg = (label, bg, border, bodyHtml) => {
+                const wrap = document.createElement('div');
+                wrap.style.cssText = msgStyle(bg, border);
+                const lbl = document.createElement('div');
+                lbl.style.cssText = 'font-size:10px;color:#999;margin-bottom:4px;display:flex;justify-content:space-between;align-items:center;';
+                const lblText = document.createElement('span');
+                lblText.textContent = label;
+                const mergeThisBtn = document.createElement('button');
+                mergeThisBtn.textContent = '📥 Merge into #' + t.id;
+                mergeThisBtn.style.cssText = 'padding:2px 8px;border:1px solid #fd7e14;border-radius:4px;background:#fff;color:#fd7e14;font-size:10px;cursor:pointer;font-weight:600;';
+                mergeThisBtn.onclick = async () => {
+                  if (!confirm(`Post this message as a note on #${t.id} and close #${dup.id}?`)) return;
+                  mergeThisBtn.disabled = true; mergeThisBtn.textContent = '⏳ Merging...';
+                  const { ok: mok, data: mr } = await gmPost(`${BACKEND_URL}/merge-ticket`, {
+                    sourceTicketId: String(dup.id),
+                    targetTicketId: String(t.id),
+                    description: bodyHtml,
+                  });
+                  if (mok) {
+                    pop.remove();
+                    showToast(`✅ Merged from #${dup.id} — it has been closed.`, 'success', 3000);
+                    refreshThread();
+                  } else {
+                    showToast('❌ Merge failed: ' + (mr?.error || 'Server error'), 'error');
+                    mergeThisBtn.disabled = false; mergeThisBtn.textContent = '📥 Merge into #' + t.id;
+                  }
+                };
+                lbl.appendChild(lblText); lbl.appendChild(mergeThisBtn);
+                const content = document.createElement('div');
+                content.innerHTML = bodyHtml;
+                wrap.appendChild(lbl); wrap.appendChild(content);
+                popBody.appendChild(wrap);
+              };
+
+              // Opening description
+              const desc = td.ticket.description || td.ticket.description_text || '';
+              if (desc) addPopMsg('📩 Customer (opening)', '#f8f9fa', '#6c757d', td.ticket.description || strip(desc));
+
+              // Conversations
+              (td.conversations || []).forEach(c => {
+                const isNote = c.private;
+                const isIncoming = !isNote && c.incoming;
+                const label  = isNote ? '📌 Agent note' : isIncoming ? '📩 Customer' : '📤 Agent reply';
+                const bg     = isNote ? '#fffbf0' : isIncoming ? '#f8f9fa' : '#f0f4ff';
+                const border = isNote ? '#fd7e14'  : isIncoming ? '#6c757d' : '#0056d2';
+                addPopMsg(label, bg, border, c.body || strip(c.body_text || ''));
+              });
+
+              if (!popBody.children.length) popBody.innerHTML = '<span style="color:#999;">(no content)</span>';
+              pop.appendChild(popHeader); pop.appendChild(popBody);
+              document.body.appendChild(pop);
             };
-            const mergeBtn = document.createElement('button');
-            mergeBtn.textContent = 'Merge';
-            mergeBtn.style.cssText = 'padding:2px 8px;border:1px solid #fd7e14;border-radius:4px;background:#fff;color:#fd7e14;font-size:11px;cursor:pointer;flex-shrink:0;';
-            mergeBtn.onclick = async () => {
-              if (!confirm(`Merge #${t.id} into #${dup.id}? This will post a note on #${dup.id} and close #${t.id}.`)) return;
-              mergeBtn.disabled = true; mergeBtn.textContent = '⏳';
-              const { ok: ftok, data: ftd } = await gmGet(`${BACKEND_URL}/guided-prewarm/ticket/${t.id}`);
-              const desc = (ftok && ftd.ticket) ? (ftd.ticket.description || ftd.ticket.description_text || '') : '';
-              const { ok, data: mr } = await gmPost(`${BACKEND_URL}/merge-ticket`, { sourceTicketId: String(t.id), targetTicketId: String(dup.id), description: desc });
-              if (ok) { showToast(`✅ Merged into #${dup.id} — ticket closed.`, 'success', 3000); idx++; setTimeout(() => renderTicket(), 1200); }
-              else { showToast('❌ Merge failed: ' + (mr?.error || 'Server error'), 'error'); mergeBtn.disabled = false; mergeBtn.textContent = 'Merge'; }
-            };
-            row.appendChild(previewBtn); row.appendChild(mergeBtn); dupSection.appendChild(row);
+            row.appendChild(previewBtn); dupSection.appendChild(row);
           });
         });
       }
