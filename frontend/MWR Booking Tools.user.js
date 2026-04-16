@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      4.0
+// @version      4.1
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -1310,6 +1310,37 @@ async function showGuidedPrewarmModal() {
           }, 50);
           replyBody.appendChild(suppTA);
 
+          // Pasted images for supplier tab
+          const suppPastedImages = [];
+          const suppImagesContainer = document.createElement('div');
+          suppImagesContainer.style.cssText = 'display:none;flex-wrap:wrap;gap:6px;margin-bottom:6px;padding:6px 8px;border:1px dashed #ddd;border-radius:5px;background:#fafafa;';
+          const refreshSuppImages = () => {
+            suppImagesContainer.innerHTML = '';
+            if (!suppPastedImages.length) { suppImagesContainer.style.display = 'none'; return; }
+            suppImagesContainer.style.display = 'flex';
+            suppPastedImages.forEach((src, i) => {
+              const wrap = document.createElement('div'); wrap.style.cssText = 'position:relative;display:inline-block;';
+              const img = document.createElement('img'); img.src = src; img.style.cssText = 'max-width:120px;max-height:90px;border-radius:4px;border:1px solid #ddd;display:block;';
+              const rb = document.createElement('button'); rb.textContent = '×'; rb.style.cssText = 'position:absolute;top:-5px;right:-5px;width:16px;height:16px;border-radius:50%;border:none;background:#dc3545;color:#fff;font-size:10px;line-height:1;cursor:pointer;padding:0;display:flex;align-items:center;justify-content:center;';
+              rb.onclick = () => { suppPastedImages.splice(i, 1); refreshSuppImages(); };
+              wrap.appendChild(img); wrap.appendChild(rb); suppImagesContainer.appendChild(wrap);
+            });
+          };
+          suppTA.addEventListener('paste', (e) => {
+            const items = e.clipboardData && e.clipboardData.items;
+            if (!items) return;
+            for (const item of items) {
+              if (item.type.startsWith('image/')) {
+                e.preventDefault();
+                const reader = new FileReader();
+                reader.onload = (ev) => { suppPastedImages.push(ev.target.result); refreshSuppImages(); };
+                reader.readAsDataURL(item.getAsFile());
+                return;
+              }
+            }
+          });
+          replyBody.appendChild(suppImagesContainer);
+
           const { el: suppAttachEl, getFiles: getSuppFiles } = buildAttachmentUI();
           replyBody.appendChild(suppAttachEl);
 
@@ -1325,7 +1356,8 @@ async function showGuidedPrewarmModal() {
             if (!msgBody) { showToast('Message is empty.', 'warning'); return; }
             if (!toEmail) { showToast('Enter supplier email.', 'warning'); return; }
             suppSendBtn.disabled = true; suppSendBtn.textContent = 'Sending...';
-            const noteHtml = '<p>' + msgBody.replace(/\n/g, '<br>') + '</p>';
+            const suppImagesHtml = suppPastedImages.map(src => `<p><img src="${src}" style="max-width:100%;height:auto;border-radius:3px;"></p>`).join('');
+            const noteHtml = '<p>' + msgBody.replace(/\n/g, '<br>') + '</p>' + suppImagesHtml;
             const attachedFiles = getSuppFiles();
             var ok;
             if (attachedFiles.length > 0) {
@@ -2870,6 +2902,47 @@ function showReplyComposer(recipientType, toEmail, booking, details, user, suppl
 
   container.appendChild(replyArea);
 
+  // ── Pasted images strip ────────────────────────────────────────────────────
+  const pastedImages = []; // array of base64 data URLs
+  const pastedImagesContainer = document.createElement('div');
+  pastedImagesContainer.style.cssText = 'display:none;flex-wrap:wrap;gap:6px;margin-top:6px;padding:6px 8px;border:1px dashed #ddd;border-radius:5px;background:#fafafa;';
+
+  const refreshImagesContainer = () => {
+    pastedImagesContainer.innerHTML = '';
+    if (!pastedImages.length) { pastedImagesContainer.style.display = 'none'; return; }
+    pastedImagesContainer.style.display = 'flex';
+    pastedImages.forEach((src, i) => {
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'position:relative;display:inline-block;';
+      const img = document.createElement('img');
+      img.src = src;
+      img.style.cssText = 'max-width:120px;max-height:90px;border-radius:4px;border:1px solid #ddd;display:block;';
+      const removeBtn = document.createElement('button');
+      removeBtn.textContent = '×';
+      removeBtn.style.cssText = 'position:absolute;top:-5px;right:-5px;width:16px;height:16px;border-radius:50%;border:none;background:#dc3545;color:#fff;font-size:10px;line-height:1;cursor:pointer;padding:0;display:flex;align-items:center;justify-content:center;';
+      removeBtn.onclick = () => { pastedImages.splice(i, 1); refreshImagesContainer(); };
+      wrap.appendChild(img); wrap.appendChild(removeBtn);
+      pastedImagesContainer.appendChild(wrap);
+    });
+  };
+
+  replyArea.addEventListener('paste', (e) => {
+    const items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        const reader = new FileReader();
+        reader.onload = (ev) => { pastedImages.push(ev.target.result); refreshImagesContainer(); };
+        reader.readAsDataURL(file);
+        return;
+      }
+    }
+  });
+
+  container.appendChild(pastedImagesContainer);
+
   // Translation — only for customer replies, hidden until first use
   if (recipientType === 'customer') {
     const targetLang = countryToLanguage(user && user.country);
@@ -2918,7 +2991,8 @@ function showReplyComposer(recipientType, toEmail, booking, details, user, suppl
     const tid = overrideTicketId || getFreshdeskTicketId();
     if (!tid) { showToast('No ticket detected.', 'error'); return; }
     sendBtn.disabled = true; sendBtn.textContent = 'Sending...';
-    const noteHtml = '<p>' + body.replace(/\n/g, '<br>') + '</p>';
+    const imagesHtml = pastedImages.map(src => `<p><img src="${src}" style="max-width:100%;height:auto;border-radius:3px;"></p>`).join('');
+    const noteHtml = '<p>' + body.replace(/\n/g, '<br>') + '</p>' + imagesHtml;
     const attachedFiles = getFiles();
     var ok;
     if (attachedFiles.length > 0) {
