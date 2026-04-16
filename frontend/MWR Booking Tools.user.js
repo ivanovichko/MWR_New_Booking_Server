@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      3.3
+// @version      3.4
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -684,12 +684,16 @@ async function showGuidedPrewarmModal() {
     const summarizeBtn = document.createElement('button');
     summarizeBtn.textContent = '✨ Summarize';
     summarizeBtn.style.cssText = 'padding:3px 9px;border:1px solid #6f42c1;border-radius:4px;background:#fff;color:#6f42c1;font-size:11px;font-weight:500;cursor:pointer;';
+    const mergeOutBtn = document.createElement('button');
+    mergeOutBtn.textContent = '📤 Merge out';
+    mergeOutBtn.style.cssText = 'padding:3px 9px;border:1px solid #fd7e14;border-radius:4px;background:#fff;color:#fd7e14;font-size:11px;font-weight:500;cursor:pointer;';
     const openLink = document.createElement('a');
     openLink.href = `https://mwrlife.freshdesk.com/a/tickets/${t.id}`;
     openLink.target = '_blank';
     openLink.style.cssText = 'font-size:11px;color:#007bff;';
     openLink.textContent = 'Open ↗';
     cardActions.appendChild(summarizeBtn);
+    cardActions.appendChild(mergeOutBtn);
     cardActions.appendChild(openLink);
     cardHeader.appendChild(cardTitleSpan);
     cardHeader.appendChild(cardActions);
@@ -701,7 +705,55 @@ async function showGuidedPrewarmModal() {
     statusTagBar.style.cssText = 'display:flex;align-items:center;gap:16px;padding:6px 14px;border-bottom:1px solid #eee;background:#fafafa;font-size:12px;flex-shrink:0;flex-wrap:wrap;';
     statusTagBar.innerHTML = '<span style="color:#ccc;font-size:11px;">⏳</span>';
 
+    // Merge-out bar — hidden until 📤 Merge out is clicked
+    const mergeOutBar = document.createElement('div');
+    mergeOutBar.style.cssText = 'display:none;align-items:center;gap:8px;padding:6px 14px;border-bottom:1px solid #fde8d0;background:#fff8f0;font-size:12px;flex-shrink:0;';
+    const mergeOutLabel = document.createElement('span');
+    mergeOutLabel.style.cssText = 'font-size:11px;color:#fd7e14;font-weight:600;white-space:nowrap;';
+    mergeOutLabel.textContent = '📤 Merge #' + t.id + ' into:';
+    const mergeOutInput = document.createElement('input');
+    mergeOutInput.type = 'text';
+    mergeOutInput.placeholder = 'Target ticket ID…';
+    mergeOutInput.style.cssText = 'border:1px solid #ffc59a;border-radius:4px;padding:3px 8px;font-size:11px;width:130px;outline:none;';
+    const mergeOutConfirmBtn = document.createElement('button');
+    mergeOutConfirmBtn.textContent = 'Merge →';
+    mergeOutConfirmBtn.style.cssText = 'padding:3px 10px;border:1px solid #fd7e14;border-radius:4px;background:#fd7e14;color:#fff;font-size:11px;font-weight:600;cursor:pointer;';
+    const mergeOutCancelBtn = document.createElement('button');
+    mergeOutCancelBtn.textContent = '×';
+    mergeOutCancelBtn.style.cssText = 'background:none;border:none;font-size:16px;color:#aaa;cursor:pointer;line-height:1;padding:0;';
+    mergeOutBar.appendChild(mergeOutLabel);
+    mergeOutBar.appendChild(mergeOutInput);
+    mergeOutBar.appendChild(mergeOutConfirmBtn);
+    mergeOutBar.appendChild(mergeOutCancelBtn);
+
+    mergeOutBtn.onclick = () => {
+      mergeOutBar.style.display = mergeOutBar.style.display === 'none' ? 'flex' : 'none';
+      if (mergeOutBar.style.display !== 'none') mergeOutInput.focus();
+    };
+    mergeOutCancelBtn.onclick = () => { mergeOutBar.style.display = 'none'; mergeOutInput.value = ''; };
+    mergeOutConfirmBtn.onclick = async () => {
+      const targetId = mergeOutInput.value.trim().replace(/^#/, '');
+      if (!targetId || !/^\d+$/.test(targetId)) { showToast('Enter a valid ticket ID.', 'error'); return; }
+      if (!confirm(`Merge #${t.id} into #${targetId}? Ticket #${t.id} will be closed.`)) return;
+      mergeOutConfirmBtn.disabled = true; mergeOutConfirmBtn.textContent = '⏳';
+      const { ok: mok, data: mr } = await gmPost(`${BACKEND_URL}/merge-ticket`, {
+        sourceTicketId: String(t.id),
+        targetTicketId: targetId,
+        description: '',
+      });
+      if (mok) {
+        mergeOutBar.style.display = 'none'; mergeOutInput.value = '';
+        showToast(`✅ Merged #${t.id} into #${targetId} — this ticket has been closed.`, 'success', 3500);
+        refreshThread();
+      } else {
+        showToast('❌ Merge failed: ' + (mr?.error || 'Server error'), 'error');
+        mergeOutConfirmBtn.disabled = false; mergeOutConfirmBtn.textContent = 'Merge →';
+      }
+    };
+    mergeOutInput.addEventListener('keydown', e => { if (e.key === 'Enter') mergeOutConfirmBtn.click(); if (e.key === 'Escape') mergeOutCancelBtn.click(); });
+
     card.appendChild(cardHeader);
+    card.appendChild(mergeOutBar);
     card.appendChild(statusTagBar);
     card.appendChild(descEl);
     leftCol.appendChild(card);
