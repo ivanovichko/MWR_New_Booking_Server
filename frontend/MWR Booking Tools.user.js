@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      3.2
+// @version      3.3
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -1050,6 +1050,28 @@ async function showGuidedPrewarmModal() {
         // Populate customer section from userData fallback (no booking found)
         if (userData) {
           renderCustomerSection(userData);
+          // Enable reply panel if we have a customer email
+          if (userData.email) {
+            replyPanelWrapper.style.display = '';
+            replyPanelContent.innerHTML = '';
+            const rTabStyle = (color, active) =>
+              `padding:8px 16px;border:none;border-bottom:2px solid ${active ? color : 'transparent'};background:${active ? '#fff' : 'transparent'};color:${color};font-size:12px;font-weight:600;cursor:pointer;`;
+            const replyTabBar = document.createElement('div');
+            replyTabBar.style.cssText = 'display:flex;background:#f8f9fa;border-bottom:1px solid #eee;';
+            const replyBody = document.createElement('div');
+            replyBody.style.cssText = 'padding:10px 14px;';
+            const custTabBtn = document.createElement('button');
+            custTabBtn.textContent = '📩 Customer';
+            custTabBtn.style.cssText = rTabStyle('#0056d2', true);
+            custTabBtn.onclick = () => {
+              custTabBtn.style.cssText = rTabStyle('#0056d2', true);
+              showReplyComposer('customer', userData.email, {}, {}, userData, null, replyBody, refreshThread, String(t.id));
+            };
+            replyTabBar.appendChild(custTabBtn);
+            replyPanelContent.appendChild(replyTabBar);
+            replyPanelContent.appendChild(replyBody);
+            showReplyComposer('customer', userData.email, {}, {}, userData, null, replyBody, refreshThread, String(t.id));
+          }
         }
         return;
       }
