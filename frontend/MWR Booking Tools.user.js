@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      2.7
+// @version      2.8
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -680,7 +680,13 @@ async function showGuidedPrewarmModal() {
     const descEl = document.createElement('div');
     descEl.style.cssText = 'padding:12px 14px;font-size:12px;color:#555;line-height:1.6;overflow-y:auto;flex:1;max-height:320px;';
     descEl.innerHTML = '<div style="color:#999;">⏳ Loading...</div>';
+    // Status + tags bar — populated by refreshThread after full ticket loads
+    const statusTagBar = document.createElement('div');
+    statusTagBar.style.cssText = 'display:flex;align-items:center;gap:16px;padding:6px 14px;border-bottom:1px solid #eee;background:#fafafa;font-size:12px;flex-shrink:0;flex-wrap:wrap;';
+    statusTagBar.innerHTML = '<span style="color:#ccc;font-size:11px;">⏳</span>';
+
     card.appendChild(cardHeader);
+    card.appendChild(statusTagBar);
     card.appendChild(descEl);
     leftCol.appendChild(card);
 
@@ -720,9 +726,118 @@ async function showGuidedPrewarmModal() {
         });
 
         descEl.innerHTML = html || '<span style="color:#999;">(no content)</span>';
+        renderStatusTagBar(td.ticket);
       });
     };
     refreshThread();
+
+    // ── Status + tag bar renderer ──────────────────────────────────────────────
+    const renderStatusTagBar = (ticket) => {
+      statusTagBar.innerHTML = '';
+
+      // ── Status section ─────────────────────────────────────────────────────
+      const statusLabel = document.createElement('span');
+      statusLabel.style.cssText = 'color:#888;font-weight:500;white-space:nowrap;';
+      statusLabel.textContent = 'Status:';
+      statusTagBar.appendChild(statusLabel);
+
+      const statusMap = { 2: 'Open', 3: 'Pending', 4: 'Resolved', 5: 'Closed' };
+      const sel = document.createElement('select');
+      sel.style.cssText = 'padding:2px 6px;border:1px solid #ddd;border-radius:4px;font-size:12px;background:#fff;cursor:pointer;';
+      Object.entries(statusMap).forEach(([val, label]) => {
+        const opt = document.createElement('option');
+        opt.value = val; opt.textContent = label;
+        if (Number(val) === ticket.status) opt.selected = true;
+        sel.appendChild(opt);
+      });
+      statusTagBar.appendChild(sel);
+
+      const updateStatusBtn = document.createElement('button');
+      updateStatusBtn.textContent = 'Update';
+      updateStatusBtn.style.cssText = 'padding:2px 8px;border:none;border-radius:4px;background:#007bff;color:#fff;font-size:11px;cursor:pointer;font-weight:500;';
+      updateStatusBtn.onclick = () => withButtonLoading(updateStatusBtn, '⏳', async () => {
+        const { ok } = await gmPost(`${BACKEND_URL}/update-ticket`, { ticketId: String(t.id), fields: { status: Number(sel.value) } });
+        if (ok) { showToast('✅ Status updated', 'success', 2000); refreshThread(); }
+        else showToast('❌ Failed to update status', 'error');
+      });
+      statusTagBar.appendChild(updateStatusBtn);
+
+      // ── Divider ────────────────────────────────────────────────────────────
+      const divider = document.createElement('span');
+      divider.style.cssText = 'color:#ddd;font-size:14px;';
+      divider.textContent = '|';
+      statusTagBar.appendChild(divider);
+
+      // ── Tags section ───────────────────────────────────────────────────────
+      const tagsLabel = document.createElement('span');
+      tagsLabel.style.cssText = 'color:#888;font-weight:500;white-space:nowrap;';
+      tagsLabel.textContent = 'Tags:';
+      statusTagBar.appendChild(tagsLabel);
+
+      const pillsContainer = document.createElement('span');
+      pillsContainer.style.cssText = 'display:inline-flex;align-items:center;flex-wrap:wrap;gap:4px;';
+      statusTagBar.appendChild(pillsContainer);
+
+      let currentTags = [...(ticket.tags || [])];
+
+      const saveTags = async () => {
+        const { ok } = await gmPost(`${BACKEND_URL}/update-ticket`, { ticketId: String(t.id), fields: { tags: currentTags } });
+        if (ok) { showToast('✅ Tags saved', 'success', 2000); refreshThread(); }
+        else showToast('❌ Failed to save tags', 'error');
+      };
+
+      const renderPills = () => {
+        pillsContainer.innerHTML = '';
+        currentTags.forEach((tag, i) => {
+          const pill = document.createElement('span');
+          pill.style.cssText = 'background:#e9ecef;color:#444;padding:2px 7px;border-radius:10px;font-size:11px;display:inline-flex;align-items:center;gap:3px;';
+          const tagText = document.createTextNode(tag);
+          const removeBtn = document.createElement('button');
+          removeBtn.textContent = '×';
+          removeBtn.style.cssText = 'background:none;border:none;color:#aaa;cursor:pointer;font-size:11px;padding:0;line-height:1;';
+          removeBtn.onclick = async () => {
+            currentTags.splice(i, 1);
+            renderPills();
+            await saveTags();
+          };
+          pill.appendChild(tagText);
+          pill.appendChild(removeBtn);
+          pillsContainer.appendChild(pill);
+        });
+
+        // +Add button
+        const addBtn = document.createElement('button');
+        addBtn.textContent = '+ Add';
+        addBtn.style.cssText = 'padding:2px 8px;border:1px dashed #aaa;border-radius:10px;background:transparent;color:#888;font-size:11px;cursor:pointer;';
+        addBtn.onclick = () => {
+          addBtn.style.display = 'none';
+          const input = document.createElement('input');
+          input.type = 'text'; input.placeholder = 'new tag...';
+          input.style.cssText = 'padding:2px 6px;border:1px solid #ddd;border-radius:4px;font-size:11px;width:90px;';
+          const confirmBtn = document.createElement('button');
+          confirmBtn.textContent = '✓';
+          confirmBtn.style.cssText = 'padding:2px 6px;border:none;border-radius:4px;background:#28a745;color:#fff;font-size:11px;cursor:pointer;margin-left:3px;';
+          const doAdd = async () => {
+            const val = input.value.trim();
+            if (val && !currentTags.includes(val)) {
+              currentTags.push(val);
+              renderPills();
+              await saveTags();
+            } else {
+              renderPills(); // just re-render to show +Add again
+            }
+          };
+          confirmBtn.onclick = doAdd;
+          input.addEventListener('keydown', e => { if (e.key === 'Enter') doAdd(); if (e.key === 'Escape') renderPills(); });
+          pillsContainer.appendChild(input);
+          pillsContainer.appendChild(confirmBtn);
+          setTimeout(() => input.focus(), 10);
+        };
+        pillsContainer.appendChild(addBtn);
+      };
+
+      renderPills();
+    };
 
     let currentBookingId = null;
     let currentAction = null;

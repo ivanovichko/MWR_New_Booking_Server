@@ -8,7 +8,7 @@ const { parseUserHtml, findUser }        = require('./services/userService');
 const { buildNoteHtml }                  = require('./services/noteBuilder');
 const { lookupSupplier }                 = require('./services/supplierService');
 const { aiAssist, findHotelEmail }       = require('./services/aiService');
-const { getAuthHeader, addNote, sendEmail, sendEmailWithAttachments, setTicketPending, tagTicket, searchDuplicates, getTicketContext } = require('./services/freshdeskService');
+const { getAuthHeader, addNote, sendEmail, sendEmailWithAttachments, setTicketPending, tagTicket, updateTicket, searchDuplicates, getTicketContext } = require('./services/freshdeskService');
 const { initDb, getCachedBooking, cacheBooking, storeSession, getPrompts, createPrompt, updatePrompt, deletePrompt, getMacros, createMacro, updateMacro, deleteMacro, storeFreshdeskSession } = require('./services/dbService');
 const { prewarm, fetchAndCacheBooking, extractBookingId, checkPendings, checkInPriority, setTicketPriority, postNote } = require('./services/prewarmService');
 const { taGet, taPost }                  = require('./services/taAuthService');
@@ -377,6 +377,18 @@ app.post('/close-ticket', async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error(`❌ Close ticket error: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Update ticket fields (tags, status, priority, etc.) ─────────────────────
+app.post('/update-ticket', async (req, res) => {
+  const { ticketId, fields } = req.body;
+  if (!ticketId || !fields) return res.status(400).json({ error: 'ticketId and fields required' });
+  try {
+    await updateTicket(String(ticketId), fields);
+    res.json({ success: true });
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
