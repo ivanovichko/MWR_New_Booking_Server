@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      4.6
+// @version      4.7
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -612,6 +612,19 @@ async function showGuidedPrewarmModal() {
   }
   let stopped = false;
 
+  // Pre-fetch cache: fires /ticket and /analyse requests for upcoming tickets
+  // so they're ready by the time renderTicket() reaches them.
+  const prefetchCache = new Map();
+  const prefetch = (i) => {
+    if (i < 0 || i >= tickets.length) return;
+    const tid = String(tickets[i].id);
+    if (prefetchCache.has(tid)) return;
+    prefetchCache.set(tid, {
+      ticketPromise:  gmGet(`${BACKEND_URL}/guided-prewarm/ticket/${tid}`),
+      analysePromise: gmGet(`${BACKEND_URL}/guided-prewarm/analyse/${tid}`),
+    });
+  };
+
   const renderTicket = async () => {
     if (stopped || idx >= tickets.length) {
       localStorage.removeItem(GUIDED_STATE_KEY);
@@ -742,9 +755,13 @@ async function showGuidedPrewarmModal() {
     leftCol.appendChild(card);
 
     // Fetch / refresh ticket thread
+    let _threadCacheUsed = false;
     const refreshThread = () => {
       descEl.innerHTML = '<div style="color:#999;font-size:11px;">⏳ Loading thread...</div>';
-      gmGet(`${BACKEND_URL}/guided-prewarm/ticket/${t.id}`).then(({ ok, data: td }) => {
+      const _pc = !_threadCacheUsed && prefetchCache.get(String(t.id));
+      _threadCacheUsed = true;
+      const _ticketReq = _pc ? _pc.ticketPromise : gmGet(`${BACKEND_URL}/guided-prewarm/ticket/${t.id}`);
+      _ticketReq.then(({ ok, data: td }) => {
         if (!ok || !td.ticket) { descEl.innerHTML = '<span style="color:#999;">(could not load)</span>'; return; }
 
         const strip = (html) => (html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
@@ -1439,8 +1456,10 @@ async function showGuidedPrewarmModal() {
       };
     };
 
-    // Analyse async — Groq + booking
-    gmGet(`${BACKEND_URL}/guided-prewarm/analyse/${t.id}`).then(({ ok: aok, data: analysis }) => {
+    // Analyse async — Groq + booking (use prefetch cache if available)
+    const _pcA = prefetchCache.get(String(t.id));
+    const _analyseReq = _pcA ? _pcA.analysePromise : gmGet(`${BACKEND_URL}/guided-prewarm/analyse/${t.id}`);
+    _analyseReq.then(({ ok: aok, data: analysis }) => {
       if (!aok) { bookingSection.innerHTML = '<div style="color:red;font-size:12px;">❌ Analysis failed.</div>'; return; }
       if (analysis.skip) { prog.textContent += ` — skipped (${analysis.reason})`; idx++; renderTicket(); return; }
 
@@ -1773,6 +1792,10 @@ async function showGuidedPrewarmModal() {
 
     body.appendChild(notePanelWrapper);
     body.appendChild(btnRow);
+
+    // Kick off background pre-fetch for the next two tickets
+    prefetch(idx + 1);
+    prefetch(idx + 2);
   };
 
   renderTicket();
