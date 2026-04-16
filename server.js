@@ -553,10 +553,10 @@ app.get('/guided-prewarm/ticket/:id', async (req, res) => {
 
 // filter → { priority, status } mapping — Freshdesk priority: 1=Low, 2=Medium, 3=High, 4=Urgent
 const GUIDED_FILTERS = {
-  low:     { priority: 1, status: FD_STATUS.OPEN },
-  medium:  { priority: 2, status: FD_STATUS.OPEN },
-  high:    { priority: 3, status: FD_STATUS.OPEN },
-  pending: { priority: null, status: FD_STATUS.PENDING },
+  low:     { priorities: [1],    status: FD_STATUS.OPEN },
+  medium:  { priorities: [2],    status: FD_STATUS.OPEN },
+  high:    { priorities: [3, 4], status: FD_STATUS.OPEN },
+  pending: { priorities: [],     status: FD_STATUS.PENDING },
 };
 
 app.get('/guided-prewarm/tickets', async (req, res) => {
@@ -569,24 +569,32 @@ app.get('/guided-prewarm/tickets', async (req, res) => {
   const filter = GUIDED_FILTERS[filterKey] || GUIDED_FILTERS.low;
   console.log(`🎯 Guided prewarm: fetching ${filterKey} tickets for agent ${agentId}`);
 
+  // Fetch each priority bucket separately (Freshdesk search has no OR operator)
+  const priorityBuckets = filter.priorities.length ? filter.priorities : [null];
   let tickets = [];
-  for (let page = 1; page <= 10; page++) {
-    const parts = [`agent_id:${agentId}`, `status:${filter.status}`];
-    if (filter.priority) parts.push(`priority:${filter.priority}`);
-    const q = parts.join(' AND ');
-    const url = `https://${domain}/api/v2/search/tickets?query="${q.replace(/ /g, '%20')}"&page=${page}`;
-    console.log(`🔍 Fetching: ${url}`);
-    const r = await fetch(url, { headers: { Authorization: auth } });
-    if (!r.ok) {
-      const b = await r.text();
-      console.error(`❌ Freshdesk error ${r.status}: ${b.slice(0,200)}`);
-      return res.status(500).json({ error: `Freshdesk error: ${b.slice(0,200)}` });
+  const seenIds = new Set();
+
+  for (const priority of priorityBuckets) {
+    for (let page = 1; page <= 10; page++) {
+      const parts = [`agent_id:${agentId}`, `status:${filter.status}`];
+      if (priority) parts.push(`priority:${priority}`);
+      const q = parts.join(' AND ');
+      const url = `https://${domain}/api/v2/search/tickets?query="${q.replace(/ /g, '%20')}"&page=${page}`;
+      console.log(`🔍 Fetching: ${url}`);
+      const r = await fetch(url, { headers: { Authorization: auth } });
+      if (!r.ok) {
+        const b = await r.text();
+        console.error(`❌ Freshdesk error ${r.status}: ${b.slice(0,200)}`);
+        return res.status(500).json({ error: `Freshdesk error: ${b.slice(0,200)}` });
+      }
+      const data = await r.json();
+      const batch = data.results || [];
+      console.log(`📋 Priority ${priority ?? 'any'} page ${page}: ${batch.length} tickets`);
+      for (const t of batch) {
+        if (!seenIds.has(t.id)) { seenIds.add(t.id); tickets.push(t); }
+      }
+      if (batch.length < 30) break;
     }
-    const data = await r.json();
-    const batch = data.results || [];
-    console.log(`📋 Page ${page}: ${batch.length} tickets`);
-    tickets.push(...batch);
-    if (batch.length < 30) break;
   }
   console.log(`📋 Total: ${tickets.length} tickets`);
   res.json({ success: true, tickets });
