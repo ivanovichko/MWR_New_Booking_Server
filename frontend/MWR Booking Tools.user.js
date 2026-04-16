@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      3.1
+// @version      3.2
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -737,15 +737,47 @@ async function showGuidedPrewarmModal() {
           return btn;
         };
 
-        const addMsg = (label, bg, border, bodyHtml, rawText) => {
+        const agents = td.agents || {};
+        const fmtDate = (iso) => {
+          if (!iso) return '';
+          const d = new Date(iso);
+          return d.toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'numeric' })
+            + ' ' + d.toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit' });
+        };
+
+        const addMsg = (label, bg, border, bodyHtml, rawText, meta) => {
           const wrap = document.createElement('div');
           wrap.style.cssText = `margin-bottom:10px;padding:8px 10px;background:${bg};border-left:3px solid ${border};border-radius:3px;font-size:12px;line-height:1.5;`;
-          const lbl = document.createElement('div');
-          lbl.style.cssText = 'font-size:10px;color:#999;margin-bottom:4px;';
-          lbl.textContent = label;
+
+          // Header row: type label + metadata
+          const hdr = document.createElement('div');
+          hdr.style.cssText = 'display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;flex-wrap:wrap;gap:4px;';
+
+          const typeSpan = document.createElement('span');
+          typeSpan.style.cssText = 'font-size:10px;color:#999;font-weight:600;';
+          typeSpan.textContent = label;
+
+          const metaSpan = document.createElement('span');
+          metaSpan.style.cssText = 'font-size:10px;color:#aaa;text-align:right;';
+          if (meta) {
+            const parts = [];
+            if (meta.author) parts.push(meta.author);
+            if (meta.date)   parts.push(meta.date);
+            metaSpan.textContent = parts.join(' · ');
+            if (meta.notified && meta.notified.length) {
+              const notifEl = document.createElement('div');
+              notifEl.style.cssText = 'font-size:10px;color:#aaa;margin-top:1px;';
+              notifEl.textContent = '→ ' + meta.notified.join(', ');
+              metaSpan.appendChild(notifEl);
+            }
+          }
+
+          hdr.appendChild(typeSpan);
+          hdr.appendChild(metaSpan);
+
           const content = document.createElement('div');
           content.innerHTML = bodyHtml;
-          wrap.appendChild(lbl);
+          wrap.appendChild(hdr);
           wrap.appendChild(content);
           wrap.appendChild(makeTranslateBtn(() => rawText || strip(bodyHtml)));
           descEl.appendChild(wrap);
@@ -755,7 +787,12 @@ async function showGuidedPrewarmModal() {
         const desc = td.ticket.description || td.ticket.description_text || '';
         if (desc) {
           const bodyHtml = td.ticket.description || strip(desc);
-          addMsg('📩 Customer (opening)', '#f8f9fa', '#6c757d', bodyHtml, strip(desc));
+          const meta = {
+            author: td.ticket.requester?.name || td.ticket.requester?.email || null,
+            date:   fmtDate(td.ticket.created_at),
+            notified: [],
+          };
+          addMsg('📩 Customer (opening)', '#f8f9fa', '#6c757d', bodyHtml, strip(desc), meta);
         }
 
         // Conversations (replies + notes)
@@ -767,7 +804,17 @@ async function showGuidedPrewarmModal() {
           const bg     = isNote ? '#fffbf0' : isIncoming ? '#f8f9fa' : '#f0f4ff';
           const border = isNote ? '#fd7e14'  : isIncoming ? '#6c757d'  : '#0056d2';
           const bodyHtml = c.body || strip(c.body_text || '');
-          addMsg(label, bg, border, bodyHtml, strip(c.body_text || c.body || ''));
+          const author = isIncoming
+            ? (c.from_email || null)
+            : (agents[c.user_id] || c.from_email || null);
+          const notified = isNote
+            ? (c.to_emails || [])
+            : (c.to_emails || []);
+          addMsg(label, bg, border, bodyHtml, strip(c.body_text || c.body || ''), {
+            author,
+            date: fmtDate(c.created_at),
+            notified,
+          });
         });
 
         if (!descEl.children.length) descEl.innerHTML = '<span style="color:#999;">(no content)</span>';
@@ -1262,17 +1309,47 @@ async function showGuidedPrewarmModal() {
               const strip = (html) => (html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
               const msgStyle = (bg, border) =>
                 `margin-bottom:10px;padding:8px 10px;background:${bg};border-left:3px solid ${border};border-radius:3px;font-size:12px;line-height:1.5;`;
+              const popAgents = td.agents || {};
+              const popFmtDate = (iso) => {
+                if (!iso) return '';
+                const d = new Date(iso);
+                return d.toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'numeric' })
+                  + ' ' + d.toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit' });
+              };
 
-              const addPopMsg = (label, bg, border, bodyHtml) => {
+              const addPopMsg = (label, bg, border, bodyHtml, meta) => {
                 const wrap = document.createElement('div');
                 wrap.style.cssText = msgStyle(bg, border);
+
                 const lbl = document.createElement('div');
-                lbl.style.cssText = 'font-size:10px;color:#999;margin-bottom:4px;display:flex;justify-content:space-between;align-items:center;';
+                lbl.style.cssText = 'display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;flex-wrap:wrap;gap:4px;';
+
+                const typeWrap = document.createElement('div');
+
                 const lblText = document.createElement('span');
+                lblText.style.cssText = 'font-size:10px;color:#999;font-weight:600;';
                 lblText.textContent = label;
+                typeWrap.appendChild(lblText);
+
+                if (meta) {
+                  const metaParts = [meta.author, meta.date].filter(Boolean);
+                  if (metaParts.length) {
+                    const metaEl = document.createElement('div');
+                    metaEl.style.cssText = 'font-size:10px;color:#aaa;margin-top:1px;';
+                    metaEl.textContent = metaParts.join(' · ');
+                    typeWrap.appendChild(metaEl);
+                  }
+                  if (meta.notified && meta.notified.length) {
+                    const notifEl = document.createElement('div');
+                    notifEl.style.cssText = 'font-size:10px;color:#aaa;margin-top:1px;';
+                    notifEl.textContent = '→ ' + meta.notified.join(', ');
+                    typeWrap.appendChild(notifEl);
+                  }
+                }
+
                 const mergeThisBtn = document.createElement('button');
                 mergeThisBtn.textContent = '📥 Merge into #' + t.id;
-                mergeThisBtn.style.cssText = 'padding:2px 8px;border:1px solid #fd7e14;border-radius:4px;background:#fff;color:#fd7e14;font-size:10px;cursor:pointer;font-weight:600;';
+                mergeThisBtn.style.cssText = 'padding:2px 8px;border:1px solid #fd7e14;border-radius:4px;background:#fff;color:#fd7e14;font-size:10px;cursor:pointer;font-weight:600;flex-shrink:0;';
                 mergeThisBtn.onclick = async () => {
                   if (!confirm(`Post this message as a note on #${t.id} and close #${dup.id}?`)) return;
                   mergeThisBtn.disabled = true; mergeThisBtn.textContent = '⏳ Merging...';
@@ -1290,7 +1367,8 @@ async function showGuidedPrewarmModal() {
                     mergeThisBtn.disabled = false; mergeThisBtn.textContent = '📥 Merge into #' + t.id;
                   }
                 };
-                lbl.appendChild(lblText); lbl.appendChild(mergeThisBtn);
+
+                lbl.appendChild(typeWrap); lbl.appendChild(mergeThisBtn);
                 const content = document.createElement('div');
                 content.innerHTML = bodyHtml;
                 wrap.appendChild(lbl); wrap.appendChild(content);
@@ -1299,7 +1377,13 @@ async function showGuidedPrewarmModal() {
 
               // Opening description
               const desc = td.ticket.description || td.ticket.description_text || '';
-              if (desc) addPopMsg('📩 Customer (opening)', '#f8f9fa', '#6c757d', td.ticket.description || strip(desc));
+              if (desc) {
+                addPopMsg('📩 Customer (opening)', '#f8f9fa', '#6c757d', td.ticket.description || strip(desc), {
+                  author: td.ticket.requester?.name || td.ticket.requester?.email || null,
+                  date: popFmtDate(td.ticket.created_at),
+                  notified: [],
+                });
+              }
 
               // Conversations
               (td.conversations || []).forEach(c => {
@@ -1308,7 +1392,12 @@ async function showGuidedPrewarmModal() {
                 const label  = isNote ? '📌 Agent note' : isIncoming ? '📩 Customer' : '📤 Agent reply';
                 const bg     = isNote ? '#fffbf0' : isIncoming ? '#f8f9fa' : '#f0f4ff';
                 const border = isNote ? '#fd7e14'  : isIncoming ? '#6c757d' : '#0056d2';
-                addPopMsg(label, bg, border, c.body || strip(c.body_text || ''));
+                const author = isIncoming ? (c.from_email || null) : (popAgents[c.user_id] || c.from_email || null);
+                addPopMsg(label, bg, border, c.body || strip(c.body_text || ''), {
+                  author,
+                  date: popFmtDate(c.created_at),
+                  notified: c.to_emails || [],
+                });
               });
 
               if (!popBody.children.length) popBody.innerHTML = '<span style="color:#999;">(no content)</span>';

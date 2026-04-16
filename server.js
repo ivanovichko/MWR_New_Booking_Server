@@ -552,14 +552,21 @@ app.get('/guided-prewarm/ticket/:id', async (req, res) => {
   const domain   = process.env.FRESHDESK_DOMAIN;
   const auth     = getAuthHeader();
   const headers  = { Authorization: auth };
-  const [tRes, cRes] = await Promise.all([
-    fetch(`https://${domain}/api/v2/tickets/${ticketId}`, { headers }),
+  const [tRes, cRes, aRes] = await Promise.all([
+    fetch(`https://${domain}/api/v2/tickets/${ticketId}?include=requester`, { headers }),
     fetch(`https://${domain}/api/v2/tickets/${ticketId}/conversations`, { headers }),
+    fetch(`https://${domain}/api/v2/agents?per_page=100`, { headers }),
   ]);
   if (!tRes.ok) return res.status(500).json({ error: 'Could not fetch ticket' });
   const ticket        = await tRes.json();
   const conversations = cRes.ok ? await cRes.json() : [];
-  res.json({ success: true, ticket, conversations });
+  const agentList     = aRes.ok ? await aRes.json() : [];
+  // Build id → name lookup
+  const agents = {};
+  (Array.isArray(agentList) ? agentList : []).forEach(a => {
+    agents[a.id] = a.contact?.name || a.name || null;
+  });
+  res.json({ success: true, ticket, conversations, agents });
 });
 
 
