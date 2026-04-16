@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      4.5
+// @version      4.6
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -3029,23 +3029,50 @@ function showReplyComposer(recipientType, toEmail, booking, details, user, suppl
 
   container.appendChild(replyArea);
 
-  // Translation — only for customer replies, hidden until first use
+  // Translation — only for customer replies
   if (recipientType === 'customer') {
-    const targetLang = countryToLanguage(user && user.country);
+    const detectedLang = countryToLanguage(user && user.country);
+    const userCountry = (user && user.country) || null;
+
+    // Info bar: country + detected language
+    const translateRow = document.createElement('div');
+    translateRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap;';
+
+    if (userCountry || detectedLang) {
+      const infoSpan = document.createElement('span');
+      infoSpan.style.cssText = 'font-size:11px;color:#888;';
+      const parts = [];
+      if (userCountry) parts.push('🌍 ' + userCountry);
+      if (detectedLang) parts.push('🗣 ' + detectedLang);
+      infoSpan.textContent = parts.join('  ·  ');
+      translateRow.appendChild(infoSpan);
+    }
+
+    // Manual language input
+    const langInput = document.createElement('input');
+    langInput.type = 'text';
+    langInput.placeholder = detectedLang ? detectedLang : 'Language…';
+    langInput.value = detectedLang || '';
+    langInput.style.cssText = 'padding:3px 8px;border:1px solid #ccc;border-radius:6px;font-size:12px;width:120px;color:#333;';
 
     const translateBtn = document.createElement('button');
-    translateBtn.textContent = '🌐 ' + (targetLang ? 'Translate to ' + targetLang : 'Translate');
-    translateBtn.style.cssText = 'margin-top:6px;padding:5px 12px;border:1px solid #17a2b8;border-radius:6px;background:#fff;color:#17a2b8;font-size:12px;cursor:pointer;font-weight:500;';
+    translateBtn.textContent = '🌐 Translate';
+    translateBtn.style.cssText = 'padding:5px 12px;border:1px solid #17a2b8;border-radius:6px;background:#fff;color:#17a2b8;font-size:12px;cursor:pointer;font-weight:500;';
+
+    translateRow.appendChild(langInput);
+    translateRow.appendChild(translateBtn);
+    container.appendChild(translateRow);
 
     const translationArea = document.createElement('textarea');
     translationArea.readOnly = true;
-    translationArea.placeholder = (targetLang ? targetLang : 'Translation') + ' will appear here...';
+    translationArea.placeholder = 'Translation will appear here...';
     translationArea.style.cssText = 'display:none;width:100%;box-sizing:border-box;margin-top:6px;padding:9px 12px;border:1px solid #17a2b8;border-radius:6px;font-size:13px;font-family:system-ui,sans-serif;resize:vertical;min-height:160px;line-height:1.5;background:#f8fffe;color:#333;';
+    container.appendChild(translationArea);
 
     translateBtn.onclick = () => withButtonLoading(translateBtn, '⏳ Translating...', async () => {
       const body = replyArea.innerText.trim();
       if (!body) { showToast('Nothing to translate.', 'warning'); return; }
-      const lang = targetLang || 'the customer\'s language';
+      const lang = langInput.value.trim() || detectedLang || 'the customer\'s language';
       const prompt = 'Translate the following text to ' + lang + '. Translate everything including greetings and sign-offs. Return only the translated text — no explanation, no extra content.\n\n' + body;
       translationArea.style.display = '';
       translationArea.value = 'Translating...';
@@ -3055,9 +3082,6 @@ function showReplyComposer(recipientType, toEmail, booking, details, user, suppl
       });
       translationArea.value = (ok && aiData.text) ? aiData.text.trim() : 'Translation failed.';
     });
-
-    container.appendChild(translateBtn);
-    container.appendChild(translationArea);
   }
 
   // Attachment picker
