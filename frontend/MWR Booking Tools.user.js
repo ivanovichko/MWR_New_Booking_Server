@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      3.8
+// @version      3.9
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -1015,6 +1015,61 @@ async function showGuidedPrewarmModal() {
         uTable.appendChild(tr);
       });
       customerSection.appendChild(uTable);
+
+      // ── Find different member inline row ───────────────────────────────────
+      const findMemberRow = document.createElement('div');
+      findMemberRow.style.cssText = 'display:none;gap:6px;margin-top:6px;';
+      const findMemberInput = document.createElement('input');
+      findMemberInput.type = 'text'; findMemberInput.placeholder = 'Email or name...';
+      findMemberInput.style.cssText = 'flex:1;padding:4px 8px;border:1px solid #ddd;border-radius:4px;font-size:11px;';
+      const findMemberBtn = document.createElement('button');
+      findMemberBtn.textContent = '🔍 Search';
+      findMemberBtn.style.cssText = 'padding:4px 10px;border:none;border-radius:4px;background:#6f42c1;color:#fff;font-size:11px;cursor:pointer;';
+      const findMemberResults = document.createElement('div');
+      findMemberResults.style.cssText = 'margin-top:4px;font-size:11px;';
+      findMemberBtn.onclick = async () => {
+        const q = findMemberInput.value.trim(); if (!q) return;
+        findMemberBtn.disabled = true; findMemberBtn.textContent = '⏳';
+        const { ok: uok, data: udata } = await gmPost(`${BACKEND_URL}/find-user`, { query: q });
+        findMemberBtn.disabled = false; findMemberBtn.textContent = '🔍 Search';
+        findMemberResults.innerHTML = '';
+        const results = (uok && udata.results) ? udata.results : [];
+        if (!results.length) { findMemberResults.textContent = 'No results.'; return; }
+        const TA_BASE = 'https://traveladvantage.com';
+        results.slice(0, 5).forEach(u => {
+          const item = document.createElement('div');
+          item.style.cssText = 'padding:3px 0;border-bottom:1px solid #f0f0f0;cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:8px;';
+          const label = document.createElement('span');
+          label.style.cssText = 'color:#333;font-size:11px;';
+          label.textContent = `${u.name || ''}${u.email ? ' — ' + u.email : ''}`;
+          const pickBtn = document.createElement('button');
+          pickBtn.textContent = 'Select';
+          pickBtn.style.cssText = 'padding:2px 7px;border:1px solid #6f42c1;border-radius:3px;background:#fff;color:#6f42c1;font-size:10px;cursor:pointer;flex-shrink:0;';
+          pickBtn.onclick = () => {
+            const userData = {
+              ...u,
+              loginLink:   `${TA_BASE}/admin/account/webadminCustomerLogin/${u.id}`,
+              profileLink: `${TA_BASE}/admin/account/viewCustomer/${u.id}`,
+            };
+            renderCustomerSection(userData);
+          };
+          item.appendChild(label); item.appendChild(pickBtn);
+          findMemberResults.appendChild(item);
+        });
+      };
+      findMemberInput.addEventListener('keydown', e => { if (e.key === 'Enter') findMemberBtn.click(); });
+      findMemberRow.appendChild(findMemberInput); findMemberRow.appendChild(findMemberBtn);
+      const findMemberToggle = document.createElement('button');
+      findMemberToggle.textContent = '🔍 Find member';
+      findMemberToggle.style.cssText = 'margin-top:6px;padding:2px 8px;border:1px dashed #aaa;border-radius:4px;background:transparent;color:#888;font-size:10px;cursor:pointer;';
+      findMemberToggle.onclick = () => {
+        const open = findMemberRow.style.display !== 'none';
+        findMemberRow.style.display = open ? 'none' : 'flex';
+        if (!open) setTimeout(() => findMemberInput.focus(), 10);
+      };
+      customerSection.appendChild(findMemberToggle);
+      customerSection.appendChild(findMemberRow);
+      customerSection.appendChild(findMemberResults);
     };
 
     const renderBookingSection = (bd, userData) => {
@@ -1126,6 +1181,37 @@ async function showGuidedPrewarmModal() {
         table.appendChild(tr);
       });
       bookingSection.appendChild(table);
+
+      // ── Change booking inline row ──────────────────────────────────────────
+      const changeBookingRow = document.createElement('div');
+      changeBookingRow.style.cssText = 'display:none;gap:6px;margin-top:6px;';
+      const changeBookingInput = document.createElement('input');
+      changeBookingInput.type = 'text'; changeBookingInput.placeholder = 'Enter booking ID...';
+      changeBookingInput.value = currentBookingId || '';
+      changeBookingInput.style.cssText = 'flex:1;padding:4px 8px;border:1px solid #ddd;border-radius:4px;font-size:11px;';
+      const changeBookingBtn = document.createElement('button');
+      changeBookingBtn.textContent = '🔍 Fetch';
+      changeBookingBtn.style.cssText = 'padding:4px 10px;border:none;border-radius:4px;background:#6f42c1;color:#fff;font-size:11px;cursor:pointer;';
+      changeBookingBtn.onclick = async () => {
+        const id = changeBookingInput.value.trim(); if (!id) return;
+        changeBookingBtn.disabled = true; changeBookingBtn.textContent = '⏳';
+        const { ok: fok, data: fd } = await gmGet(`${BACKEND_URL}/guided-prewarm/booking/${encodeURIComponent(id)}`);
+        changeBookingBtn.disabled = false; changeBookingBtn.textContent = '🔍 Fetch';
+        if (fok && fd.bookingData) { currentBookingId = id; renderBookingSection(fd.bookingData); }
+        else showToast('Booking not found.', 'error');
+      };
+      changeBookingInput.addEventListener('keydown', e => { if (e.key === 'Enter') changeBookingBtn.click(); });
+      changeBookingRow.appendChild(changeBookingInput); changeBookingRow.appendChild(changeBookingBtn);
+      const changeBookingToggle = document.createElement('button');
+      changeBookingToggle.textContent = '🔍 Change booking';
+      changeBookingToggle.style.cssText = 'margin-top:6px;padding:2px 8px;border:1px dashed #aaa;border-radius:4px;background:transparent;color:#888;font-size:10px;cursor:pointer;';
+      changeBookingToggle.onclick = () => {
+        const open = changeBookingRow.style.display !== 'none';
+        changeBookingRow.style.display = open ? 'none' : 'flex';
+        if (!open) changeBookingInput.focus();
+      };
+      bookingSection.appendChild(changeBookingToggle);
+      bookingSection.appendChild(changeBookingRow);
 
       if (user) renderCustomerSection(user);
 
