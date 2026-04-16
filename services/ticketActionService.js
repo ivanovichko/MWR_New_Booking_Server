@@ -71,17 +71,12 @@ async function confirmTicket(ticketId, bookingId, action) {
   const results = { notePosted: false, emailSent: false, tagged: [], prioritySet: null };
 
   if (action === 'hotel_email') {
-    // 1. Post booking note
-    const noteHtml = buildNoteHtml(booking, cachedCleanHtml, details, user, supplier);
-    await postNote(ticketId, noteHtml);
-    results.notePosted = true;
-
-    // 2. Tag ticket
+    // 1. Tag ticket
     const tags = buildBookingTags(booking);
     await tagTicket(ticketId, tags, 'Reservations');
     results.tagged.push(...tags);
 
-    // 3. Find hotel email
+    // 2. Find hotel email
     const emailResult = await findHotelEmail(
       details.hotelName || booking.supplierName,
       booking.locationTo,
