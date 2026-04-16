@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      3.7
+// @version      3.8
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -1146,10 +1146,11 @@ async function showGuidedPrewarmModal() {
         viewNoteBtn.onclick = () => showNoteModal(bd.noteHtml);
         replyRowEl.appendChild(viewNoteBtn);
       }
+      bookingSection.appendChild(replyRowEl);
       if (isHotel && !(daysUntil !== null && daysUntil < 3)) {
         const hotelEmailBtn = document.createElement('button');
         hotelEmailBtn.textContent = '📧 Hotel confirmation email';
-        hotelEmailBtn.style.cssText = 'padding:7px 10px;border:1px solid #28a745;border-radius:5px;background:#fff;color:#28a745;font-size:12px;font-weight:600;cursor:pointer;';
+        hotelEmailBtn.style.cssText = 'flex:1;padding:10px;border:none;border-radius:6px;background:#28a745;color:#fff;font-size:12px;font-weight:600;cursor:pointer;';
         hotelEmailBtn.onclick = () => withButtonLoading(hotelEmailBtn, '⏳ Sending...', async () => {
           const { ok: cok, data: cr } = await gmPost(`${BACKEND_URL}/guided-prewarm/confirm`, { ticketId: String(t.id), bookingId: currentBookingId, action: 'hotel_email' });
           if (!cok) { showToast('❌ Error: ' + (cr?.error || 'Server error'), 'error'); return; }
@@ -1160,9 +1161,8 @@ async function showGuidedPrewarmModal() {
           showToast('✅ ' + (msgs.join(' · ') || 'Done'), 'success', 3000);
           refreshFreshdeskTicket(); refreshThread();
         });
-        replyRowEl.appendChild(hotelEmailBtn);
+        confirmBtn.insertAdjacentElement('afterend', hotelEmailBtn);
       }
-      bookingSection.appendChild(replyRowEl);
 
       // ── Inline reply panel ─────────────────────────────────────────────────
       replyPanelWrapper.style.display = '';
