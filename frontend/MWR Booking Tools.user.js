@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      2.8
+// @version      2.9
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -676,7 +676,23 @@ async function showGuidedPrewarmModal() {
     card.style.cssText = 'border:1px solid #eee;border-radius:8px;overflow:hidden;display:flex;flex-direction:column;flex:1;';
     const cardHeader = document.createElement('div');
     cardHeader.style.cssText = 'background:#f8f9fa;padding:10px 14px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;';
-    cardHeader.innerHTML = `<span style="font-weight:600;font-size:13px;color:#333;">#${t.id} — ${t.subject || '(no subject)'}</span><a href="https://mwrlife.freshdesk.com/a/tickets/${t.id}" target="_blank" style="font-size:11px;color:#007bff;">Open ↗</a>`;
+    const cardTitleSpan = document.createElement('span');
+    cardTitleSpan.style.cssText = 'font-weight:600;font-size:13px;color:#333;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+    cardTitleSpan.textContent = `#${t.id} — ${t.subject || '(no subject)'}`;
+    const cardActions = document.createElement('div');
+    cardActions.style.cssText = 'display:flex;align-items:center;gap:8px;flex-shrink:0;';
+    const summarizeBtn = document.createElement('button');
+    summarizeBtn.textContent = '✨ Summarize';
+    summarizeBtn.style.cssText = 'padding:3px 9px;border:1px solid #6f42c1;border-radius:4px;background:#fff;color:#6f42c1;font-size:11px;font-weight:500;cursor:pointer;';
+    const openLink = document.createElement('a');
+    openLink.href = `https://mwrlife.freshdesk.com/a/tickets/${t.id}`;
+    openLink.target = '_blank';
+    openLink.style.cssText = 'font-size:11px;color:#007bff;';
+    openLink.textContent = 'Open ↗';
+    cardActions.appendChild(summarizeBtn);
+    cardActions.appendChild(openLink);
+    cardHeader.appendChild(cardTitleSpan);
+    cardHeader.appendChild(cardActions);
     const descEl = document.createElement('div');
     descEl.style.cssText = 'padding:12px 14px;font-size:12px;color:#555;line-height:1.6;overflow-y:auto;flex:1;max-height:320px;';
     descEl.innerHTML = '<div style="color:#999;">⏳ Loading...</div>';
@@ -697,18 +713,49 @@ async function showGuidedPrewarmModal() {
         if (!ok || !td.ticket) { descEl.innerHTML = '<span style="color:#999;">(could not load)</span>'; return; }
 
         const strip = (html) => (html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-        const msgStyle = (bg, border) =>
-          `margin-bottom:10px;padding:8px 10px;background:${bg};border-left:3px solid ${border};border-radius:3px;font-size:12px;line-height:1.5;`;
 
-        let html = '';
+        descEl.innerHTML = '';
+
+        const makeTranslateBtn = (getText) => {
+          const btn = document.createElement('button');
+          btn.textContent = '🌐 Translate';
+          btn.style.cssText = 'margin-top:6px;padding:2px 8px;border:1px solid #17a2b8;border-radius:4px;background:#fff;color:#17a2b8;font-size:11px;cursor:pointer;';
+          btn.onclick = async () => {
+            btn.disabled = true; btn.textContent = '⏳';
+            const text = getText();
+            const prompt = 'Translate the following to English. Return only the translated text — no explanation.\n\n' + text;
+            const { ok: aok, data: aiData } = await gmPost(BACKEND_URL + '/ai-assist', {
+              booking: {}, details: {}, user: null, supplier: null,
+              freshdeskTicketId: String(t.id), prompt,
+            });
+            btn.remove();
+            const resultEl = document.createElement('div');
+            resultEl.style.cssText = 'margin-top:6px;padding:6px 8px;background:#f0fffe;border:1px solid #17a2b8;border-radius:4px;font-size:12px;color:#333;white-space:pre-wrap;';
+            resultEl.textContent = (aok && aiData.text) ? aiData.text.trim() : '❌ Translation failed.';
+            btn.parentElement && btn.parentElement.appendChild(resultEl);
+          };
+          return btn;
+        };
+
+        const addMsg = (label, bg, border, bodyHtml, rawText) => {
+          const wrap = document.createElement('div');
+          wrap.style.cssText = `margin-bottom:10px;padding:8px 10px;background:${bg};border-left:3px solid ${border};border-radius:3px;font-size:12px;line-height:1.5;`;
+          const lbl = document.createElement('div');
+          lbl.style.cssText = 'font-size:10px;color:#999;margin-bottom:4px;';
+          lbl.textContent = label;
+          const content = document.createElement('div');
+          content.innerHTML = bodyHtml;
+          wrap.appendChild(lbl);
+          wrap.appendChild(content);
+          wrap.appendChild(makeTranslateBtn(() => rawText || strip(bodyHtml)));
+          descEl.appendChild(wrap);
+        };
 
         // Opening description (customer)
         const desc = td.ticket.description || td.ticket.description_text || '';
         if (desc) {
-          html += `<div style="${msgStyle('#f8f9fa','#6c757d')}">
-            <div style="font-size:10px;color:#999;margin-bottom:4px;">📩 Customer (opening)</div>
-            ${td.ticket.description ? td.ticket.description : strip(desc)}
-          </div>`;
+          const bodyHtml = td.ticket.description || strip(desc);
+          addMsg('📩 Customer (opening)', '#f8f9fa', '#6c757d', bodyHtml, strip(desc));
         }
 
         // Conversations (replies + notes)
@@ -719,14 +766,31 @@ async function showGuidedPrewarmModal() {
           const label  = isNote ? '📌 Agent note' : isIncoming ? '📩 Customer' : '📤 Agent reply';
           const bg     = isNote ? '#fffbf0' : isIncoming ? '#f8f9fa' : '#f0f4ff';
           const border = isNote ? '#fd7e14'  : isIncoming ? '#6c757d'  : '#0056d2';
-          html += `<div style="${msgStyle(bg, border)}">
-            <div style="font-size:10px;color:#999;margin-bottom:4px;">${label}</div>
-          ${c.body || strip(c.body_text || '')}
-        </div>`;
+          const bodyHtml = c.body || strip(c.body_text || '');
+          addMsg(label, bg, border, bodyHtml, strip(c.body_text || c.body || ''));
         });
 
-        descEl.innerHTML = html || '<span style="color:#999;">(no content)</span>';
+        if (!descEl.children.length) descEl.innerHTML = '<span style="color:#999;">(no content)</span>';
         renderStatusTagBar(td.ticket);
+
+        // Wire Summarize button once thread is loaded
+        summarizeBtn.onclick = async () => {
+          const allText = [...descEl.querySelectorAll('div > div:last-of-type')].map(el => el.innerText || el.textContent).join('\n\n').trim()
+            || strip(descEl.innerHTML);
+          summarizeBtn.disabled = true; summarizeBtn.textContent = '⏳ Summarising...';
+          const { ok: aok, data: aiData } = await gmPost(BACKEND_URL + '/ai-assist', {
+            booking: {}, details: {}, user: null, supplier: null,
+            freshdeskTicketId: String(t.id),
+            prompt: 'Summarise this support ticket thread in 3-5 sentences. Focus on the customer issue, what has been done so far, and what still needs to be resolved.\n\n' + allText,
+          });
+          summarizeBtn.disabled = false; summarizeBtn.textContent = '✨ Summarize';
+          document.getElementById('taGuidedSummary_' + t.id)?.remove();
+          const box = document.createElement('div');
+          box.id = 'taGuidedSummary_' + t.id;
+          box.style.cssText = 'margin:8px 14px 0;padding:8px 10px;background:#f3e8ff;border-left:3px solid #6f42c1;border-radius:4px;font-size:12px;color:#333;line-height:1.5;white-space:pre-wrap;';
+          box.textContent = (aok && aiData.text) ? aiData.text.trim() : '❌ Summarisation failed.';
+          descEl.insertAdjacentElement('beforebegin', box);
+        };
       });
     };
     refreshThread();
