@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      3.5
+// @version      3.6
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -1153,7 +1153,7 @@ async function showGuidedPrewarmModal() {
       let actionLabel = '📋 Post Note'; let actionColor = '#007bff';
       if (isHotel) {
         if (daysUntil !== null && daysUntil < 3) { currentAction = 'call_hotel'; actionLabel = '📞 Tag Call Hotel + High Priority'; actionColor = '#dc3545'; }
-        else { currentAction = 'hotel_email'; actionLabel = '📋 Post note — send hotel email'; actionColor = '#28a745'; }
+        else { currentAction = 'note_only'; }
       } else if (isTransfer) { currentAction = 'voucher'; actionLabel = '🏷️ Tag Voucher & Move On'; actionColor = '#6c757d'; }
       else { currentAction = 'note_only'; }
 
@@ -1197,6 +1197,22 @@ async function showGuidedPrewarmModal() {
         viewNoteBtn.style.cssText = 'padding:7px 10px;border:1px solid #17a2b8;border-radius:5px;background:#fff;color:#17a2b8;font-size:12px;cursor:pointer;';
         viewNoteBtn.onclick = () => showNoteModal(bd.noteHtml);
         replyRowEl.appendChild(viewNoteBtn);
+      }
+      if (isHotel && !(daysUntil !== null && daysUntil < 3)) {
+        const hotelEmailBtn = document.createElement('button');
+        hotelEmailBtn.textContent = '📧 Hotel confirmation email';
+        hotelEmailBtn.style.cssText = 'padding:7px 10px;border:1px solid #28a745;border-radius:5px;background:#fff;color:#28a745;font-size:12px;font-weight:600;cursor:pointer;';
+        hotelEmailBtn.onclick = () => withButtonLoading(hotelEmailBtn, '⏳ Sending...', async () => {
+          const { ok: cok, data: cr } = await gmPost(`${BACKEND_URL}/guided-prewarm/confirm`, { ticketId: String(t.id), bookingId: currentBookingId, action: 'hotel_email' });
+          if (!cok) { showToast('❌ Error: ' + (cr?.error || 'Server error'), 'error'); return; }
+          const r = cr.results; const msgs = [];
+          if (r.emailSent) msgs.push(`email → ${r.hotelEmail}`);
+          if (r.fallback) msgs.push('no email found — tagged call_hotel');
+          if (r.tagged?.length) msgs.push('tagged: ' + r.tagged.join(', '));
+          showToast('✅ ' + (msgs.join(' · ') || 'Done'), 'success', 3000);
+          refreshFreshdeskTicket(); refreshThread();
+        });
+        replyRowEl.appendChild(hotelEmailBtn);
       }
       bookingSection.appendChild(replyRowEl);
 
