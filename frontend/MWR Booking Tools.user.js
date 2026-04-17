@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      4.8
+// @version      4.9
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -536,7 +536,7 @@ async function showChatModal(ticketId) {
 }
 
 // ── Guided Prewarm ────────────────────────────────────────────────────────────
-async function showGuidedPrewarmModal() {
+async function showGuidedPrewarmModal(singleTicketId = null) {
   const { modal, body } = createModal('taGuidedModal', '🎯 Guided Prewarm', {
     style: 'top:40px;left:50%;transform:translateX(-50%);width:1600px;max-width:calc(100vw - 24px);max-height:96vh;',
     bodyStyle: 'display:flex;flex-direction:column;gap:12px;',
@@ -546,64 +546,74 @@ async function showGuidedPrewarmModal() {
   const GUIDED_STATE_KEY = 'ta_guided_state';
   const savedState = (() => { try { return JSON.parse(localStorage.getItem(GUIDED_STATE_KEY)); } catch { return null; } })();
 
-  // ── Priority picker ────────────────────────────────────────────────────────
-  const { filterKey, resumeTicketId } = await new Promise((resolve) => {
-    body.innerHTML = '';
+  let filterKey, resumeTicketId, tickets;
 
-    // Resume banner
-    if (savedState && savedState.filterKey && savedState.ticketId) {
-      const filterLabels = { high: '🔴 High', medium: '🟡 Medium', low: '🟢 Low', pending: '⏳ Pending' };
-      const banner = document.createElement('div');
-      banner.style.cssText = 'background:#f0f5ff;border:1px solid #0056d2;border-radius:8px;padding:10px 16px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:12px;';
-      const bannerText = document.createElement('span');
-      bannerText.style.cssText = 'font-size:12px;color:#0056d2;';
-      bannerText.innerHTML = `<strong>Resume?</strong> Last session: ${filterLabels[savedState.filterKey] || savedState.filterKey} queue — ticket <strong>#${savedState.ticketId}</strong>`;
-      const resumeBtn = document.createElement('button');
-      resumeBtn.textContent = '▶ Resume';
-      resumeBtn.style.cssText = 'padding:6px 14px;border:none;border-radius:6px;background:#0056d2;color:#fff;font-size:12px;font-weight:600;cursor:pointer;flex-shrink:0;';
-      resumeBtn.onclick = () => resolve({ filterKey: savedState.filterKey, resumeTicketId: String(savedState.ticketId) });
-      const discardBtn = document.createElement('button');
-      discardBtn.textContent = 'Start fresh';
-      discardBtn.style.cssText = 'padding:6px 12px;border:1px solid #aaa;border-radius:6px;background:#fff;color:#666;font-size:12px;cursor:pointer;flex-shrink:0;';
-      discardBtn.onclick = () => { localStorage.removeItem(GUIDED_STATE_KEY); banner.remove(); };
-      banner.appendChild(bannerText); banner.appendChild(resumeBtn); banner.appendChild(discardBtn);
-      body.appendChild(banner);
+  if (singleTicketId) {
+    // ── Single-ticket mode — skip queue picker and list fetch ──────────────
+    filterKey = 'single';
+    resumeTicketId = null;
+    tickets = [{ id: singleTicketId }];
+    body.innerHTML = '';
+  } else {
+    // ── Priority picker ──────────────────────────────────────────────────────
+    ({ filterKey, resumeTicketId } = await new Promise((resolve) => {
+      body.innerHTML = '';
+
+      // Resume banner
+      if (savedState && savedState.filterKey && savedState.ticketId) {
+        const filterLabels = { high: '🔴 High', medium: '🟡 Medium', low: '🟢 Low', pending: '⏳ Pending' };
+        const banner = document.createElement('div');
+        banner.style.cssText = 'background:#f0f5ff;border:1px solid #0056d2;border-radius:8px;padding:10px 16px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:12px;';
+        const bannerText = document.createElement('span');
+        bannerText.style.cssText = 'font-size:12px;color:#0056d2;';
+        bannerText.innerHTML = `<strong>Resume?</strong> Last session: ${filterLabels[savedState.filterKey] || savedState.filterKey} queue — ticket <strong>#${savedState.ticketId}</strong>`;
+        const resumeBtn = document.createElement('button');
+        resumeBtn.textContent = '▶ Resume';
+        resumeBtn.style.cssText = 'padding:6px 14px;border:none;border-radius:6px;background:#0056d2;color:#fff;font-size:12px;font-weight:600;cursor:pointer;flex-shrink:0;';
+        resumeBtn.onclick = () => resolve({ filterKey: savedState.filterKey, resumeTicketId: String(savedState.ticketId) });
+        const discardBtn = document.createElement('button');
+        discardBtn.textContent = 'Start fresh';
+        discardBtn.style.cssText = 'padding:6px 12px;border:1px solid #aaa;border-radius:6px;background:#fff;color:#666;font-size:12px;cursor:pointer;flex-shrink:0;';
+        discardBtn.onclick = () => { localStorage.removeItem(GUIDED_STATE_KEY); banner.remove(); };
+        banner.appendChild(bannerText); banner.appendChild(resumeBtn); banner.appendChild(discardBtn);
+        body.appendChild(banner);
+      }
+
+      const label = document.createElement('div');
+      label.style.cssText = 'font-size:13px;color:#555;margin-bottom:8px;text-align:center;';
+      label.textContent = 'Which queue would you like to work on?';
+      body.appendChild(label);
+
+      const grid = document.createElement('div');
+      grid.style.cssText = 'display:flex;gap:10px;justify-content:center;';
+
+      const options = [
+        { key: 'high',    label: 'High',    color: '#dc3545', bg: '#fff5f5', icon: '🔴' },
+        { key: 'medium',  label: 'Medium',  color: '#fd7e14', bg: '#fff8f0', icon: '🟡' },
+        { key: 'low',     label: 'Low',     color: '#28a745', bg: '#f5fff8', icon: '🟢' },
+        { key: 'pending', label: 'Pending', color: '#0056d2', bg: '#f0f5ff', icon: '⏳' },
+      ];
+      options.forEach(function(opt) {
+        const btn = document.createElement('button');
+        btn.style.cssText = 'padding:14px 22px;border:2px solid ' + opt.color + ';border-radius:8px;background:' + opt.bg + ';color:' + opt.color + ';font-size:14px;font-weight:600;cursor:pointer;min-width:100px;';
+        btn.innerHTML = opt.icon + '<br><span style="font-size:13px;">' + opt.label + '</span>';
+        btn.onclick = function() { resolve({ filterKey: opt.key, resumeTicketId: null }); };
+        grid.appendChild(btn);
+      });
+      body.appendChild(grid);
+    }));
+
+    body.innerHTML = '<div style="color:#999;font-size:13px;">Loading tickets...</div>';
+
+    const { ok, data } = await gmGet(`${BACKEND_URL}/guided-prewarm/tickets?filter=${filterKey}`);
+    if (!ok || !data.tickets) {
+      body.innerHTML = '<div style="color:red;">❌ Could not load tickets.</div>';
+      return;
     }
 
-    const label = document.createElement('div');
-    label.style.cssText = 'font-size:13px;color:#555;margin-bottom:8px;text-align:center;';
-    label.textContent = 'Which queue would you like to work on?';
-    body.appendChild(label);
-
-    const grid = document.createElement('div');
-    grid.style.cssText = 'display:flex;gap:10px;justify-content:center;';
-
-    const options = [
-      { key: 'high',    label: 'High',    color: '#dc3545', bg: '#fff5f5', icon: '🔴' },
-      { key: 'medium',  label: 'Medium',  color: '#fd7e14', bg: '#fff8f0', icon: '🟡' },
-      { key: 'low',     label: 'Low',     color: '#28a745', bg: '#f5fff8', icon: '🟢' },
-      { key: 'pending', label: 'Pending', color: '#0056d2', bg: '#f0f5ff', icon: '⏳' },
-    ];
-    options.forEach(function(opt) {
-      const btn = document.createElement('button');
-      btn.style.cssText = 'padding:14px 22px;border:2px solid ' + opt.color + ';border-radius:8px;background:' + opt.bg + ';color:' + opt.color + ';font-size:14px;font-weight:600;cursor:pointer;min-width:100px;';
-      btn.innerHTML = opt.icon + '<br><span style="font-size:13px;">' + opt.label + '</span>';
-      btn.onclick = function() { resolve({ filterKey: opt.key, resumeTicketId: null }); };
-      grid.appendChild(btn);
-    });
-    body.appendChild(grid);
-  });
-
-  body.innerHTML = '<div style="color:#999;font-size:13px;">Loading tickets...</div>';
-
-  const { ok, data } = await gmGet(`${BACKEND_URL}/guided-prewarm/tickets?filter=${filterKey}`);
-  if (!ok || !data.tickets) {
-    body.innerHTML = '<div style="color:red;">❌ Could not load tickets.</div>';
-    return;
+    tickets = data.tickets;
+    if (!tickets.length) { body.innerHTML = '<div style="color:#999;font-size:13px;">No ' + filterKey + ' tickets found.</div>'; return; }
   }
-
-  const tickets = data.tickets;
-  if (!tickets.length) { body.innerHTML = '<div style="color:#999;font-size:13px;">No ' + filterKey + ' tickets found.</div>'; return; }
 
   let idx = 0;
   if (resumeTicketId) {
@@ -627,7 +637,7 @@ async function showGuidedPrewarmModal() {
 
   const renderTicket = async () => {
     if (stopped || idx >= tickets.length) {
-      localStorage.removeItem(GUIDED_STATE_KEY);
+      if (!singleTicketId) localStorage.removeItem(GUIDED_STATE_KEY);
       body.innerHTML = `<div style="font-size:13px;color:#333;text-align:center;padding:24px;">${stopped ? '🛑 Stopped.' : '✅ All tickets reviewed!'} (${idx}/${tickets.length})</div>`;
       return;
     }
@@ -636,7 +646,7 @@ async function showGuidedPrewarmModal() {
     // Fire pre-fetch for the next two tickets immediately — gives maximum lead time
     prefetch(idx + 1);
     prefetch(idx + 2);
-    localStorage.setItem(GUIDED_STATE_KEY, JSON.stringify({ filterKey, ticketId: String(t.id) }));
+    if (!singleTicketId) localStorage.setItem(GUIDED_STATE_KEY, JSON.stringify({ filterKey, ticketId: String(t.id) }));
     body.innerHTML = '';
 
     const prog = document.createElement('div');
@@ -3471,6 +3481,17 @@ function addFindBookingButton() {
       guidedBtn.style.cssText = 'background:#6f42c1;color:white;border:none;padding:8px 14px;border-radius:6px;margin-left:6px;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,0.2);';
       guidedBtn.onclick = () => showGuidedPrewarmModal();
 
+      // 🎯 Guided — open current ticket directly
+      const guidedHereBtn = document.createElement('button');
+      guidedHereBtn.id = 'taGuidedHereBtn';
+      guidedHereBtn.textContent = '🎯 Open Here';
+      guidedHereBtn.style.cssText = 'background:#9b59b6;color:white;border:none;padding:8px 14px;border-radius:6px;margin-left:4px;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,0.2);';
+      guidedHereBtn.onclick = () => {
+        const tid = getFreshdeskTicketId();
+        if (!tid) { showToast('No ticket detected on this page.', 'warning'); return; }
+        showGuidedPrewarmModal(tid);
+      };
+
       // 📂 View Booking
       const viewBookingBtn = document.createElement('button');
       viewBookingBtn.id = 'taViewBookingBtn';
@@ -3523,6 +3544,7 @@ function addFindBookingButton() {
       container.appendChild(btn);
       container.appendChild(prewarmBtn);
       container.appendChild(guidedBtn);
+      container.appendChild(guidedHereBtn);
       container.appendChild(viewBookingBtn);
       container.appendChild(viewUserBtn);
       container.appendChild(bulkBtn);
