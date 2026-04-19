@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      5.4
+// @version      5.5
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -761,10 +761,10 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
 
     replyPanelWrapper.appendChild(replyPanelToggle);
     replyPanelWrapper.appendChild(replyPanelContent);
-    rightCol.appendChild(replyPanelWrapper);
 
     columns.appendChild(leftCol); columns.appendChild(rightCol);
     body.appendChild(columns);
+    body.appendChild(replyPanelWrapper);
 
     // Ticket card with description — fetch immediately (fast, no Groq)
     const card = document.createElement('div');
