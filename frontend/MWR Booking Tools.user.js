@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.1
+// @version      6.2
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -643,11 +643,11 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
 
     // Two-column layout built immediately
     const columns = document.createElement('div');
-    columns.style.cssText = 'display:flex;gap:12px;flex:1;min-height:0;';
+    columns.style.cssText = 'display:flex;gap:12px;flex:1;min-height:500px;';
     const leftCol = document.createElement('div');
     leftCol.style.cssText = 'flex:1;display:flex;flex-direction:column;gap:8px;min-width:0;';
     const rightCol = document.createElement('div');
-    rightCol.style.cssText = 'width:540px;flex-shrink:0;display:flex;flex-direction:column;gap:8px;overflow-y:auto;';
+    rightCol.style.cssText = 'width:540px;flex-shrink:0;display:flex;flex-direction:column;gap:8px;';
     const infoRow = document.createElement('div');
     infoRow.style.cssText = 'display:flex;gap:8px;flex-shrink:0;';
     const bookingSection = document.createElement('div');
@@ -680,9 +680,9 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
     replyPanelWrapper.appendChild(replyPanelToggle);
     replyPanelWrapper.appendChild(replyPanelContent);
 
-    rightCol.appendChild(replyPanelWrapper);
     columns.appendChild(leftCol); columns.appendChild(rightCol);
     body.appendChild(columns);
+    body.appendChild(replyPanelWrapper);
 
     // Ticket card with description — fetch immediately (fast, no Groq)
     const card = document.createElement('div');
