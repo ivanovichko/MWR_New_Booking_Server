@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      4.9
+// @version      5.0
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -537,9 +537,9 @@ async function showChatModal(ticketId) {
 
 // ── Guided Prewarm ────────────────────────────────────────────────────────────
 async function showGuidedPrewarmModal(singleTicketId = null) {
-  const { modal, body } = createModal('taGuidedModal', '🎯 Guided Prewarm', {
-    style: 'top:40px;left:50%;transform:translateX(-50%);width:1600px;max-width:calc(100vw - 24px);max-height:96vh;',
-    bodyStyle: 'display:flex;flex-direction:column;gap:12px;',
+  const { modal, header: modalHeader, body, closeBtn: modalCloseBtn } = createModal('taGuidedModal', '🎯 Guided Prewarm', {
+    style: 'top:40px;left:50%;transform:translateX(-50%);width:2080px;max-width:calc(100vw - 24px);max-height:96vh;',
+    bodyStyle: 'display:flex;flex-direction:column;gap:8px;overflow:hidden;',
   });
 
   // ── Resume state ───────────────────────────────────────────────────────────
@@ -654,42 +654,74 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
     prog.textContent = `Ticket ${idx + 1} of ${tickets.length} — #${t.id}`;
     body.appendChild(prog);
 
+    // ── Button row — inserted into modal header ────────────────────────────────
     const btnRow = document.createElement('div');
-    btnRow.style.cssText = 'display:flex;gap:8px;margin-top:8px;flex-shrink:0;';
+    btnRow.id = 'taGuidedBtnRow';
+    btnRow.style.cssText = 'display:flex;gap:6px;flex:1;justify-content:center;padding:0 10px;';
     const confirmBtn = document.createElement('button');
-    confirmBtn.style.cssText = 'flex:1;padding:10px;border:none;border-radius:6px;background:#28a745;color:#fff;font-size:12px;font-weight:600;cursor:pointer;opacity:0.4;';
+    confirmBtn.style.cssText = 'flex:1;max-width:140px;padding:5px 8px;border:none;border-radius:6px;background:#28a745;color:#fff;font-size:12px;font-weight:600;cursor:pointer;opacity:0.4;';
     confirmBtn.textContent = '✅ Confirm';
     confirmBtn.disabled = true;
     const skipBtn = document.createElement('button');
-    skipBtn.style.cssText = 'padding:10px 18px;border:1px solid #ddd;border-radius:6px;background:#fff;color:#666;font-size:13px;cursor:pointer;';
+    skipBtn.style.cssText = 'padding:5px 12px;border:1px solid #ddd;border-radius:6px;background:#fff;color:#666;font-size:12px;cursor:pointer;';
     skipBtn.textContent = '⏭ Skip';
     skipBtn.onclick = () => { idx++; renderTicket(); };
     const stopBtn = document.createElement('button');
-    stopBtn.style.cssText = 'padding:10px 18px;border:1px solid #dc3545;border-radius:6px;background:#fff;color:#dc3545;font-size:13px;cursor:pointer;';
+    stopBtn.style.cssText = 'padding:5px 12px;border:1px solid #dc3545;border-radius:6px;background:#fff;color:#dc3545;font-size:12px;cursor:pointer;';
     stopBtn.textContent = '🛑 Stop';
     stopBtn.onclick = () => { stopped = true; renderTicket(); };
     const closeTicketBtn = document.createElement('button');
-    closeTicketBtn.style.cssText = 'padding:10px 14px;border:1px solid #6c757d;border-radius:6px;background:#fff;color:#6c757d;font-size:13px;cursor:pointer;';
-    closeTicketBtn.textContent = '✖ Close Ticket';
+    closeTicketBtn.style.cssText = 'padding:5px 10px;border:1px solid #6c757d;border-radius:6px;background:#fff;color:#6c757d;font-size:12px;cursor:pointer;';
+    closeTicketBtn.textContent = '✖ Close';
     closeTicketBtn.onclick = async () => {
-      closeTicketBtn.disabled = true; closeTicketBtn.textContent = '⏳ Closing...';
+      closeTicketBtn.disabled = true; closeTicketBtn.textContent = '⏳';
       const { ok } = await gmPost(`${BACKEND_URL}/close-ticket`, { ticketId: String(t.id) });
       if (ok) { showToast('✅ Ticket closed.', 'success', 2000); idx++; setTimeout(() => renderTicket(), 1000); }
-      else { showToast('❌ Could not close ticket.', 'error'); closeTicketBtn.disabled = false; closeTicketBtn.textContent = '✖ Close Ticket'; }
+      else { showToast('❌ Could not close ticket.', 'error'); closeTicketBtn.disabled = false; closeTicketBtn.textContent = '✖ Close'; }
     };
     const chatBtnEl = document.createElement('button');
     chatBtnEl.textContent = '💬 Chat';
-    chatBtnEl.style.cssText = 'padding:10px 14px;border:1px solid #e83e8c;border-radius:6px;background:#fff;color:#e83e8c;font-size:13px;font-weight:600;cursor:pointer;';
+    chatBtnEl.style.cssText = 'padding:5px 10px;border:1px solid #e83e8c;border-radius:6px;background:#fff;color:#e83e8c;font-size:12px;font-weight:600;cursor:pointer;';
     chatBtnEl.onclick = () => showChatModal(String(t.id));
     const addNoteBtn = document.createElement('button');
-    addNoteBtn.textContent = '📝 Add Note';
-    addNoteBtn.style.cssText = 'padding:10px 14px;border:1px solid #6f42c1;border-radius:6px;background:#fff;color:#6f42c1;font-size:13px;font-weight:600;cursor:pointer;';
+    addNoteBtn.textContent = '📝 Note';
+    addNoteBtn.style.cssText = 'padding:5px 10px;border:1px solid #6f42c1;border-radius:6px;background:#fff;color:#6f42c1;font-size:12px;font-weight:600;cursor:pointer;';
     btnRow.appendChild(confirmBtn);
     btnRow.appendChild(addNoteBtn);
     btnRow.appendChild(skipBtn);
     btnRow.appendChild(closeTicketBtn);
     btnRow.appendChild(chatBtnEl);
     btnRow.appendChild(stopBtn);
+    // Replace any previous btnRow in the modal header
+    document.getElementById('taGuidedBtnRow')?.remove();
+    modalHeader.insertBefore(btnRow, modalCloseBtn);
+
+    // ── Duplicate / open-threads (collapsible, above columns) ─────────────────
+    const dupWrapper = document.createElement('div');
+    dupWrapper.style.cssText = 'border:1px solid #eee;border-radius:8px;overflow:hidden;flex-shrink:0;';
+    let dupExpanded = false;
+    const dupToggle = document.createElement('div');
+    dupToggle.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:5px 12px;background:#f8f9fa;cursor:pointer;user-select:none;';
+    const dupToggleTitle = document.createElement('span');
+    dupToggleTitle.style.cssText = 'font-size:11px;font-weight:600;color:#666;';
+    dupToggleTitle.textContent = '🔗 Open Threads';
+    const dupToggleArrow = document.createElement('span');
+    dupToggleArrow.style.cssText = 'font-size:10px;color:#aaa;';
+    dupToggleArrow.textContent = '▶ expand';
+    dupToggle.appendChild(dupToggleTitle); dupToggle.appendChild(dupToggleArrow);
+    const dupBodyEl = document.createElement('div');
+    dupBodyEl.style.cssText = 'padding:8px 12px;display:none;border-top:1px solid #eee;';
+    const dupSection = document.createElement('div');
+    dupSection.style.cssText = 'font-size:12px;';
+    dupSection.innerHTML = '<div style="color:#999;font-size:11px;">⏳ Checking threads...</div>';
+    dupBodyEl.appendChild(dupSection);
+    dupToggle.onclick = () => {
+      dupExpanded = !dupExpanded;
+      dupBodyEl.style.display = dupExpanded ? '' : 'none';
+      dupToggleArrow.textContent = dupExpanded ? '▼ collapse' : '▶ expand';
+    };
+    dupWrapper.appendChild(dupToggle); dupWrapper.appendChild(dupBodyEl);
+    body.appendChild(dupWrapper);
 
     // Two-column layout built immediately
     const columns = document.createElement('div');
@@ -697,20 +729,19 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
     const leftCol = document.createElement('div');
     leftCol.style.cssText = 'flex:1;display:flex;flex-direction:column;gap:8px;min-width:0;';
     const rightCol = document.createElement('div');
-    rightCol.style.cssText = 'width:520px;flex-shrink:0;display:flex;gap:8px;';
+    rightCol.style.cssText = 'width:540px;flex-shrink:0;display:flex;flex-direction:column;gap:8px;';
+    const infoRow = document.createElement('div');
+    infoRow.style.cssText = 'display:flex;gap:8px;flex-shrink:0;';
     const bookingSection = document.createElement('div');
-    bookingSection.style.cssText = 'flex:1;border:1px solid #eee;border-radius:8px;padding:12px 14px;font-size:12px;overflow-y:auto;max-height:360px;';
+    bookingSection.style.cssText = 'flex:1;border:1px solid #eee;border-radius:8px;padding:12px 14px;font-size:12px;overflow-y:auto;max-height:320px;';
     bookingSection.innerHTML = '<div style="color:#999;font-size:11px;">⏳ Loading booking...</div>';
     const customerSection = document.createElement('div');
-    customerSection.style.cssText = 'width:180px;flex-shrink:0;border:1px solid #eee;border-radius:8px;padding:12px 14px;font-size:12px;overflow-y:auto;max-height:360px;';
+    customerSection.style.cssText = 'width:180px;flex-shrink:0;border:1px solid #eee;border-radius:8px;padding:12px 14px;font-size:12px;overflow-y:auto;max-height:320px;';
     customerSection.innerHTML = '<div style="color:#999;font-size:11px;">No member data</div>';
-    rightCol.appendChild(bookingSection);
-    rightCol.appendChild(customerSection);
-    columns.appendChild(leftCol);
-    columns.appendChild(rightCol);
-    body.appendChild(columns);
+    infoRow.appendChild(bookingSection); infoRow.appendChild(customerSection);
+    rightCol.appendChild(infoRow);
 
-    // Reply panel placeholder — populated when booking loads, collapsed by default
+    // Reply panel (collapsible) — sits below booking+customer in rightCol
     const replyPanelWrapper = document.createElement('div');
     replyPanelWrapper.style.cssText = 'display:none;border:1px solid #eee;border-radius:8px;overflow:hidden;flex-shrink:0;';
 
@@ -730,7 +761,10 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
 
     replyPanelWrapper.appendChild(replyPanelToggle);
     replyPanelWrapper.appendChild(replyPanelContent);
-    body.appendChild(replyPanelWrapper);
+    rightCol.appendChild(replyPanelWrapper);
+
+    columns.appendChild(leftCol); columns.appendChild(rightCol);
+    body.appendChild(columns);
 
     // Ticket card with description — fetch immediately (fast, no Groq)
     const card = document.createElement('div');
@@ -755,7 +789,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
     cardHeader.appendChild(cardTitleSpan);
     cardHeader.appendChild(cardActions);
     const descEl = document.createElement('div');
-    descEl.style.cssText = 'padding:12px 14px;font-size:12px;color:#555;line-height:1.6;overflow-y:auto;flex:1;max-height:320px;';
+    descEl.style.cssText = 'padding:12px 14px;font-size:12px;color:#555;line-height:1.6;overflow-y:auto;flex:1;';
     descEl.innerHTML = '<div style="color:#999;">⏳ Loading...</div>';
     // Status + tags bar — populated by refreshThread after full ticket loads
     const statusTagBar = document.createElement('div');
@@ -1479,10 +1513,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       currentBookingId = analysis.bookingId;
       renderBookingSection(analysis.bookingData, analysis.userData);
 
-      // ── Open threads / duplicates — always shown ───────────────────────────
-      const dupSection = document.createElement('div');
-      dupSection.style.cssText = 'border:1px solid #eee;border-radius:8px;padding:10px 14px;font-size:12px;';
-      body.appendChild(dupSection);
+      // ── Open threads / duplicates — dupSection already created above ─────────
 
       // Helper: build a dup row with Preview/Merge and Merge out buttons
       const buildDupRow = (dup) => {
@@ -1491,7 +1522,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
           row.innerHTML = `<a href="https://mwrlife.freshdesk.com/a/tickets/${dup.id}" target="_blank" style="color:#007bff;font-weight:600;font-size:12px;white-space:nowrap;">#${dup.id}</a><span style="flex:1;color:#555;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${dup.subject||'—'}</span><span style="color:#aaa;font-size:10px;white-space:nowrap;">${(dup.matchedBy||[]).join(', ')}</span>`;
             const previewBtn = document.createElement('button');
             previewBtn.textContent = 'Preview / Merge';
-            previewBtn.style.cssText = 'padding:2px 8px;border:1px solid #fd7e14;border-radius:4px;background:#fff;color:#fd7e14;font-size:11px;cursor:pointer;flex-shrink:0;font-weight:500;';
+            previewBtn.style.cssText = 'padding:1px 6px;border:1px solid #fd7e14;border-radius:4px;background:#fff;color:#fd7e14;font-size:10px;cursor:pointer;flex-shrink:0;font-weight:500;';
             previewBtn.onclick = async () => {
               previewBtn.disabled = true; previewBtn.textContent = '⏳';
               const { ok: tok, data: td } = await gmGet(`${BACKEND_URL}/guided-prewarm/ticket/${dup.id}`);
@@ -1619,7 +1650,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
             };
             const mergeOutBtn = document.createElement('button');
             mergeOutBtn.textContent = '📤 Merge out';
-            mergeOutBtn.style.cssText = 'padding:2px 8px;border:1px solid #6c757d;border-radius:4px;background:#fff;color:#6c757d;font-size:11px;cursor:pointer;flex-shrink:0;font-weight:500;';
+            mergeOutBtn.style.cssText = 'padding:1px 6px;border:1px solid #6c757d;border-radius:4px;background:#fff;color:#6c757d;font-size:10px;cursor:pointer;flex-shrink:0;font-weight:500;';
             mergeOutBtn.onclick = async () => {
               if (!confirm(`Merge #${t.id} into #${dup.id}? This will post a note on #${dup.id} and close #${t.id}.`)) return;
               mergeOutBtn.disabled = true; mergeOutBtn.textContent = '⏳';
@@ -1636,6 +1667,11 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       // Renders auto-search results + manual search bar into dupSection
       const renderDupResults = (dups) => {
         dupSection.innerHTML = '';
+        // Update toggle title and auto-expand if threads found
+        dupToggleTitle.textContent = dups.length > 0 ? `🔗 Open Threads (${dups.length})` : '🔗 Open Threads';
+        if (dups.length > 0 && !dupExpanded) {
+          dupExpanded = true; dupBodyEl.style.display = ''; dupToggleArrow.textContent = '▼ collapse';
+        }
         if (dups.length) {
           const hdr = document.createElement('div');
           hdr.style.cssText = 'font-weight:600;font-size:11px;color:#856404;margin-bottom:6px;';
@@ -1656,7 +1692,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
         searchRow.style.cssText = 'display:flex;align-items:center;gap:6px;flex-wrap:wrap;';
         const searchInput = document.createElement('input');
         searchInput.type = 'text'; searchInput.placeholder = 'Search tickets to merge…';
-        searchInput.style.cssText = 'flex:1;min-width:120px;padding:4px 8px;border:1px solid #ddd;border-radius:4px;font-size:11px;';
+        searchInput.style.cssText = 'flex:1;min-width:120px;padding:3px 6px;border:1px solid #ddd;border-radius:4px;font-size:10px;';
         const closedChk = document.createElement('input');
         closedChk.type = 'checkbox'; closedChk.id = 'manualSearchClosed_' + t.id;
         const closedLbl = document.createElement('label');
@@ -1664,7 +1700,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
         closedLbl.style.cssText = 'font-size:10px;color:#888;white-space:nowrap;cursor:pointer;';
         const searchBtn = document.createElement('button');
         searchBtn.textContent = '🔍 Search';
-        searchBtn.style.cssText = 'padding:4px 10px;border:none;border-radius:4px;background:#6f42c1;color:#fff;font-size:11px;cursor:pointer;';
+        searchBtn.style.cssText = 'padding:3px 8px;border:none;border-radius:4px;background:#6f42c1;color:#fff;font-size:10px;cursor:pointer;';
         const manualResults = document.createElement('div');
         manualResults.style.cssText = 'width:100%;margin-top:4px;';
         const doSearch = async () => {
@@ -1804,7 +1840,6 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
     notePanelClose.onclick = () => { notePanelWrapper.style.display = 'none'; };
 
     body.appendChild(notePanelWrapper);
-    body.appendChild(btnRow);
   };
 
   renderTicket();
