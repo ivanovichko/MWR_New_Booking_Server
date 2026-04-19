@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      5.5
+// @version      5.6
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -3132,24 +3132,40 @@ function showReplyComposer(recipientType, toEmail, booking, details, user, suppl
     translateRow.appendChild(translateBtn);
     container.appendChild(translateRow);
 
-    const translationArea = document.createElement('textarea');
-    translationArea.readOnly = true;
-    translationArea.placeholder = 'Translation will appear here...';
-    translationArea.style.cssText = 'display:none;width:100%;box-sizing:border-box;margin-top:6px;padding:9px 12px;border:1px solid #17a2b8;border-radius:6px;font-size:13px;font-family:system-ui,sans-serif;resize:vertical;min-height:160px;line-height:1.5;background:#f8fffe;color:#333;';
-    container.appendChild(translationArea);
-
     translateBtn.onclick = () => withButtonLoading(translateBtn, '⏳ Translating...', async () => {
-      const body = replyArea.innerText.trim();
-      if (!body) { showToast('Nothing to translate.', 'warning'); return; }
+      const originalHtml = replyArea.innerHTML;
+      const originalText = replyArea.innerText.trim();
+      if (!originalText) { showToast('Nothing to translate.', 'warning'); return; }
+
+      // Strip sign-off and everything below it before sending to AI
+      const signOffRe = /^\s*(sincerely|best\s+regards?|kind\s+regards?|regards|best|thanks|thank\s+you|warm\s+regards?|yours\s+sincerely|with\s+(?:best\s+)?regards?|cheers|yours\s+truly|faithfully)[,.]?\s*$/i;
+      const lines = originalText.split('\n');
+      let cutIdx = lines.length;
+      for (let i = lines.length - 1; i >= 0; i--) {
+        if (signOffRe.test(lines[i])) { cutIdx = i; break; }
+      }
+      const textToTranslate = lines.slice(0, cutIdx).join('\n').trim();
+      if (!textToTranslate) { showToast('Nothing to translate after stripping sign-off.', 'warning'); return; }
+
       const lang = langInput.value.trim() || detectedLang || 'the customer\'s language';
-      const prompt = 'Translate the following text to ' + lang + '. Translate everything including greetings and sign-offs. Return only the translated text — no explanation, no extra content.\n\n' + body;
-      translationArea.style.display = '';
-      translationArea.value = 'Translating...';
+      const prompt = 'Translate the following text to ' + lang + '. Return only the translated text — no explanation, no extra content.\n\n' + textToTranslate;
       const { ok, data: aiData } = await gmPost(BACKEND_URL + '/ai-assist', {
         booking: booking || {}, details: details || {}, user, supplier: supplier || null,
         freshdeskTicketId: getFreshdeskTicketId(), prompt,
       });
-      translationArea.value = (ok && aiData.text) ? aiData.text.trim() : 'Translation failed.';
+      if (!ok || !aiData.text) { showToast('Translation failed.', 'error'); return; }
+
+      const translatedHtml = aiData.text.trim().replace(/\n/g, '<br>');
+      // Replace reply area with two-section formatted layout
+      replyArea.innerHTML =
+        `<div style="border:1px solid #b2dfdb;border-radius:4px;padding:8px 10px;margin-bottom:8px;line-height:1.5;font-size:13px;">` +
+          `<div style="font-size:10px;color:#00897b;font-weight:600;margin-bottom:4px;">🌐 ${lang}</div>` +
+          translatedHtml +
+        `</div>` +
+        `<div style="border:1px solid #ddd;border-radius:4px;padding:8px 10px;line-height:1.5;font-size:13px;color:#555;">` +
+          `<div style="font-size:10px;color:#aaa;font-weight:600;margin-bottom:4px;">📄 Original</div>` +
+          originalHtml +
+        `</div>`;
     });
   }
 
