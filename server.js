@@ -759,10 +759,10 @@ app.get('/guided-prewarm/booking/:id', async (req, res) => {
 
 // Execute actions for a confirmed ticket
 app.post('/guided-prewarm/confirm', async (req, res) => {
-  const { ticketId, bookingId, action } = req.body;
+  const { ticketId, bookingId, action, noteHtml } = req.body;
   if (!ticketId || !bookingId || !action) return res.status(400).json({ error: 'ticketId, bookingId, and action are required' });
   try {
-    const results = await confirmTicket(ticketId, bookingId, action);
+    const results = await confirmTicket(ticketId, bookingId, action, noteHtml || null);
     res.json({ success: true, results });
   } catch (err) {
     res.status(500).json({ error: err.message });

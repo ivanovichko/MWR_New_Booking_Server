@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.5
+// @version      6.6
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -1347,7 +1347,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       postNoteBtn.textContent = '📋 Post Note';
       postNoteBtn.style.cssText = 'padding:7px 10px;border:1px solid #6f42c1;border-radius:5px;background:#fff;color:#6f42c1;font-size:12px;font-weight:600;cursor:pointer;';
       postNoteBtn.onclick = () => withButtonLoading(postNoteBtn, '⏳ Posting...', async () => {
-        const { ok, data: cr } = await gmPost(`${BACKEND_URL}/guided-prewarm/confirm`, { ticketId: String(t.id), bookingId: currentBookingId, action: 'note_only' });
+        const { ok, data: cr } = await gmPost(`${BACKEND_URL}/guided-prewarm/confirm`, { ticketId: String(t.id), bookingId: currentBookingId, action: 'note_only', noteHtml: bd.noteHtml || null });
         if (ok) { showToast('✅ Note posted!', 'success', 2000); refreshFreshdeskTicket(); refreshThread(); }
         else showToast('❌ ' + (cr?.error || 'Error'), 'error');
       });
@@ -1518,7 +1518,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
 
       confirmBtn.onclick = async () => {
         confirmBtn.disabled = true; confirmBtn.textContent = '⏳ Processing...';
-        const { ok: cok, data: cr } = await gmPost(`${BACKEND_URL}/guided-prewarm/confirm`, { ticketId: String(t.id), bookingId: currentBookingId, action: currentAction });
+        const { ok: cok, data: cr } = await gmPost(`${BACKEND_URL}/guided-prewarm/confirm`, { ticketId: String(t.id), bookingId: currentBookingId, action: currentAction, noteHtml: bd.noteHtml || null });
         if (!cok) { showToast('❌ Error: ' + (cr?.error || 'Server error'), 'error'); confirmBtn.disabled = false; confirmBtn.textContent = actionLabel; return; }
         const r = cr.results; const msgs = [];
         if (r.notePosted) msgs.push('note posted');

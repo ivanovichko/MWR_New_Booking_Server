@@ -57,16 +57,21 @@ function buildEmailResultHtml(emailResult) {
 /**
  * Executes the guided-prewarm action for a confirmed ticket.
  * action: 'hotel_email' | 'call_hotel' | 'voucher' | 'note_only'
+ * prebuiltNoteHtml: optional — if supplied for note_only/call_hotel, skips
+ *   the DB booking_html re-parse and note rebuild (already done during analyse).
  */
-async function confirmTicket(ticketId, bookingId, action) {
+async function confirmTicket(ticketId, bookingId, action, prebuiltNoteHtml = null) {
   const cached = await getCachedBooking(bookingId);
   if (!cached || !cached.parsed) throw new Error('Booking not cached');
 
   const { booking, details, user } = cached.parsed;
   const supplier = lookupSupplier(booking.supplierName);
-  const { cleanHtml: cachedCleanHtml } = cached.booking_html
-    ? parseBookingHtml(cached.booking_html)
-    : { cleanHtml: '' };
+
+  // Only parse booking_html when we actually need to build the note ourselves
+  const needsNoteBuild = (action === 'note_only' || action === 'call_hotel') && !prebuiltNoteHtml;
+  const cachedCleanHtml = needsNoteBuild && cached.booking_html
+    ? parseBookingHtml(cached.booking_html).cleanHtml
+    : '';
 
   const results = { notePosted: false, emailSent: false, tagged: [], prioritySet: null };
 
@@ -83,10 +88,10 @@ async function confirmTicket(ticketId, bookingId, action) {
       booking.destinationCountry
     );
 
-    // 4. Always post a separate note with the email search outcome
+    // 3. Always post a separate note with the email search outcome
     await postNote(ticketId, buildEmailResultHtml(emailResult));
 
-    // 5. Send email or fall back to call_hotel tag
+    // 4. Send email or fall back to call_hotel tag
     if (emailResult && emailResult.email && emailResult.confidence !== 'low') {
       const emailBody = buildHotelEmailHtml(booking, details || {});
       await sendEmail(ticketId, emailResult.email, null, emailBody);
@@ -100,7 +105,7 @@ async function confirmTicket(ticketId, bookingId, action) {
     }
 
   } else if (action === 'call_hotel') {
-    const noteHtml = buildNoteHtml(booking, cachedCleanHtml, details, user, supplier);
+    const noteHtml = prebuiltNoteHtml || buildNoteHtml(booking, cachedCleanHtml, details, user, supplier);
     await postNote(ticketId, noteHtml);
     results.notePosted = true;
     const tags = [...buildBookingTags(booking), 'call_hotel'];
@@ -115,7 +120,7 @@ async function confirmTicket(ticketId, bookingId, action) {
     results.tagged.push(...tags);
 
   } else if (action === 'note_only') {
-    const noteHtml = buildNoteHtml(booking, cachedCleanHtml, details, user, supplier);
+    const noteHtml = prebuiltNoteHtml || buildNoteHtml(booking, cachedCleanHtml, details, user, supplier);
     await postNote(ticketId, noteHtml);
     results.notePosted = true;
     const tags = buildBookingTags(booking);
