@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      5.6
+// @version      5.7
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -879,6 +879,31 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
           content.innerHTML = bodyHtml;
           wrap.appendChild(hdr);
           wrap.appendChild(content);
+          // Attachments
+          const atts = (meta && meta.attachments) || [];
+          if (atts.length) {
+            const attRow = document.createElement('div');
+            attRow.style.cssText = 'margin-top:6px;display:flex;flex-wrap:wrap;gap:4px;align-items:flex-start;';
+            atts.forEach(att => {
+              if (att.content_type && att.content_type.startsWith('image/')) {
+                const img = document.createElement('img');
+                img.src = att.attachment_url;
+                img.style.cssText = 'max-width:180px;max-height:130px;border-radius:3px;border:1px solid #ddd;cursor:pointer;object-fit:cover;';
+                img.title = att.name;
+                img.onclick = () => window.open(att.attachment_url, '_blank');
+                attRow.appendChild(img);
+              } else {
+                const link = document.createElement('a');
+                link.href = att.attachment_url;
+                link.target = '_blank';
+                link.title = att.name;
+                link.style.cssText = 'font-size:11px;color:#0056d2;text-decoration:none;background:#f0f4ff;border:1px solid #b8ccff;border-radius:3px;padding:2px 7px;white-space:nowrap;display:inline-flex;align-items:center;gap:3px;';
+                link.textContent = '📎 ' + att.name;
+                attRow.appendChild(link);
+              }
+            });
+            wrap.appendChild(attRow);
+          }
           wrap.appendChild(makeTranslateBtn(() => rawText || strip(bodyHtml)));
           descEl.appendChild(wrap);
         };
@@ -891,6 +916,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
             author: td.ticket.requester?.name || td.ticket.requester?.email || null,
             date:   fmtDate(td.ticket.created_at),
             notified: [],
+            attachments: td.ticket.attachments || [],
           };
           addMsg('📩 Customer (opening)', '#f8f9fa', '#6c757d', bodyHtml, strip(desc), meta);
         }
@@ -914,6 +940,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
             author,
             date: fmtDate(c.created_at),
             notified,
+            attachments: c.attachments || [],
           });
         });
 
