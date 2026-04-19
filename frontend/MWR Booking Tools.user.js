@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      5.7
+// @version      5.8
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -395,12 +395,6 @@ async function showChatModal(ticketId) {
   const body = document.createElement('div');
   body.style.cssText = 'flex:1;overflow-y:auto;padding:14px 16px;display:flex;flex-direction:column;gap:12px;';
 
-  // Member section
-  const memberSection = document.createElement('div');
-  memberSection.style.cssText = 'border:1px solid #eee;border-radius:8px;padding:12px 14px;';
-  memberSection.innerHTML = '<div style="color:#999;font-size:12px;">👤 Looking up member...</div>';
-  body.appendChild(memberSection);
-
   // Chat translation section
   const chatSection = document.createElement('div');
   chatSection.style.cssText = 'border:1px solid #eee;border-radius:8px;padding:12px 14px;display:flex;flex-direction:column;gap:8px;';
@@ -438,101 +432,25 @@ async function showChatModal(ticketId) {
   document.body.appendChild(modal);
   makeDraggable(modal, header);
 
-  // 1. Get requester email from ticket
-  const { ok: prepOk, data: prepData } = await gmGet(`${BACKEND_URL}/chat-prep/${freshdeskTicketId}`);
-  if (!prepOk || !prepData.email) {
-    memberSection.innerHTML = '<div style="color:#dc3545;font-size:12px;">❌ Could not resolve requester email.</div>';
-  } else {
-    const email = prepData.email;
+  // Translate Chat — fetch prompt from DB then send with ticket context
+  gmGet(`${BACKEND_URL}/settings/prompts`).then(async ({ ok: pok, data: pdata }) => {
+    const translatePrompt = (pok && Array.isArray(pdata))
+      ? pdata.find(p => p.label && p.label.toLowerCase().includes('translate chat'))
+      : null;
+    const promptText = translatePrompt ? translatePrompt.text : 'Clean and translate this chat transcript to English. Format as BOT/CUSTOMER/AGENT. Add a 2-sentence summary at the end.';
 
-    // 2a. Find User — async
-    gmPost(`${BACKEND_URL}/find-user`, { query: email }).then(async ({ ok: uok, data: udata }) => {
-      memberSection.innerHTML = '';
-      const results = uok && udata.results ? udata.results : [];
-      // Take first result whose email matches
-      const match = results.find(r => r.email && r.email.toLowerCase() === email.toLowerCase()) || results[0];
-      if (!match) {
-        memberSection.innerHTML = `<div style="color:#999;font-size:12px;">No member found for ${email}</div>`;
-        return;
-      }
-      // Fetch full profile
-      const { ok: profOk, data: profData } = await gmGet(`${BACKEND_URL}/user/${match.id}`);
-      const u = profOk && profData.user ? profData.user : match;
-      const titleEl = document.createElement('div');
-      titleEl.style.cssText = 'font-weight:600;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px;';
-      titleEl.textContent = '👤 Member';
-      memberSection.appendChild(titleEl);
-
-      const rows = [['Name', u.fullName||u.name], ['Email', u.email], ['Phone', u.phone], ['Country', u.country], ['Status', u.status], ['Instance', u.instance]].filter(([,v]) => v);
-      const table = document.createElement('table');
-      table.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px;margin-bottom:10px;';
-      rows.forEach(([label, val]) => {
-        const tr = document.createElement('tr');
-        tr.innerHTML = `<th style="padding:3px 8px;text-align:left;color:#888;font-weight:500;width:35%;white-space:nowrap;">${label}</th><td style="padding:3px 8px;color:#333;">${val}</td>`;
-        table.appendChild(tr);
-      });
-      memberSection.appendChild(table);
-
-      const btnRow = document.createElement('div');
-      btnRow.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;';
-      if (u.loginLink) {
-        const lb = document.createElement('a');
-        lb.href = u.loginLink; lb.target = '_blank';
-        lb.style.cssText = 'padding:4px 10px;border-radius:4px;background:#007bff;color:#fff;font-size:11px;text-decoration:none;';
-        lb.textContent = 'Login as User';
-        btnRow.appendChild(lb);
-      }
-      if (u.profileLink) {
-        const pb = document.createElement('a');
-        pb.href = u.profileLink; pb.target = '_blank';
-        pb.style.cssText = 'padding:4px 10px;border-radius:4px;background:#0056d2;color:#fff;font-size:11px;text-decoration:none;';
-        pb.textContent = 'Open Profile';
-        btnRow.appendChild(pb);
-      }
-      const noteBtn = document.createElement('button');
-      noteBtn.textContent = '📋 Post Member Note';
-      noteBtn.style.cssText = 'padding:4px 10px;border:none;border-radius:4px;background:#28a745;color:#fff;font-size:11px;cursor:pointer;';
-      noteBtn.onclick = async () => {
-        noteBtn.disabled = true; noteBtn.textContent = '⏳';
-        const { buildUserNoteHtml } = await (async () => {
-          // Build simple member note HTML inline
-          const v = val => val || '—';
-          const th = 'padding:5px 8px;background:#f5f5f5;border:1px solid #ddd;text-align:left;font-weight:600;font-size:12px;color:#444;';
-          const td = 'padding:5px 8px;border:1px solid #ddd;color:#222;font-size:12px;';
-          const rowsHtml = rows.map(([l,val]) => `<tr><th style="${th}">${l}</th><td style="${td}">${val}</td></tr>`).join('');
-          const noteHtml = `<div style="font-family:system-ui,sans-serif;"><h4 style="margin:0 0 8px;font-size:14px;">👤 Member — ${v(u.fullName||u.name)}</h4><table style="width:100%;border-collapse:collapse;">${rowsHtml}</table></div>`;
-          return { buildUserNoteHtml: () => noteHtml };
-        })();
-        const noteHtml = buildUserNoteHtml();
-        const { ok } = await gmPost(`${BACKEND_URL}/post-note`, { freshdeskTicketId, noteHtml });
-        noteBtn.disabled = false; noteBtn.textContent = '📋 Post Member Note';
-        if (ok) { showToast('✅ Member note posted!', 'success'); refreshFreshdeskTicket(); }
-        else showToast('❌ Failed.', 'error');
-      };
-      btnRow.appendChild(noteBtn);
-      memberSection.appendChild(btnRow);
+    const { ok: aiOk, data: aiData } = await gmPost(`${BACKEND_URL}/ai-assist`, {
+      booking: {}, details: {}, user: null, supplier: null,
+      freshdeskTicketId, prompt: promptText,
     });
-
-    // 2b. Translate Chat — fetch prompt from DB then send with ticket context
-    gmGet(`${BACKEND_URL}/settings/prompts`).then(async ({ ok: pok, data: pdata }) => {
-      const translatePrompt = (pok && Array.isArray(pdata))
-        ? pdata.find(p => p.label && p.label.toLowerCase().includes('translate chat'))
-        : null;
-      const promptText = translatePrompt ? translatePrompt.text : 'Clean and translate this chat transcript to English. Format as BOT/CUSTOMER/AGENT. Add a 2-sentence summary at the end.';
-
-      const { ok: aiOk, data: aiData } = await gmPost(`${BACKEND_URL}/ai-assist`, {
-        booking: {}, details: {}, user: null, supplier: null,
-        freshdeskTicketId, prompt: promptText,
-      });
-      if (aiOk && aiData.text) {
-        chatTextarea.value = aiData.text;
-        chatTextarea.readOnly = false;
-        postChatNoteBtn.disabled = false; postChatNoteBtn.style.opacity = '1';
-      } else {
-        chatTextarea.value = '❌ Translation failed.';
-      }
-    });
-  }
+    if (aiOk && aiData.text) {
+      chatTextarea.value = aiData.text;
+      chatTextarea.readOnly = false;
+      postChatNoteBtn.disabled = false; postChatNoteBtn.style.opacity = '1';
+    } else {
+      chatTextarea.value = '❌ Translation failed.';
+    }
+  });
 }
 
 // ── Guided Prewarm ────────────────────────────────────────────────────────────
@@ -1082,6 +1000,25 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
     let currentBookingId = null;
     let currentAction = null;
 
+    // Inline reservations renderer (compact, smaller than full profile modal)
+    const renderLocalReservations = (reservations) => {
+      if (!reservations || !reservations.length) return '<div style="color:#888;font-size:11px;">No reservations found.</div>';
+      let html = '';
+      reservations.forEach(r => {
+        const sc = r.status && r.status.toLowerCase().includes('confirm') ? '#28a745' :
+                   r.status && r.status.toLowerCase().includes('cancel')  ? '#6c757d' :
+                   r.status && r.status.toLowerCase().includes('fail')    ? '#dc3545' : '#007bff';
+        html += `<div data-bookingid="${r.bookingId}" style="padding:5px 7px;border:1px solid #eee;border-radius:4px;margin-bottom:4px;cursor:pointer;font-size:11px;background:#fff;">`;
+        html += `<div style="display:flex;justify-content:space-between;align-items:center;">`;
+        html += `<span><strong>#${r.bookingId}</strong> <span style="color:#666;font-size:10px;">${r.type||''}</span></span>`;
+        html += `<span style="color:${sc};font-size:10px;font-weight:600;">${r.status||''}</span>`;
+        html += `</div><div style="font-size:10px;color:#666;margin-top:1px;">${r.guest||''}`;
+        if (r.checkIn) html += ` · ${r.checkIn} → ${r.checkOut}`;
+        html += `</div></div>`;
+      });
+      return html;
+    };
+
     const renderCustomerSection = (user) => {
       customerSection.innerHTML = '';
       const ct = document.createElement('div');
@@ -1089,62 +1026,112 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       ct.textContent = 'Member';
       customerSection.appendChild(ct);
 
-      // Action buttons — Login as User, Open Full Profile, Post Member Note
-      const hasLinks = user.loginLink || user.profileLink;
-      if (hasLinks) {
-        const actionRow = document.createElement('div');
-        actionRow.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin-bottom:8px;';
-        if (user.loginLink) {
-          const a = document.createElement('a');
-          a.href = user.loginLink; a.target = '_blank';
-          a.textContent = '🔑 Login as User';
-          a.style.cssText = 'display:block;background:#007bff;color:#fff;padding:4px 8px;border-radius:4px;text-decoration:none;font-size:11px;text-align:center;';
-          actionRow.appendChild(a);
-        }
-        if (user.profileLink) {
-          const a = document.createElement('a');
-          a.href = user.profileLink; a.target = '_blank';
-          a.textContent = '👤 Open Full Profile';
-          a.style.cssText = 'display:block;background:#0056d2;color:#fff;padding:4px 8px;border-radius:4px;text-decoration:none;font-size:11px;text-align:center;';
-          actionRow.appendChild(a);
-        }
-        const postNoteBtn2 = document.createElement('button');
-        postNoteBtn2.textContent = '📋 Post Member Note';
-        postNoteBtn2.style.cssText = 'padding:4px 8px;border:1px solid #28a745;border-radius:4px;background:#fff;color:#28a745;font-size:11px;cursor:pointer;font-weight:500;';
-        postNoteBtn2.onclick = async () => {
-          postNoteBtn2.disabled = true; postNoteBtn2.textContent = '⏳';
-          const v = val => val || '';
-          const fields = [
-            ['Name',     user.fullName || user.name],
-            ['Email',    user.email],
-            ['Phone',    user.phone],
-            ['Instance', user.instance],
-            ['Status',   user.status],
-            ['Country',  user.country],
-          ].filter(([,val]) => val);
-          const lines = fields.map(([l, val]) => `<div><strong>${l}:</strong> ${v(val)}</div>`).join('');
-          const loginLine  = user.loginLink   ? `<div><strong>Login:</strong> <a href="${user.loginLink}" target="_blank">Login as User</a></div>`     : '';
-          const profileLine = user.profileLink ? `<div><strong>Profile:</strong> <a href="${user.profileLink}" target="_blank">Open Full Profile</a></div>` : '';
-          const noteHtml = `<div style="font-family:system-ui,sans-serif;font-size:13px;line-height:1.8;"><h4 style="margin:0 0 8px;font-size:14px;">👤 Member Details</h4>${lines}${loginLine}${profileLine}</div>`;
-          const { ok } = await gmPost(`${BACKEND_URL}/post-note`, { freshdeskTicketId: String(t.id), noteHtml });
-          postNoteBtn2.disabled = false; postNoteBtn2.textContent = '📋 Post Member Note';
-          if (ok) { showToast('✅ Member note posted!', 'success'); refreshThread(); }
-          else showToast('❌ Failed to post note.', 'error');
+      if (user) {
+        // ── Tab bar: Profile | Reservations ──────────────────────────────────
+        const tabBar = document.createElement('div');
+        tabBar.style.cssText = 'display:flex;border-bottom:1px solid #eee;margin-bottom:8px;';
+        const makeTabBtn = (label, active) => {
+          const b = document.createElement('button');
+          b.textContent = label;
+          b.style.cssText = `flex:1;padding:5px;border:none;border-bottom:2px solid ${active ? '#007bff' : 'transparent'};background:${active ? '#f8f8f8' : 'transparent'};font-size:11px;font-weight:${active ? '600' : '400'};cursor:pointer;`;
+          return b;
         };
-        actionRow.appendChild(postNoteBtn2);
-        customerSection.appendChild(actionRow);
+        const profileTabBtn = makeTabBtn('Profile', true);
+        const resTabBtn = makeTabBtn('Reservations', false);
+        tabBar.appendChild(profileTabBtn); tabBar.appendChild(resTabBtn);
+        customerSection.appendChild(tabBar);
+
+        const tabContent = document.createElement('div');
+        customerSection.appendChild(tabContent);
+
+        let reservationsData = null;
+
+        const setActiveTab = (btn) => {
+          [profileTabBtn, resTabBtn].forEach(b => {
+            b.style.borderBottomColor = b === btn ? '#007bff' : 'transparent';
+            b.style.background        = b === btn ? '#f8f8f8' : 'transparent';
+            b.style.fontWeight        = b === btn ? '600' : '400';
+          });
+        };
+
+        const showProfileTab = () => {
+          setActiveTab(profileTabBtn);
+          tabContent.innerHTML = '';
+          // Action buttons
+          if (user.loginLink || user.profileLink) {
+            const actionRow = document.createElement('div');
+            actionRow.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin-bottom:8px;';
+            if (user.loginLink) {
+              const a = document.createElement('a'); a.href = user.loginLink; a.target = '_blank';
+              a.textContent = '🔑 Login as User';
+              a.style.cssText = 'display:block;background:#007bff;color:#fff;padding:4px 8px;border-radius:4px;text-decoration:none;font-size:11px;text-align:center;';
+              actionRow.appendChild(a);
+            }
+            if (user.profileLink) {
+              const a = document.createElement('a'); a.href = user.profileLink; a.target = '_blank';
+              a.textContent = '👤 Open Full Profile';
+              a.style.cssText = 'display:block;background:#0056d2;color:#fff;padding:4px 8px;border-radius:4px;text-decoration:none;font-size:11px;text-align:center;';
+              actionRow.appendChild(a);
+            }
+            const postNoteBtn2 = document.createElement('button');
+            postNoteBtn2.textContent = '📋 Post Member Note';
+            postNoteBtn2.style.cssText = 'padding:4px 8px;border:1px solid #28a745;border-radius:4px;background:#fff;color:#28a745;font-size:11px;cursor:pointer;font-weight:500;';
+            postNoteBtn2.onclick = async () => {
+              postNoteBtn2.disabled = true; postNoteBtn2.textContent = '⏳';
+              const v = val => val || '';
+              const fields = [['Name', user.fullName||user.name],['Email', user.email],['Phone', user.phone],['Instance', user.instance],['Status', user.status],['Country', user.country]].filter(([,val]) => val);
+              const lines = fields.map(([l, val]) => `<div><strong>${l}:</strong> ${v(val)}</div>`).join('');
+              const loginLine   = user.loginLink   ? `<div><strong>Login:</strong> <a href="${user.loginLink}" target="_blank">Login as User</a></div>` : '';
+              const profileLine = user.profileLink ? `<div><strong>Profile:</strong> <a href="${user.profileLink}" target="_blank">Open Full Profile</a></div>` : '';
+              const noteHtml = `<div style="font-family:system-ui,sans-serif;font-size:13px;line-height:1.8;"><h4 style="margin:0 0 8px;font-size:14px;">👤 Member Details</h4>${lines}${loginLine}${profileLine}</div>`;
+              const { ok } = await gmPost(`${BACKEND_URL}/post-note`, { freshdeskTicketId: String(t.id), noteHtml });
+              postNoteBtn2.disabled = false; postNoteBtn2.textContent = '📋 Post Member Note';
+              if (ok) { showToast('✅ Member note posted!', 'success'); refreshThread(); }
+              else showToast('❌ Failed to post note.', 'error');
+            };
+            actionRow.appendChild(postNoteBtn2);
+            tabContent.appendChild(actionRow);
+          }
+          const uRows = [['Name',user.fullName||user.name],['Email',user.email],['Phone',user.phone],['Country',user.country],['Status',user.status]].filter(([,v])=>v);
+          const uTable = document.createElement('table'); uTable.style.cssText = 'width:100%;border-collapse:collapse;';
+          uRows.forEach(([label,val]) => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `<th style="padding:3px 4px;text-align:left;color:#aaa;font-weight:500;font-size:11px;white-space:nowrap;">${label}</th><td style="padding:3px 4px;color:#333;font-size:11px;word-break:break-all;">${val}</td>`;
+            uTable.appendChild(tr);
+          });
+          tabContent.appendChild(uTable);
+        };
+
+        const showReservationsTab = async () => {
+          setActiveTab(resTabBtn);
+          if (!user.id) { tabContent.innerHTML = '<div style="color:#999;font-size:11px;">No user ID.</div>'; return; }
+          if (!reservationsData) {
+            tabContent.innerHTML = '<div style="color:#999;font-size:11px;">⏳ Loading...</div>';
+            const { ok: rok, data: rd } = await gmGet(`${BACKEND_URL}/user/${user.id}/reservations`);
+            if (!rok) { tabContent.innerHTML = '<div style="color:red;font-size:11px;">Failed to load.</div>'; return; }
+            reservationsData = rd.reservations || [];
+          }
+          tabContent.innerHTML = renderLocalReservations(reservationsData);
+          tabContent.querySelectorAll('[data-bookingid]').forEach(el => {
+            el.onmouseover = () => { el.style.background = '#f5f5f5'; };
+            el.onmouseout  = () => { el.style.background = '#fff'; };
+            el.onclick = () => {
+              const bid = el.dataset.bookingid;
+              currentBookingId = bid;
+              gmGet(`${BACKEND_URL}/guided-prewarm/booking/${encodeURIComponent(bid)}`).then(({ ok: fok, data: fd }) => {
+                if (fok && fd.bookingData) renderBookingSection(fd.bookingData, user);
+                else showToast('Booking not found.', 'error');
+              });
+            };
+          });
+        };
+
+        profileTabBtn.onclick = showProfileTab;
+        resTabBtn.onclick = showReservationsTab;
+        showProfileTab();
       }
 
-      const uRows = [['Name',user.fullName||user.name],['Email',user.email],['Phone',user.phone],['Country',user.country],['Status',user.status]].filter(([,v])=>v);
-      const uTable = document.createElement('table'); uTable.style.cssText = 'width:100%;border-collapse:collapse;';
-      uRows.forEach(([label,val]) => {
-        const tr = document.createElement('tr');
-        tr.innerHTML = `<th style="padding:3px 4px;text-align:left;color:#aaa;font-weight:500;font-size:11px;white-space:nowrap;">${label}</th><td style="padding:3px 4px;color:#333;font-size:11px;word-break:break-all;">${val}</td>`;
-        uTable.appendChild(tr);
-      });
-      customerSection.appendChild(uTable);
-
-      // ── Find different member inline row ───────────────────────────────────
+      // ── Find different member — always shown ──────────────────────────────
       const findMemberRow = document.createElement('div');
       findMemberRow.style.cssText = 'display:none;gap:6px;margin-top:6px;';
       const findMemberInput = document.createElement('input');
@@ -1167,21 +1154,16 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
         results.slice(0, 5).forEach(u => {
           const item = document.createElement('div');
           item.style.cssText = 'padding:3px 0;border-bottom:1px solid #f0f0f0;cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:8px;';
-          const label = document.createElement('span');
-          label.style.cssText = 'color:#333;font-size:11px;';
-          label.textContent = `${u.name || ''}${u.email ? ' — ' + u.email : ''}`;
+          const lbl = document.createElement('span');
+          lbl.style.cssText = 'color:#333;font-size:11px;';
+          lbl.textContent = `${u.name || ''}${u.email ? ' — ' + u.email : ''}`;
           const pickBtn = document.createElement('button');
           pickBtn.textContent = 'Select';
           pickBtn.style.cssText = 'padding:2px 7px;border:1px solid #6f42c1;border-radius:3px;background:#fff;color:#6f42c1;font-size:10px;cursor:pointer;flex-shrink:0;';
           pickBtn.onclick = () => {
-            const userData = {
-              ...u,
-              loginLink:   `${TA_BASE}/admin/account/webadminCustomerLogin/${u.id}`,
-              profileLink: `${TA_BASE}/admin/account/viewCustomer/${u.id}`,
-            };
-            renderCustomerSection(userData);
+            renderCustomerSection({ ...u, loginLink: `${TA_BASE}/admin/account/webadminCustomerLogin/${u.id}`, profileLink: `${TA_BASE}/admin/account/viewCustomer/${u.id}` });
           };
-          item.appendChild(label); item.appendChild(pickBtn);
+          item.appendChild(lbl); item.appendChild(pickBtn);
           findMemberResults.appendChild(item);
         });
       };
@@ -1232,10 +1214,9 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
         bookingSection.appendChild(manualRow);
         confirmBtn.disabled = true; confirmBtn.style.opacity = '0.4';
         // Populate customer section from userData fallback (no booking found)
-        if (userData) {
-          renderCustomerSection(userData);
-          // Enable reply panel if we have a customer email
-          if (userData.email) {
+        renderCustomerSection(userData || null);
+        // Enable reply panel if we have a customer email
+        if (userData && userData.email) {
             replyPanelWrapper.style.display = '';
             replyPanelContent.innerHTML = '';
             const rTabStyle = (color, active) =>
@@ -1256,7 +1237,6 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
             replyPanelContent.appendChild(replyBody);
             showReplyComposer('customer', userData.email, {}, {}, userData, null, replyBody, refreshThread, String(t.id));
           }
-        }
         return;
       }
 
@@ -1341,7 +1321,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       bookingSection.appendChild(changeBookingToggle);
       bookingSection.appendChild(changeBookingRow);
 
-      if (user) renderCustomerSection(user);
+      renderCustomerSection(user || null);
 
       const replyRowEl = document.createElement('div'); replyRowEl.style.cssText = 'margin-top:10px;display:flex;gap:6px;';
       const postNoteBtn = document.createElement('button');
