@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      5.2
+// @version      5.3
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -1659,7 +1659,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
               const { ok: ftok, data: ftd } = await gmGet(`${BACKEND_URL}/guided-prewarm/ticket/${t.id}`);
               const desc = (ftok && ftd.ticket) ? (ftd.ticket.description || ftd.ticket.description_text || '') : '';
               const { ok: mok, data: mr } = await gmPost(`${BACKEND_URL}/merge-ticket`, { sourceTicketId: String(t.id), targetTicketId: String(dup.id), description: desc });
-              if (mok) { showToast(`✅ Merged #${t.id} into #${dup.id} — ticket closed.`, 'success', 3000); idx++; setTimeout(() => renderTicket(), 1200); }
+              if (mok) { showToast(`✅ Merged #${t.id} into #${dup.id} — ticket closed.`, 'success', 3000); refreshThread(); idx++; setTimeout(() => renderTicket(), 1200); }
               else { showToast('❌ Merge failed: ' + (mr?.error || 'Server error'), 'error'); mergeOutBtn.disabled = false; mergeOutBtn.textContent = '📤 Merge out'; }
             };
           row.appendChild(previewBtn); row.appendChild(mergeOutBtn);
