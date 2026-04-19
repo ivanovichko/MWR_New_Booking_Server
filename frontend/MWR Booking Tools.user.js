@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.4
+// @version      6.5
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -115,6 +115,18 @@ async function withButtonLoading(btn, loadingLabel, fn) {
   btn.textContent = loadingLabel || '⏳ Loading...';
   try { return await fn(); }
   finally { btn.disabled = false; btn.textContent = orig; }
+}
+
+// ── Strip AI translation noise (markdown headers, reasoning blocks) ───────────
+function stripTranslationNoise(text) {
+  return text
+    // Remove bold/heading labels like **Translated text:** or **Reasoning:**
+    .replace(/^\*{1,2}[^*\n]+\*{1,2}:?\s*/gim, '')
+    // Remove lines that are only a markdown heading (## Translation, # Reasoning, etc.)
+    .replace(/^#{1,3}\s+.+$/gm, '')
+    // Remove "Translated text:" / "Translation:" / "Reasoning:" bare labels at line start
+    .replace(/^(translated\s+text|translation|reasoning)\s*:\s*/gim, '')
+    .trim();
 }
 
 // ── Modal factory — creates a standard draggable modal shell ─────────────────
@@ -443,7 +455,7 @@ async function showChatModal(ticketId) {
     const translatePrompt = (pok && Array.isArray(pdata))
       ? pdata.find(p => p.label && p.label.toLowerCase().includes('translate chat'))
       : null;
-    const promptText = translatePrompt ? translatePrompt.text : 'Clean and translate this chat transcript to English. Format as BOT/CUSTOMER/AGENT. Add a 2-sentence summary at the end.';
+    const promptText = translatePrompt ? translatePrompt.text : 'Clean and translate this chat transcript to English. Format as BOT/CUSTOMER/AGENT. Add a 2-sentence summary at the end. Output only the formatted transcript and summary — no headers, no labels, no markdown, no reasoning, no extra commentary.';
 
     const { ok: aiOk, data: aiData } = await gmPost(`${BACKEND_URL}/ai-assist`, {
       booking: {}, details: {}, user: null, supplier: null,
@@ -746,7 +758,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
           btn.onclick = async () => {
             btn.disabled = true; btn.textContent = '⏳';
             const text = getText();
-            const prompt = 'Translate the following to English. Return only the translated text — no explanation.\n\n' + text;
+            const prompt = 'Translate the following to English. Return ONLY the translated text. No headers, no labels, no markdown, no reasoning, no explanation — just the translation.\n\n' + text;
             const { ok: aok, data: aiData } = await gmPost(BACKEND_URL + '/ai-assist', {
               booking: {}, details: {}, user: null, supplier: null,
               freshdeskTicketId: String(t.id), prompt,
@@ -755,7 +767,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
             btn.remove();
             const resultEl = document.createElement('div');
             resultEl.style.cssText = 'margin-top:6px;padding:6px 8px;background:#f0fffe;border:1px solid #17a2b8;border-radius:4px;font-size:12px;color:#333;white-space:pre-wrap;';
-            resultEl.textContent = (aok && aiData.text) ? aiData.text.trim() : '❌ Translation failed.';
+            resultEl.textContent = (aok && aiData.text) ? stripTranslationNoise(aiData.text) : '❌ Translation failed.';
             parent && parent.appendChild(resultEl);
           };
           return btn;
@@ -3162,14 +3174,14 @@ function showReplyComposer(recipientType, toEmail, booking, details, user, suppl
       if (!textToTranslate) { showToast('Nothing to translate after stripping sign-off.', 'warning'); return; }
 
       const lang = langInput.value.trim() || detectedLang || 'the customer\'s language';
-      const prompt = 'Translate the following text to ' + lang + '. Return only the translated text — no explanation, no extra content.\n\n' + textToTranslate;
+      const prompt = 'Translate the following text to ' + lang + '. Return ONLY the translated text. No headers, no labels, no markdown, no reasoning, no explanation — just the translation.\n\n' + textToTranslate;
       const { ok, data: aiData } = await gmPost(BACKEND_URL + '/ai-assist', {
         booking: booking || {}, details: details || {}, user, supplier: supplier || null,
         freshdeskTicketId: getFreshdeskTicketId(), prompt,
       });
       if (!ok || !aiData.text) { showToast('Translation failed.', 'error'); return; }
 
-      const translatedHtml = aiData.text.trim().replace(/\n/g, '<br>');
+      const translatedHtml = stripTranslationNoise(aiData.text).replace(/\n/g, '<br>');
       // Replace reply area with two-section formatted layout
       replyArea.innerHTML =
         `<div style="border:1px solid #b2dfdb;border-radius:4px;padding:8px 10px;margin-bottom:8px;line-height:1.5;font-size:13px;">` +
