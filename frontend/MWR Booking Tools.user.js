@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      5.1
+// @version      5.2
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -539,7 +539,7 @@ async function showChatModal(ticketId) {
 async function showGuidedPrewarmModal(singleTicketId = null) {
   const { modal, header: modalHeader, body, closeBtn: modalCloseBtn } = createModal('taGuidedModal', '🎯 Guided Prewarm', {
     style: 'top:40px;left:50%;transform:translateX(-50%);width:2080px;max-width:calc(100vw - 24px);max-height:96vh;',
-    bodyStyle: 'display:flex;flex-direction:column;gap:8px;overflow:hidden;',
+    bodyStyle: 'display:flex;flex-direction:column;gap:8px;overflow-y:auto;',
   });
 
   // ── Resume state ───────────────────────────────────────────────────────────
