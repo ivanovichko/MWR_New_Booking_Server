@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.3
+// @version      6.4
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -78,16 +78,22 @@ function makeDraggable(modal, handle) {
   let ox = 0, oy = 0, dragging = false;
   handle.style.cursor = 'move';
   handle.addEventListener('mousedown', (e) => {
+    // Don't start drag when clicking interactive elements inside the handle
+    if (e.target.closest('button, a, input, select, textarea')) return;
     dragging = true;
-    ox = e.clientX - modal.offsetLeft;
-    oy = e.clientY - modal.offsetTop;
+    const rect = modal.getBoundingClientRect();
+    // Snap to rect position first so transform doesn't cause a jump
+    modal.style.left      = rect.left + 'px';
+    modal.style.top       = rect.top  + 'px';
+    modal.style.transform = 'none';
+    ox = e.clientX - rect.left;
+    oy = e.clientY - rect.top;
     e.preventDefault();
   });
   document.addEventListener('mousemove', (e) => {
     if (!dragging) return;
-    modal.style.left      = (e.clientX - ox) + 'px';
-    modal.style.top       = (e.clientY - oy) + 'px';
-    modal.style.transform = 'none';
+    modal.style.left = (e.clientX - ox) + 'px';
+    modal.style.top  = (e.clientY - oy) + 'px';
   });
   document.addEventListener('mouseup', () => { dragging = false; });
 }
