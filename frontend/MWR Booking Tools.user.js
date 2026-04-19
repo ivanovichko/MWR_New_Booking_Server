@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.2
+// @version      6.3
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -803,16 +803,17 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
             const attRow = document.createElement('div');
             attRow.style.cssText = 'margin-top:6px;display:flex;flex-wrap:wrap;gap:4px;align-items:flex-start;';
             atts.forEach(att => {
+              const proxied = `${BACKEND_URL}/attachment?url=${encodeURIComponent(att.attachment_url)}`;
               if (att.content_type && att.content_type.startsWith('image/')) {
                 const img = document.createElement('img');
-                img.src = att.attachment_url;
+                img.src = proxied;
                 img.style.cssText = 'max-width:180px;max-height:130px;border-radius:3px;border:1px solid #ddd;cursor:pointer;object-fit:cover;';
                 img.title = att.name;
-                img.onclick = () => window.open(att.attachment_url, '_blank');
+                img.onclick = () => window.open(proxied, '_blank');
                 attRow.appendChild(img);
               } else {
                 const link = document.createElement('a');
-                link.href = att.attachment_url;
+                link.href = proxied;
                 link.target = '_blank';
                 link.title = att.name;
                 link.style.cssText = 'font-size:11px;color:#0056d2;text-decoration:none;background:#f0f4ff;border:1px solid #b8ccff;border-radius:3px;padding:2px 7px;white-space:nowrap;display:inline-flex;align-items:center;gap:3px;';

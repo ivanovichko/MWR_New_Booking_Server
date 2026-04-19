@@ -561,6 +561,24 @@ app.post('/send-reply', upload.array('files'), async (req, res) => {
   }
 });
 
+// ─── Attachment proxy — fetches Freshdesk attachment with API auth ────────────
+// Usage: GET /attachment?url=<encoded attachment_url>
+app.get('/attachment', async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).send('url param required');
+  try {
+    const upstream = await fetch(url, { headers: { Authorization: getAuthHeader() } });
+    if (!upstream.ok) return res.status(upstream.status).send('Upstream error');
+    const ct = upstream.headers.get('content-type') || 'application/octet-stream';
+    const cd = upstream.headers.get('content-disposition');
+    res.set('Content-Type', ct);
+    if (cd) res.set('Content-Disposition', cd);
+    upstream.body.pipe(res);
+  } catch (err) {
+    res.status(500).send(err.message);
+  }
+});
+
 // Fast ticket fetch — ticket + full conversation thread, no Groq
 app.get('/guided-prewarm/ticket/:id', async (req, res) => {
   const ticketId = req.params.id;
