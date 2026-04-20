@@ -119,6 +119,11 @@ async function withButtonLoading(btn, loadingLabel, fn) {
 
 // ── Strip AI translation noise (markdown headers, reasoning blocks) ───────────
 function stripTranslationNoise(text) {
+  // If there's a separator line (---, ***, ___), discard everything from it onward
+  // — Groq sometimes appends a note after the translation separated by ---
+  const sepIdx = text.search(/^[-*_]{3,}\s*$/m);
+  if (sepIdx !== -1) text = text.slice(0, sepIdx);
+
   return text
     // Remove bold/heading labels like **Translated text:** or **Reasoning:**
     .replace(/^\*{1,2}[^*\n]+\*{1,2}:?\s*/gim, '')
@@ -126,6 +131,8 @@ function stripTranslationNoise(text) {
     .replace(/^#{1,3}\s+.+$/gm, '')
     // Remove "Translated text:" / "Translation:" / "Reasoning:" bare labels at line start
     .replace(/^(translated\s+text|translation|reasoning)\s*:\s*/gim, '')
+    // Remove trailing meta-commentary lines (model notes about its own output)
+    .replace(/\n+[^\n]*\b(no additional|formatting|markdown|separator|explanatory note|as (the |you |I )|were added|reasoning)\b[^\n]*$/gi, '')
     .trim();
 }
 
@@ -759,7 +766,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
           btn.onclick = async () => {
             btn.disabled = true; btn.textContent = '⏳';
             const text = getText();
-            const prompt = 'Translate the following to English. Return ONLY the translated text. No headers, no labels, no markdown, no reasoning, no explanation — just the translation.\n\n' + text;
+            const prompt = 'Translate the following to English. Output ONLY the translated text — no notes, no headers, no labels, no markdown, no separators, no explanations, no commentary about your translation. The response must contain nothing except the translated text.\n\n' + text;
             const { ok: aok, data: aiData } = await gmPost(BACKEND_URL + '/ai-assist', {
               booking: {}, details: {}, user: null, supplier: null,
               freshdeskTicketId: String(t.id), prompt,
@@ -3175,7 +3182,7 @@ function showReplyComposer(recipientType, toEmail, booking, details, user, suppl
       if (!textToTranslate) { showToast('Nothing to translate after stripping sign-off.', 'warning'); return; }
 
       const lang = langInput.value.trim() || detectedLang || 'the customer\'s language';
-      const prompt = 'Translate the following text to ' + lang + '. Return ONLY the translated text. No headers, no labels, no markdown, no reasoning, no explanation — just the translation.\n\n' + textToTranslate;
+      const prompt = 'Translate the following text to ' + lang + '. Output ONLY the translated text — no notes, no headers, no labels, no markdown, no separators, no explanations, no commentary about your translation. The response must contain nothing except the translated text.\n\n' + textToTranslate;
       const { ok, data: aiData } = await gmPost(BACKEND_URL + '/ai-assist', {
         booking: booking || {}, details: details || {}, user, supplier: supplier || null,
         freshdeskTicketId: getFreshdeskTicketId(), prompt,
