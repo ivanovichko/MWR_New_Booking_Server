@@ -735,7 +735,17 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
     openLink.target = '_blank';
     openLink.style.cssText = 'font-size:11px;color:#007bff;';
     openLink.textContent = 'Open ↗';
+    const copyLinkBtn = document.createElement('button');
+    copyLinkBtn.textContent = '🔗 Copy';
+    copyLinkBtn.style.cssText = 'padding:3px 9px;border:1px solid #aaa;border-radius:4px;background:#fff;color:#555;font-size:11px;cursor:pointer;';
+    copyLinkBtn.onclick = () => {
+      navigator.clipboard.writeText(`https://mwrlife.freshdesk.com/a/tickets/${t.id}`).then(() => {
+        copyLinkBtn.textContent = '✅ Copied';
+        setTimeout(() => { copyLinkBtn.textContent = '🔗 Copy'; }, 1500);
+      });
+    };
     cardActions.appendChild(summarizeBtn);
+    cardActions.appendChild(copyLinkBtn);
     cardActions.appendChild(openLink);
     cardHeader.appendChild(cardTitleSpan);
     cardHeader.appendChild(cardActions);
