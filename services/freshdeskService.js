@@ -37,52 +37,12 @@ async function addNote(ticketId, bodyHtml) {
 }
 
 /**
- * Posts an internal note, extracting any base64 data-URL images and
- * re-attaching them as multipart inline attachments (cid: references).
- * Falls back to plain JSON if no images are present.
+ * Posts an internal note with inline images.
+ * Data-URL images are sent as-is in the JSON body — Freshdesk renders
+ * them inline without needing multipart attachments.
  */
 async function addNoteWithImages(ticketId, bodyHtml) {
-  const dataUrlRe = /src="(data:([^;]+);base64,([^"]+))"/g;
-  const images = [];
-  let idx = 0;
-  let processedHtml = bodyHtml;
-
-  let m;
-  while ((m = dataUrlRe.exec(bodyHtml)) !== null) {
-    const [, dataUrl, mimeType, base64Data] = m;
-    const ext = mimeType.split('/')[1]?.replace('jpeg', 'jpg') || 'png';
-    const filename = `image_${++idx}.${ext}`;
-    images.push({ dataUrl, filename, mimeType, buffer: Buffer.from(base64Data, 'base64') });
-  }
-
-  if (images.length === 0) {
-    return addNote(ticketId, bodyHtml);
-  }
-
-  // Replace data URLs with cid: references for inline embedding
-  for (const img of images) {
-    processedHtml = processedHtml.replace(img.dataUrl, `cid:${img.filename}`);
-  }
-
-  const fd = new FormData();
-  fd.append('body', processedHtml);
-  fd.append('private', 'true');
-  for (const img of images) {
-    fd.append('attachments[]', img.buffer, { filename: img.filename, contentType: img.mimeType });
-  }
-
-  const response = await fetch(`${getBaseUrl()}/tickets/${ticketId}/notes`, {
-    method: 'POST',
-    headers: { 'Authorization': getAuthHeader(), ...fd.getHeaders() },
-    body: fd,
-  });
-
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Freshdesk addNoteWithImages failed ${response.status}: ${err}`);
-  }
-
-  return response.json();
+  return addNote(ticketId, bodyHtml);
 }
 
 /**
