@@ -8,7 +8,7 @@ const { parseUserHtml, findUser }        = require('./services/userService');
 const { buildNoteHtml }                  = require('./services/noteBuilder');
 const { lookupSupplier }                 = require('./services/supplierService');
 const { aiAssist, findHotelEmail }       = require('./services/aiService');
-const { getAuthHeader, addNote, sendEmail, sendEmailWithAttachments, setTicketPending, tagTicket, updateTicket, searchDuplicates, getTicketContext } = require('./services/freshdeskService');
+const { getAuthHeader, addNote, addNoteWithImages, sendEmail, sendEmailWithAttachments, setTicketPending, tagTicket, updateTicket, searchDuplicates, getTicketContext } = require('./services/freshdeskService');
 const { initDb, getCachedBooking, cacheBooking, storeSession, getPrompts, createPrompt, updatePrompt, deletePrompt, getMacros, createMacro, updateMacro, deleteMacro, storeFreshdeskSession } = require('./services/dbService');
 const { prewarm, fetchAndCacheBooking, extractBookingId, checkPendings, checkInPriority, setTicketPriority, postNote } = require('./services/prewarmService');
 const { taGet, taPost }                  = require('./services/taAuthService');
@@ -231,7 +231,7 @@ app.post('/post-note', async (req, res) => {
   }
 
   try {
-    await addNote(freshdeskTicketId, noteHtml);
+    await addNoteWithImages(freshdeskTicketId, noteHtml);
     console.log(`✅ Note posted to ticket ${freshdeskTicketId}`);
     res.json({ success: true });
   } catch (err) {
