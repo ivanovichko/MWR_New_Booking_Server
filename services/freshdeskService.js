@@ -38,11 +38,88 @@ async function addNote(ticketId, bodyHtml) {
 
 /**
  * Posts an internal note with inline images.
- * Data-URL images are sent as-is in the JSON body — Freshdesk renders
- * them inline without needing multipart attachments.
+ *
+ * Freshdesk's API strips data: URLs from the note body. This function:
+ *   1. Extracts each base64 data-URL <img> and replaces it with a sentinel.
+ *   2. Posts the note as multipart/form-data with the images as attachments[].
+ *   3. Freshdesk stores the images and returns attachment_url for each.
+ *   4. Patches the note body, replacing sentinels with proxy URLs that
+ *      route through our /attachment endpoint (which adds the auth header).
+ *
+ * Falls back to plain addNote if no data-URL images are found, or on error.
  */
 async function addNoteWithImages(ticketId, bodyHtml) {
-  return addNote(ticketId, bodyHtml);
+  const BACKEND_URL = process.env.BACKEND_URL || 'https://mwr-new-booking-server.onrender.com';
+  const dataUrlRe = /src="(data:([^;]+);base64,([^"]+))"/g;
+  const images = [];
+  let processedHtml = bodyHtml;
+  let idx = 0;
+  let m;
+
+  while ((m = dataUrlRe.exec(bodyHtml)) !== null) {
+    const [, dataUrl, mimeType, base64Data] = m;
+    const ext = mimeType.split('/')[1]?.replace('jpeg', 'jpg') || 'png';
+    const filename = `inline-image-${idx}.${ext}`;
+    const sentinel = `__INLINE_IMG_${idx}__`;
+    images.push({ dataUrl, mimeType, filename, sentinel, buffer: Buffer.from(base64Data, 'base64') });
+    processedHtml = processedHtml.replace(dataUrl, sentinel);
+    idx++;
+  }
+
+  if (images.length === 0) return addNote(ticketId, bodyHtml);
+
+  try {
+    // Step 1 — post note with attachments
+    const fd = new FormData();
+    fd.append('body', processedHtml);
+    fd.append('private', 'true');
+    for (const img of images) {
+      fd.append('attachments[]', img.buffer, { filename: img.filename, contentType: img.mimeType });
+    }
+
+    const postRes = await fetch(`${getBaseUrl()}/tickets/${ticketId}/notes`, {
+      method: 'POST',
+      headers: { 'Authorization': getAuthHeader(), ...fd.getHeaders() },
+      body: fd,
+    });
+
+    if (!postRes.ok) {
+      const err = await postRes.text();
+      throw new Error(`Freshdesk note POST failed ${postRes.status}: ${err}`);
+    }
+
+    const note = await postRes.json();
+    const noteId = note.id;
+    const attachments = note.attachments || [];
+
+    // Step 2 — replace sentinels with proxy URLs pointing at our /attachment endpoint
+    let finalHtml = processedHtml;
+    for (let i = 0; i < images.length; i++) {
+      const att = attachments[i];
+      if (!att) continue;
+      const proxyUrl = `${BACKEND_URL}/attachment?url=${encodeURIComponent(att.attachment_url)}`;
+      finalHtml = finalHtml.replace(
+        images[i].sentinel,
+        `${proxyUrl}" style="max-width:100%;height:auto;display:block;margin:4px 0;`
+      );
+    }
+
+    // Step 3 — patch note body with final inline URLs
+    const patchRes = await fetch(`${getBaseUrl()}/tickets/${ticketId}/notes/${noteId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': getAuthHeader() },
+      body: JSON.stringify({ body: finalHtml }),
+    });
+
+    if (!patchRes.ok) {
+      console.warn(`⚠️ Note body patch failed ${patchRes.status} — images posted as attachments only`);
+    }
+
+    return note;
+  } catch (err) {
+    console.warn(`⚠️ addNoteWithImages failed (${err.message}) — falling back to plain note`);
+    return addNote(ticketId, bodyHtml);
+  }
 }
 
 /**

@@ -17,7 +17,7 @@ const { confirmTicket }                  = require('./services/ticketActionServi
 const { FD_STATUS, PREWARM_CONVERSATION_THRESHOLD } = require('./config');
 
 const app = express();
-app.use(express.json({ limit: '5mb' }));
+app.use(express.json({ limit: '20mb' }));
 app.use(express.static(path.join(__dirname)));
 
 // ─── Init DB on startup ───────────────────────────────────────────────────────
@@ -231,8 +231,7 @@ app.post('/post-note', async (req, res) => {
   }
 
   try {
-    const wrappedHtml = `<div style="font-family:system-ui,sans-serif;font-size:13px;line-height:1.5;">${noteHtml}</div>`;
-    await addNoteWithImages(freshdeskTicketId, wrappedHtml);
+    await addNoteWithImages(freshdeskTicketId, noteHtml);
     console.log(`✅ Note posted to ticket ${freshdeskTicketId}`);
     res.json({ success: true });
   } catch (err) {
