@@ -579,20 +579,39 @@ app.get('/attachment', async (req, res) => {
   }
 });
 
+/**
+ * Fetches all pages of a ticket's conversations (Freshdesk max 100/page).
+ * Returns a flat array of all conversation objects.
+ */
+async function fetchAllConversations(domain, auth, ticketId) {
+  const all = [];
+  let page = 1;
+  while (true) {
+    const url = `https://${domain}/api/v2/tickets/${ticketId}/conversations?per_page=100&page=${page}`;
+    const res = await fetch(url, { headers: { Authorization: auth } });
+    if (!res.ok) break;
+    const batch = await res.json();
+    if (!Array.isArray(batch) || batch.length === 0) break;
+    all.push(...batch);
+    if (batch.length < 100) break; // last page
+    page++;
+  }
+  return all;
+}
+
 // Fast ticket fetch — ticket + full conversation thread, no Groq
 app.get('/guided-prewarm/ticket/:id', async (req, res) => {
   const ticketId = req.params.id;
   const domain   = process.env.FRESHDESK_DOMAIN;
   const auth     = getAuthHeader();
   const headers  = { Authorization: auth };
-  const [tRes, cRes, aRes] = await Promise.all([
+  const [tRes, aRes] = await Promise.all([
     fetch(`https://${domain}/api/v2/tickets/${ticketId}?include=requester`, { headers }),
-    fetch(`https://${domain}/api/v2/tickets/${ticketId}/conversations`, { headers }),
     fetch(`https://${domain}/api/v2/agents?per_page=100`, { headers }),
   ]);
   if (!tRes.ok) return res.status(500).json({ error: 'Could not fetch ticket' });
   const ticket        = await tRes.json();
-  const conversations = cRes.ok ? await cRes.json() : [];
+  const conversations = await fetchAllConversations(domain, auth, ticketId);
   const agentList     = aRes.ok ? await aRes.json() : [];
   // Build id → name lookup
   const agents = {};
@@ -666,10 +685,9 @@ app.get('/guided-prewarm/analyse/:id', async (req, res) => {
     const ticket = await tRes.json();
     const requesterEmail = ticket.requester?.email || null;
 
-    // Fetch conversation count in parallel
-    const cRes = await fetch(`https://${domain}/api/v2/tickets/${ticketId}/conversations`, { headers: { Authorization: auth } });
-    const convData = cRes.ok ? await cRes.json() : [];
-    const conversationCount = Array.isArray(convData) ? convData.length : 0;
+    // Fetch all conversations (paginated)
+    const convData = await fetchAllConversations(domain, auth, ticketId);
+    const conversationCount = convData.length;
     console.log(`💬 Conversations: ${conversationCount}`);
 
     // Groq: extract booking ID

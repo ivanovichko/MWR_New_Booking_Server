@@ -232,16 +232,24 @@ async function searchDuplicates(ref, excludeTicketId, isEmail = false, includeCl
 async function getTicketContext(ticketId) {
   const headers = { 'Authorization': getAuthHeader() };
   const base    = getBaseUrl();
+  const domain  = process.env.FRESHDESK_DOMAIN;
 
-  const [ticketRes, convRes] = await Promise.all([
-    fetch(`${base}/tickets/${ticketId}`, { headers }),
-    fetch(`${base}/tickets/${ticketId}/conversations`, { headers }),
-  ]);
-
+  const ticketRes = await fetch(`${base}/tickets/${ticketId}`, { headers });
   if (!ticketRes.ok) throw new Error(`Failed to fetch ticket ${ticketId}: ${ticketRes.status}`);
-
   const ticket = await ticketRes.json();
-  const conversations = convRes.ok ? await convRes.json() : [];
+
+  // Paginate conversations (Freshdesk max 100/page)
+  const conversations = [];
+  let page = 1;
+  while (true) {
+    const r = await fetch(`${base}/tickets/${ticketId}/conversations?per_page=100&page=${page}`, { headers });
+    if (!r.ok) break;
+    const batch = await r.json();
+    if (!Array.isArray(batch) || batch.length === 0) break;
+    conversations.push(...batch);
+    if (batch.length < 100) break;
+    page++;
+  }
 
   // Strip HTML tags from text
   const strip = (html) => (html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
@@ -251,7 +259,7 @@ async function getTicketContext(ticketId) {
     description: strip(ticket.description || ''),
     status:      ticket.status,
     priority:    ticket.priority,
-    conversations: conversations.slice(0, 30).map(c => ({
+    conversations: conversations.map(c => ({
       type:   c.private ? 'note' : (c.incoming ? 'customer' : 'agent'),
       body:   strip(c.body || ''),
       from:   c.from_email || '',
