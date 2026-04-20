@@ -1206,7 +1206,27 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
           pickBtn.textContent = 'Select';
           pickBtn.style.cssText = 'padding:2px 7px;border:1px solid #6f42c1;border-radius:3px;background:#fff;color:#6f42c1;font-size:10px;cursor:pointer;flex-shrink:0;';
           pickBtn.onclick = () => {
-            renderCustomerSection({ ...u, loginLink: `${TA_BASE}/admin/account/webadminCustomerLogin/${u.id}`, profileLink: `${TA_BASE}/admin/account/viewCustomer/${u.id}` });
+            const pickedUser = { ...u, loginLink: `${TA_BASE}/admin/account/webadminCustomerLogin/${u.id}`, profileLink: `${TA_BASE}/admin/account/viewCustomer/${u.id}` };
+            renderCustomerSection(pickedUser);
+            if (u.email) {
+              replyPanelWrapper.style.display = '';
+              replyPanelContent.innerHTML = '';
+              const rts = (color, active) =>
+                `padding:8px 16px;border:none;border-bottom:2px solid ${active?color:'transparent'};background:${active?'#fff':'transparent'};color:${color};font-size:12px;font-weight:600;cursor:pointer;`;
+              const tabBar = document.createElement('div');
+              tabBar.style.cssText = 'display:flex;background:#f8f9fa;border-bottom:1px solid #eee;';
+              const replyBody = document.createElement('div');
+              replyBody.style.cssText = 'padding:10px 14px;';
+              const custTab = document.createElement('button');
+              custTab.textContent = '📩 Customer';
+              custTab.style.cssText = rts('#0056d2', true);
+              tabBar.appendChild(custTab);
+              replyPanelContent.appendChild(tabBar);
+              replyPanelContent.appendChild(replyBody);
+              showReplyComposer('customer', u.email, {}, {}, pickedUser, null, replyBody, refreshThread, String(t.id));
+              replyPanelExpanded = true;
+              replyPanelContent.style.display = '';
+            }
           };
           item.appendChild(lbl); item.appendChild(pickBtn);
           findMemberResults.appendChild(item);
