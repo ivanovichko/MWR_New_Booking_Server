@@ -231,7 +231,8 @@ app.post('/post-note', async (req, res) => {
   }
 
   try {
-    await addNoteWithImages(freshdeskTicketId, noteHtml);
+    const wrappedHtml = `<div style="font-family:system-ui,sans-serif;font-size:13px;line-height:1.5;">${noteHtml}</div>`;
+    await addNoteWithImages(freshdeskTicketId, wrappedHtml);
     console.log(`✅ Note posted to ticket ${freshdeskTicketId}`);
     res.json({ success: true });
   } catch (err) {
