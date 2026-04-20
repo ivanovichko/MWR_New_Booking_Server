@@ -1375,10 +1375,10 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
         replyRowEl.appendChild(viewNoteBtn);
       }
       bookingSection.appendChild(replyRowEl);
-      if (isHotel && !(daysUntil !== null && daysUntil < 3)) {
+      if (isHotel) {
         const hotelEmailBtn = document.createElement('button');
-        hotelEmailBtn.textContent = '📧 Hotel confirmation email';
-        hotelEmailBtn.style.cssText = 'flex:1;padding:10px;border:none;border-radius:6px;background:#28a745;color:#fff;font-size:12px;font-weight:600;cursor:pointer;';
+        hotelEmailBtn.textContent = '📧 Hotel Email';
+        hotelEmailBtn.style.cssText = 'padding:7px 10px;border:1px solid #28a745;border-radius:5px;background:#fff;color:#28a745;font-size:12px;font-weight:600;cursor:pointer;';
         hotelEmailBtn.onclick = () => withButtonLoading(hotelEmailBtn, '⏳ Sending...', async () => {
           const { ok: cok, data: cr } = await gmPost(`${BACKEND_URL}/guided-prewarm/confirm`, { ticketId: String(t.id), bookingId: currentBookingId, action: 'hotel_email' });
           if (!cok) { showToast('❌ Error: ' + (cr?.error || 'Server error'), 'error'); return; }
@@ -1542,7 +1542,8 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
         if (r.tagged?.length) msgs.push('tagged: ' + r.tagged.join(', '));
         if (r.prioritySet) msgs.push('priority: ' + r.prioritySet);
         showToast('✅ ' + (msgs.join(' · ') || 'Done'), 'success', 3000);
-        refreshFreshdeskTicket(); idx++; setTimeout(() => renderTicket(), 1200);
+        refreshFreshdeskTicket(); refreshThread();
+        confirmBtn.disabled = false; confirmBtn.textContent = actionLabel;
       };
     };
 
