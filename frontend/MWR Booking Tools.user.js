@@ -606,9 +606,15 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
     confirmBtn.style.cssText = 'flex:1;max-width:140px;padding:5px 8px;border:none;border-radius:6px;background:#28a745;color:#fff;font-size:12px;font-weight:600;cursor:pointer;opacity:0.4;';
     confirmBtn.textContent = '✅ Confirm';
     confirmBtn.disabled = true;
+    const backBtn = document.createElement('button');
+    backBtn.style.cssText = 'padding:5px 12px;border:1px solid #ddd;border-radius:6px;background:#fff;color:#666;font-size:12px;cursor:pointer;';
+    backBtn.textContent = '◀ Back';
+    backBtn.disabled = idx === 0;
+    backBtn.style.opacity = idx === 0 ? '0.35' : '1';
+    backBtn.onclick = () => { if (idx > 0) { idx--; renderTicket(); } };
     const skipBtn = document.createElement('button');
     skipBtn.style.cssText = 'padding:5px 12px;border:1px solid #ddd;border-radius:6px;background:#fff;color:#666;font-size:12px;cursor:pointer;';
-    skipBtn.textContent = '⏭ Skip';
+    skipBtn.textContent = '▶ Next';
     skipBtn.onclick = () => { idx++; renderTicket(); };
     const stopBtn = document.createElement('button');
     stopBtn.style.cssText = 'padding:5px 12px;border:1px solid #dc3545;border-radius:6px;background:#fff;color:#dc3545;font-size:12px;cursor:pointer;';
@@ -632,6 +638,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
     addNoteBtn.style.cssText = 'padding:5px 10px;border:1px solid #6f42c1;border-radius:6px;background:#fff;color:#6f42c1;font-size:12px;font-weight:600;cursor:pointer;';
     btnRow.appendChild(confirmBtn);
     btnRow.appendChild(addNoteBtn);
+    btnRow.appendChild(backBtn);
     btnRow.appendChild(skipBtn);
     btnRow.appendChild(closeTicketBtn);
     btnRow.appendChild(chatBtnEl);
