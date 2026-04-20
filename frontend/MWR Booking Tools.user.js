@@ -624,6 +624,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
     closeTicketBtn.style.cssText = 'padding:5px 10px;border:1px solid #6c757d;border-radius:6px;background:#fff;color:#6c757d;font-size:12px;cursor:pointer;';
     closeTicketBtn.textContent = '✖ Close';
     closeTicketBtn.onclick = async () => {
+      if (!confirm(`Close ticket #${t.id}?`)) return;
       closeTicketBtn.disabled = true; closeTicketBtn.textContent = '⏳';
       const { ok } = await gmPost(`${BACKEND_URL}/close-ticket`, { ticketId: String(t.id) });
       if (ok) { showToast('✅ Ticket closed.', 'success', 2000); idx++; setTimeout(() => renderTicket(), 1000); }
