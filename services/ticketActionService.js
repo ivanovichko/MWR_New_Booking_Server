@@ -9,7 +9,7 @@ const { buildHotelEmailHtml } = require('./hotelEmailBuilder');
 
 /**
  * Builds the standard tag set for a booking:
- * month tag (e.g. "May 25"), destination country, plus any existing tags.
+ * month tag (e.g. "May 14"), destination country, plus any existing tags.
  */
 function buildBookingTags(booking) {
   const existing = booking.tags || [];
@@ -20,7 +20,7 @@ function buildBookingTags(booking) {
     if (m) {
       const mi = ['january','february','march','april','may','june','july','august',
                   'september','october','november','december'].indexOf(m[1].toLowerCase());
-      if (mi >= 0) monthTag = `${months[mi]} ${m[3].slice(-2)}`;
+      if (mi >= 0) monthTag = `${months[mi]} ${m[2]}`;
     }
   }
   const country = booking.destinationCountry || null;
