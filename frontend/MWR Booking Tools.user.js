@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.8
+// @version      6.9
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -731,6 +731,57 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
     const summarizeBtn = document.createElement('button');
     summarizeBtn.textContent = '✨ Summarize';
     summarizeBtn.style.cssText = 'padding:3px 9px;border:1px solid #6f42c1;border-radius:4px;background:#fff;color:#6f42c1;font-size:11px;font-weight:500;cursor:pointer;';
+    // ── Inline subject editor ──────────────────────────────────────────────────
+    const editSubjectBtn = document.createElement('button');
+    editSubjectBtn.textContent = '✏️';
+    editSubjectBtn.title = 'Edit subject';
+    editSubjectBtn.style.cssText = 'padding:3px 7px;border:1px solid #aaa;border-radius:4px;background:#fff;color:#555;font-size:11px;cursor:pointer;';
+    editSubjectBtn.onclick = () => {
+      // Replace title span with input
+      const currentSubject = t.subject || '';
+      const subjectInput = document.createElement('input');
+      subjectInput.type = 'text';
+      subjectInput.value = currentSubject;
+      subjectInput.style.cssText = 'flex:1;min-width:0;padding:3px 8px;border:1px solid #007bff;border-radius:4px;font-size:13px;font-weight:600;color:#333;outline:none;';
+      const saveBtn = document.createElement('button');
+      saveBtn.textContent = '✓';
+      saveBtn.style.cssText = 'padding:3px 8px;border:none;border-radius:4px;background:#007bff;color:#fff;font-size:12px;font-weight:600;cursor:pointer;flex-shrink:0;';
+      const cancelBtn = document.createElement('button');
+      cancelBtn.textContent = '✕';
+      cancelBtn.style.cssText = 'padding:3px 8px;border:1px solid #ddd;border-radius:4px;background:#fff;color:#666;font-size:12px;cursor:pointer;flex-shrink:0;';
+      cardTitleSpan.replaceWith(subjectInput);
+      editSubjectBtn.replaceWith(saveBtn);
+      cardActions.insertBefore(cancelBtn, saveBtn.nextSibling);
+      subjectInput.focus(); subjectInput.select();
+      const doSave = async () => {
+        const newSubject = subjectInput.value.trim();
+        if (!newSubject) { showToast('Subject cannot be empty.', 'warning'); return; }
+        saveBtn.disabled = true; saveBtn.textContent = '⏳';
+        const { ok } = await gmPost(`${BACKEND_URL}/update-ticket`, { ticketId: String(t.id), fields: { subject: newSubject } });
+        if (ok) {
+          t.subject = newSubject;
+          cardTitleSpan.textContent = `#${t.id} — ${newSubject}`;
+          subjectInput.replaceWith(cardTitleSpan);
+          saveBtn.replaceWith(editSubjectBtn);
+          cancelBtn.remove();
+          showToast('Subject updated.', 'success');
+        } else {
+          saveBtn.disabled = false; saveBtn.textContent = '✓';
+          showToast('Failed to update subject.', 'error');
+        }
+      };
+      const doCancel = () => {
+        subjectInput.replaceWith(cardTitleSpan);
+        saveBtn.replaceWith(editSubjectBtn);
+        cancelBtn.remove();
+      };
+      saveBtn.onclick = doSave;
+      cancelBtn.onclick = doCancel;
+      subjectInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') doSave();
+        if (e.key === 'Escape') doCancel();
+      });
+    };
     const openLink = document.createElement('a');
     openLink.href = `https://mwrlife.freshdesk.com/a/tickets/${t.id}`;
     openLink.target = '_blank';
@@ -746,6 +797,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       });
     };
     cardActions.appendChild(summarizeBtn);
+    cardActions.appendChild(editSubjectBtn);
     cardActions.appendChild(copyLinkBtn);
     cardActions.appendChild(openLink);
     cardHeader.appendChild(cardTitleSpan);
@@ -807,40 +859,58 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
             + ' ' + d.toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit' });
         };
 
-        const addMsg = (label, bg, border, bodyHtml, rawText, meta) => {
+        const addMsg = (label, bg, border, bodyHtml, rawText, meta, defaultCollapsed = false) => {
           const wrap = document.createElement('div');
-          wrap.style.cssText = `margin-bottom:10px;padding:8px 10px;background:${bg};border-left:3px solid ${border};border-radius:3px;font-size:12px;line-height:1.5;`;
+          wrap.style.cssText = `margin-bottom:6px;background:${bg};border-left:3px solid ${border};border-radius:3px;font-size:12px;line-height:1.5;overflow:hidden;`;
 
-          // Header row: type label + metadata
+          // Header row — click to collapse/expand
           const hdr = document.createElement('div');
-          hdr.style.cssText = 'display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;flex-wrap:wrap;gap:4px;';
+          hdr.style.cssText = 'display:flex;justify-content:space-between;align-items:center;padding:6px 10px;cursor:pointer;user-select:none;gap:4px;';
+
+          const hdrLeft = document.createElement('div');
+          hdrLeft.style.cssText = 'display:flex;align-items:center;gap:6px;min-width:0;flex:1;';
+
+          const chevron = document.createElement('span');
+          chevron.dataset.chevron = '1';
+          chevron.style.cssText = 'font-size:10px;color:#bbb;flex-shrink:0;transition:transform .15s;';
+          chevron.textContent = '▶';
 
           const typeSpan = document.createElement('span');
-          typeSpan.style.cssText = 'font-size:10px;color:#999;font-weight:600;';
+          typeSpan.style.cssText = 'font-size:10px;color:#999;font-weight:600;white-space:nowrap;flex-shrink:0;';
           typeSpan.textContent = label;
 
-          const metaSpan = document.createElement('span');
-          metaSpan.style.cssText = 'font-size:11px;color:#333;text-align:right;font-weight:500;';
-          if (meta) {
-            const parts = [];
-            if (meta.author) parts.push(meta.author);
-            if (meta.date)   parts.push(meta.date);
-            metaSpan.textContent = parts.join(' · ');
-            if (meta.notified && meta.notified.length) {
-              const notifEl = document.createElement('div');
-              notifEl.style.cssText = 'font-size:10px;color:#888;margin-top:1px;';
-              notifEl.textContent = '→ ' + meta.notified.join(', ');
-              metaSpan.appendChild(notifEl);
-            }
-          }
+          // Author shown inline in header for all types, especially prominent for notes
+          const authorSpan = document.createElement('span');
+          authorSpan.style.cssText = 'font-size:11px;color:#555;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+          if (meta && meta.author) authorSpan.textContent = meta.author;
 
-          hdr.appendChild(typeSpan);
+          hdrLeft.appendChild(chevron);
+          hdrLeft.appendChild(typeSpan);
+          if (meta && meta.author) hdrLeft.appendChild(authorSpan);
+
+          const metaSpan = document.createElement('span');
+          metaSpan.style.cssText = 'font-size:11px;color:#aaa;white-space:nowrap;flex-shrink:0;';
+          if (meta && meta.date) metaSpan.textContent = meta.date;
+
+          hdr.appendChild(hdrLeft);
           hdr.appendChild(metaSpan);
+
+          // Collapsible body
+          const collapsible = document.createElement('div');
+          collapsible.dataset.collapsible = '1';
+          collapsible.style.cssText = 'padding:0 10px 8px;';
+
+          if (meta && meta.notified && meta.notified.length) {
+            const notifEl = document.createElement('div');
+            notifEl.style.cssText = 'font-size:10px;color:#888;margin-bottom:4px;';
+            notifEl.textContent = '→ ' + meta.notified.join(', ');
+            collapsible.appendChild(notifEl);
+          }
 
           const content = document.createElement('div');
           content.innerHTML = bodyHtml;
-          wrap.appendChild(hdr);
-          wrap.appendChild(content);
+          collapsible.appendChild(content);
+
           // Attachments
           const atts = (meta && meta.attachments) || [];
           if (atts.length) {
@@ -865,9 +935,26 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
                 attRow.appendChild(link);
               }
             });
-            wrap.appendChild(attRow);
+            collapsible.appendChild(attRow);
           }
-          wrap.appendChild(makeTranslateBtn(() => rawText || strip(bodyHtml)));
+          collapsible.appendChild(makeTranslateBtn(() => rawText || strip(bodyHtml)));
+
+          // Apply initial collapsed state
+          if (defaultCollapsed) {
+            collapsible.style.display = 'none';
+            chevron.style.transform = '';
+          } else {
+            chevron.style.transform = 'rotate(90deg)';
+          }
+
+          hdr.onclick = () => {
+            const collapsed = collapsible.style.display === 'none';
+            collapsible.style.display = collapsed ? '' : 'none';
+            chevron.style.transform = collapsed ? 'rotate(90deg)' : '';
+          };
+
+          wrap.appendChild(hdr);
+          wrap.appendChild(collapsible);
           descEl.appendChild(wrap);
         };
 
@@ -881,7 +968,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
             notified: [],
             attachments: td.ticket.attachments || [],
           };
-          addMsg('📩 Customer (opening)', '#f8f9fa', '#6c757d', bodyHtml, strip(desc), meta);
+          addMsg('📩 Customer (opening)', '#f8f9fa', '#6c757d', bodyHtml, strip(desc), meta, false);
         }
 
         // Conversations (replies + notes)
@@ -904,10 +991,29 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
             date: fmtDate(c.created_at),
             notified,
             attachments: c.attachments || [],
-          });
+          }, !isIncoming);
         });
 
         if (!descEl.children.length) descEl.innerHTML = '<span style="color:#999;">(no content)</span>';
+
+        // Collapse All button — inserted before the first message
+        if (descEl.children.length > 1) {
+          const collapseAllBtn = document.createElement('button');
+          collapseAllBtn.textContent = '⊟ Collapse All';
+          collapseAllBtn.style.cssText = 'display:block;margin-bottom:6px;padding:3px 10px;border:1px solid #ccc;border-radius:4px;background:#fff;color:#666;font-size:11px;cursor:pointer;';
+          let allCollapsed = false;
+          collapseAllBtn.onclick = () => {
+            allCollapsed = !allCollapsed;
+            descEl.querySelectorAll('[data-collapsible]').forEach(el => {
+              el.style.display = allCollapsed ? 'none' : '';
+            });
+            descEl.querySelectorAll('[data-chevron]').forEach(el => {
+              el.style.transform = allCollapsed ? '' : 'rotate(90deg)';
+            });
+            collapseAllBtn.textContent = allCollapsed ? '⊞ Expand All' : '⊟ Collapse All';
+          };
+          descEl.insertBefore(collapseAllBtn, descEl.firstChild);
+        }
         renderStatusTagBar(td.ticket);
         // Scroll to bottom of thread on every load/refresh
         requestAnimationFrame(() => { descEl.scrollTop = descEl.scrollHeight; });
