@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.12
+// @version      6.13
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -1737,7 +1737,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       const buildDupRow = (dup) => {
           const row = document.createElement('div');
           row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid #f5f5f5;';
-          const assigneeName = dup.responder_id ? (ticketAgents[dup.responder_id] || `#${dup.responder_id}`) : '—';
+          const assigneeName = dup.responder_name || (dup.responder_id ? (ticketAgents[dup.responder_id] || `#${dup.responder_id}`) : '—');
           row.innerHTML = `<a href="https://mwrlife.freshdesk.com/a/tickets/${dup.id}" target="_blank" style="color:#007bff;font-weight:600;font-size:12px;white-space:nowrap;">#${dup.id}</a><span style="flex:1;color:#555;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${dup.subject||'—'}</span><span style="color:#6f42c1;font-size:10px;white-space:nowrap;" title="Assigned to">${assigneeName}</span><span style="color:#aaa;font-size:10px;white-space:nowrap;">${(dup.matchedBy||[]).join(', ')}</span>`;
             const previewBtn = document.createElement('button');
             previewBtn.textContent = 'Preview / Merge';

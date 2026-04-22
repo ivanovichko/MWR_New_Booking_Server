@@ -393,14 +393,28 @@ app.post('/update-ticket', async (req, res) => {
   }
 });
 
+// ─── Shared: fetch agent id→name map ─────────────────────────────────────────
+async function fetchAgentMap() {
+  const domain = process.env.FRESHDESK_DOMAIN;
+  const auth   = getAuthHeader();
+  try {
+    const r = await fetch(`https://${domain}/api/v2/agents?per_page=100`, { headers: { Authorization: auth } });
+    const list = r.ok ? await r.json() : [];
+    const map = {};
+    (Array.isArray(list) ? list : []).forEach(a => { map[a.id] = a.contact?.name || a.name || null; });
+    return map;
+  } catch { return {}; }
+}
+
 // ─── Check for duplicate tickets ─────────────────────────────────────────────
 app.post('/check-duplicates', async (req, res) => {
   const { vendorConf, internalId, memberEmail, freshdeskTicketId } = req.body;
   try {
-    const [byVendor, byInternal, byEmail] = await Promise.all([
+    const [byVendor, byInternal, byEmail, agentMap] = await Promise.all([
       vendorConf  ? searchDuplicates(vendorConf,  freshdeskTicketId) : [],
       internalId  ? searchDuplicates(internalId,  freshdeskTicketId) : [],
       memberEmail ? searchDuplicates(memberEmail, freshdeskTicketId, true) : [],
+      fetchAgentMap(),
     ]);
 
     // Tag each result with its match source, merge and deduplicate by ticket id
@@ -409,7 +423,10 @@ app.post('/check-duplicates', async (req, res) => {
     for (const t of byInternal){ if (!seen.has(t.id)) seen.set(t.id, { ...t, matchedBy: ['booking ID'] }); else seen.get(t.id).matchedBy.push('booking ID'); }
     for (const t of byEmail)   { if (!seen.has(t.id)) seen.set(t.id, { ...t, matchedBy: ['member email'] }); else seen.get(t.id).matchedBy.push('member email'); }
 
-    const duplicates = [...seen.values()];
+    const duplicates = [...seen.values()].map(t => ({
+      ...t,
+      responder_name: t.responder_id ? (agentMap[t.responder_id] || null) : null,
+    }));
     console.log(`🔍 Duplicate check for ${vendorConf}/${internalId}/${memberEmail}: ${duplicates.length} found`);
     res.json({ success: true, duplicates });
   } catch (err) {
@@ -423,8 +440,15 @@ app.post('/search-tickets', async (req, res) => {
   const { query, includeClosed, freshdeskTicketId } = req.body;
   if (!query) return res.status(400).json({ error: 'query required' });
   try {
-    const results = await searchDuplicates(query, freshdeskTicketId || null, false, !!includeClosed);
-    const duplicates = results.map(t => ({ ...t, matchedBy: ['manual search'] }));
+    const [results, agentMap] = await Promise.all([
+      searchDuplicates(query, freshdeskTicketId || null, false, !!includeClosed),
+      fetchAgentMap(),
+    ]);
+    const duplicates = results.map(t => ({
+      ...t,
+      matchedBy: ['manual search'],
+      responder_name: t.responder_id ? (agentMap[t.responder_id] || null) : null,
+    }));
     console.log(`🔍 Manual ticket search "${query}": ${duplicates.length} found`);
     res.json({ success: true, duplicates });
   } catch (err) {
