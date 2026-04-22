@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.11
+// @version      6.12
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -1080,6 +1080,39 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       divider.style.cssText = 'color:#ddd;font-size:14px;';
       divider.textContent = '|';
       statusTagBar.appendChild(divider);
+
+      // ── Priority section ───────────────────────────────────────────────────
+      const priorityLabel = document.createElement('span');
+      priorityLabel.style.cssText = 'color:#888;font-weight:500;white-space:nowrap;';
+      priorityLabel.textContent = 'Priority:';
+      statusTagBar.appendChild(priorityLabel);
+
+      const priorityMap = { 1: 'Low', 2: 'Medium', 3: 'High', 4: 'Urgent' };
+      const prioritySel = document.createElement('select');
+      prioritySel.style.cssText = 'padding:2px 6px;border:1px solid #ddd;border-radius:4px;font-size:12px;background:#fff;cursor:pointer;';
+      Object.entries(priorityMap).forEach(([val, label]) => {
+        const opt = document.createElement('option');
+        opt.value = val; opt.textContent = label;
+        if (Number(val) === ticket.priority) opt.selected = true;
+        prioritySel.appendChild(opt);
+      });
+      statusTagBar.appendChild(prioritySel);
+
+      const updatePriorityBtn = document.createElement('button');
+      updatePriorityBtn.textContent = 'Update';
+      updatePriorityBtn.style.cssText = 'padding:2px 8px;border:none;border-radius:4px;background:#007bff;color:#fff;font-size:11px;cursor:pointer;font-weight:500;';
+      updatePriorityBtn.onclick = () => withButtonLoading(updatePriorityBtn, '⏳', async () => {
+        const { ok } = await gmPost(`${BACKEND_URL}/update-ticket`, { ticketId: String(t.id), fields: { priority: Number(prioritySel.value) } });
+        if (ok) { showToast('✅ Priority updated', 'success', 2000); refreshThread(); }
+        else showToast('❌ Failed to update priority', 'error');
+      });
+      statusTagBar.appendChild(updatePriorityBtn);
+
+      // ── Divider ────────────────────────────────────────────────────────────
+      const divider2 = document.createElement('span');
+      divider2.style.cssText = 'color:#ddd;font-size:14px;';
+      divider2.textContent = '|';
+      statusTagBar.appendChild(divider2);
 
       // ── Tags section ───────────────────────────────────────────────────────
       const tagsLabel = document.createElement('span');
