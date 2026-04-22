@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.10
+// @version      6.11
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -683,12 +683,12 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
     const rightCol = document.createElement('div');
     rightCol.style.cssText = 'width:540px;flex-shrink:0;display:flex;flex-direction:column;gap:8px;';
     const infoRow = document.createElement('div');
-    infoRow.style.cssText = 'display:flex;gap:8px;flex-shrink:0;';
+    infoRow.style.cssText = 'display:flex;flex-direction:column;gap:8px;flex-shrink:0;';
     const bookingSection = document.createElement('div');
-    bookingSection.style.cssText = 'flex:1;border:1px solid #eee;border-radius:8px;padding:12px 14px;font-size:12px;overflow-y:auto;max-height:320px;';
+    bookingSection.style.cssText = 'border:1px solid #eee;border-radius:8px;padding:12px 14px;font-size:12px;overflow-y:auto;max-height:320px;';
     bookingSection.innerHTML = '<div style="color:#999;font-size:11px;">⏳ Loading booking...</div>';
     const customerSection = document.createElement('div');
-    customerSection.style.cssText = 'width:180px;flex-shrink:0;border:1px solid #eee;border-radius:8px;padding:12px 14px;font-size:12px;overflow-y:auto;max-height:320px;';
+    customerSection.style.cssText = 'border:1px solid #eee;border-radius:8px;padding:12px 14px;font-size:12px;overflow-y:auto;max-height:320px;';
     customerSection.innerHTML = '<div style="color:#999;font-size:11px;">No member data</div>';
     infoRow.appendChild(bookingSection); infoRow.appendChild(customerSection);
     rightCol.appendChild(infoRow);
