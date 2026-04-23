@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.14
+// @version      6.15
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -3497,16 +3497,22 @@ function showReplyComposer(recipientType, toEmail, booking, details, user, suppl
       if (!ok || !aiData.text) { showToast('Translation failed.', 'error'); return; }
 
       const translatedHtml = stripTranslationNoise(aiData.text).replace(/\n/g, '<br>');
-      // Replace reply area with two-section formatted layout
-      replyArea.innerHTML =
-        `<div style="border:1px solid #b2dfdb;border-radius:4px;padding:8px 10px;margin-bottom:8px;line-height:1.5;font-size:13px;">` +
-          `<div style="font-size:10px;color:#00897b;font-weight:600;margin-bottom:4px;">🌐 ${lang}</div>` +
-          translatedHtml +
-        `</div>` +
-        `<div style="border:1px solid #ddd;border-radius:4px;padding:8px 10px;line-height:1.5;font-size:13px;color:#555;">` +
-          `<div style="font-size:10px;color:#aaa;font-weight:600;margin-bottom:4px;">📄 Original</div>` +
-          originalHtml +
-        `</div>`;
+      // Put only the translated text into replyArea — no wrapper divs so Enter
+      // doesn't clone bordered sections inside contenteditable
+      replyArea.innerHTML = translatedHtml;
+
+      // Show lang label + original in a read-only reference block outside replyArea
+      let origRef = container.querySelector('.translation-orig-ref');
+      if (!origRef) {
+        origRef = document.createElement('div');
+        origRef.className = 'translation-orig-ref';
+        origRef.style.cssText = 'border:1px solid #ddd;border-radius:4px;padding:8px 10px;margin-top:4px;font-size:12px;color:#888;line-height:1.5;background:#fafafa;';
+        replyArea.insertAdjacentElement('afterend', origRef);
+      }
+      origRef.innerHTML =
+        `<div style="font-size:10px;color:#00897b;font-weight:600;margin-bottom:2px;">🌐 ${lang} — editing above</div>` +
+        `<div style="font-size:10px;color:#aaa;font-weight:600;margin-top:6px;margin-bottom:2px;">📄 Original</div>` +
+        `<div style="color:#555;">${originalHtml}</div>`;
     });
   }
 
