@@ -607,6 +607,23 @@ app.get('/attachment', async (req, res) => {
  * Fetches all pages of a ticket's conversations (Freshdesk max 100/page).
  * Returns a flat array of all conversation objects.
  */
+async function fetchAllAgents(domain, auth) {
+  const map = {};
+  let page = 1;
+  while (true) {
+    const res = await fetch(`https://${domain}/api/v2/agents?per_page=100&page=${page}`, { headers: { Authorization: auth } });
+    if (!res.ok) break;
+    const batch = await res.json();
+    if (!Array.isArray(batch) || batch.length === 0) break;
+    batch.forEach(a => {
+      map[a.id] = a.contact?.name || a.name || a.contact?.email || null;
+    });
+    if (batch.length < 100) break;
+    page++;
+  }
+  return map;
+}
+
 async function fetchAllConversations(domain, auth, ticketId) {
   const all = [];
   let page = 1;
@@ -629,19 +646,13 @@ app.get('/guided-prewarm/ticket/:id', async (req, res) => {
   const domain   = process.env.FRESHDESK_DOMAIN;
   const auth     = getAuthHeader();
   const headers  = { Authorization: auth };
-  const [tRes, aRes] = await Promise.all([
-    fetch(`https://${domain}/api/v2/tickets/${ticketId}?include=requester`, { headers }),
-    fetch(`https://${domain}/api/v2/agents?per_page=100`, { headers }),
-  ]);
+  const tRes = await fetch(`https://${domain}/api/v2/tickets/${ticketId}?include=requester`, { headers });
   if (!tRes.ok) return res.status(500).json({ error: 'Could not fetch ticket' });
-  const ticket        = await tRes.json();
-  const conversations = await fetchAllConversations(domain, auth, ticketId);
-  const agentList     = aRes.ok ? await aRes.json() : [];
-  // Build id → name lookup
-  const agents = {};
-  (Array.isArray(agentList) ? agentList : []).forEach(a => {
-    agents[a.id] = a.contact?.name || a.name || null;
-  });
+  const [ticket, conversations, agents] = await Promise.all([
+    tRes.json(),
+    fetchAllConversations(domain, auth, ticketId),
+    fetchAllAgents(domain, auth),
+  ]);
   res.json({ success: true, ticket, conversations, agents });
 });
 
