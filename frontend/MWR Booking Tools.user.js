@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.13
+// @version      6.14
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -1871,13 +1871,137 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
             mergeOutBtn.textContent = '📤 Merge out';
             mergeOutBtn.style.cssText = 'padding:1px 6px;border:1px solid #6c757d;border-radius:4px;background:#fff;color:#6c757d;font-size:10px;cursor:pointer;flex-shrink:0;font-weight:500;';
             mergeOutBtn.onclick = async () => {
-              if (!confirm(`Merge #${t.id} into #${dup.id}? This will post a note on #${dup.id} and close #${t.id}.`)) return;
               mergeOutBtn.disabled = true; mergeOutBtn.textContent = '⏳';
-              const { ok: ftok, data: ftd } = await gmGet(`${BACKEND_URL}/guided-prewarm/ticket/${t.id}`);
-              const desc = (ftok && ftd.ticket) ? (ftd.ticket.description || ftd.ticket.description_text || '') : '';
-              const { ok: mok, data: mr } = await gmPost(`${BACKEND_URL}/merge-ticket`, { sourceTicketId: String(t.id), targetTicketId: String(dup.id), description: desc });
-              if (mok) { showToast(`✅ Merged #${t.id} into #${dup.id} — ticket closed.`, 'success', 3000); refreshThread(); idx++; setTimeout(() => renderTicket(), 1200); }
-              else { showToast('❌ Merge failed: ' + (mr?.error || 'Server error'), 'error'); mergeOutBtn.disabled = false; mergeOutBtn.textContent = '📤 Merge out'; }
+              const { ok: tok, data: td } = await gmGet(`${BACKEND_URL}/guided-prewarm/ticket/${t.id}`);
+              mergeOutBtn.disabled = false; mergeOutBtn.textContent = '📤 Merge out';
+              if (!tok || !td.ticket) { showToast('Could not load ticket.', 'error'); return; }
+
+              const pop = document.createElement('div');
+              pop.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:660px;max-width:92vw;max-height:82vh;background:#fff;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,0.3);z-index:1000001;font-family:system-ui,sans-serif;display:flex;flex-direction:column;';
+
+              const popHeader = document.createElement('div');
+              popHeader.style.cssText = 'padding:10px 14px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;background:#f8f9fa;border-radius:10px 10px 0 0;';
+              const popTitle = document.createElement('span');
+              popTitle.style.cssText = 'font-weight:600;font-size:13px;color:#333;';
+              popTitle.textContent = `Merge #${t.id} → #${dup.id}`;
+              const popSubtitle = document.createElement('span');
+              popSubtitle.style.cssText = 'font-size:11px;color:#888;margin-left:8px;';
+              popSubtitle.textContent = '← select a message, edit if needed, then confirm';
+              const popClose = document.createElement('button');
+              popClose.textContent = '×'; popClose.style.cssText = 'background:none;border:none;font-size:18px;color:#aaa;cursor:pointer;margin-left:8px;';
+              popClose.onclick = () => pop.remove();
+              const titleWrap = document.createElement('div');
+              titleWrap.style.cssText = 'display:flex;align-items:center;min-width:0;overflow:hidden;';
+              titleWrap.appendChild(popTitle); titleWrap.appendChild(popSubtitle);
+              popHeader.appendChild(titleWrap); popHeader.appendChild(popClose);
+
+              const popBody = document.createElement('div');
+              popBody.style.cssText = 'padding:12px 14px;overflow-y:auto;flex:1;font-size:12px;color:#555;line-height:1.6;';
+
+              // Editor area at the bottom
+              const editorArea = document.createElement('div');
+              editorArea.style.cssText = 'padding:10px 14px;border-top:2px solid #fd7e14;flex-shrink:0;background:#fffbf0;';
+              const editorLabel = document.createElement('div');
+              editorLabel.style.cssText = 'font-size:11px;color:#888;margin-bottom:4px;font-weight:600;';
+              editorLabel.textContent = `Note to post on #${dup.id}:`;
+              const editorEl = document.createElement('div');
+              editorEl.contentEditable = 'true';
+              editorEl.style.cssText = 'min-height:60px;max-height:150px;overflow-y:auto;border:1px solid #ddd;border-radius:4px;padding:6px 8px;font-size:12px;background:#fff;outline:none;';
+              editorEl.innerHTML = '<span style="color:#aaa;font-style:italic;">Select a message above…</span>';
+              const editorActions = document.createElement('div');
+              editorActions.style.cssText = 'display:flex;justify-content:flex-end;gap:6px;margin-top:6px;';
+              const confirmMergeBtn = document.createElement('button');
+              confirmMergeBtn.textContent = `📤 Merge out → #${dup.id}`;
+              confirmMergeBtn.style.cssText = 'padding:4px 12px;border:none;border-radius:4px;background:#6c757d;color:#fff;font-size:11px;cursor:pointer;font-weight:600;';
+              confirmMergeBtn.onclick = async () => {
+                const bodyToPost = editorEl.innerHTML;
+                if (!bodyToPost || bodyToPost.includes('Select a message above')) { showToast('Select a message first.', 'error'); return; }
+                if (!confirm(`Merge #${t.id} into #${dup.id}? This will post a note on #${dup.id} and close #${t.id}.`)) return;
+                confirmMergeBtn.disabled = true; confirmMergeBtn.textContent = '⏳ Merging...';
+                const { ok: mok, data: mr } = await gmPost(`${BACKEND_URL}/merge-ticket`, {
+                  sourceTicketId: String(t.id), targetTicketId: String(dup.id), description: bodyToPost,
+                });
+                if (mok) {
+                  pop.remove();
+                  showToast(`✅ Merged #${t.id} into #${dup.id} — ticket closed.`, 'success', 3000);
+                  refreshThread(); idx++; setTimeout(() => renderTicket(), 1200);
+                } else {
+                  showToast('❌ Merge failed: ' + (mr?.error || 'Server error'), 'error');
+                  confirmMergeBtn.disabled = false; confirmMergeBtn.textContent = `📤 Merge out → #${dup.id}`;
+                }
+              };
+              editorActions.appendChild(confirmMergeBtn);
+              editorArea.appendChild(editorLabel); editorArea.appendChild(editorEl); editorArea.appendChild(editorActions);
+
+              // Render messages from current ticket (t.id)
+              const moStrip = (html) => (html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+              const moAgents = td.agents || {};
+              const moFmtDate = (iso) => {
+                if (!iso) return '';
+                const d = new Date(iso);
+                return d.toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'numeric' })
+                  + ' ' + d.toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit' });
+              };
+
+              const addSelectMsg = (label, bg, border, bodyHtml, meta) => {
+                const wrap = document.createElement('div');
+                wrap.style.cssText = `margin-bottom:10px;padding:8px 10px;background:${bg};border-left:3px solid ${border};border-radius:3px;font-size:12px;line-height:1.5;cursor:pointer;transition:box-shadow 0.1s;`;
+                wrap.onmouseenter = () => { wrap.style.boxShadow = '0 0 0 2px #fd7e14'; };
+                wrap.onmouseleave = () => { wrap.style.boxShadow = ''; };
+                const lbl = document.createElement('div');
+                lbl.style.cssText = 'display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;flex-wrap:wrap;gap:4px;';
+                const typeWrap = document.createElement('div');
+                const lblText = document.createElement('span');
+                lblText.style.cssText = 'font-size:10px;color:#999;font-weight:600;';
+                lblText.textContent = label;
+                typeWrap.appendChild(lblText);
+                if (meta) {
+                  const metaParts = [meta.author, meta.date].filter(Boolean);
+                  if (metaParts.length) {
+                    const metaEl = document.createElement('div');
+                    metaEl.style.cssText = 'font-size:10px;color:#aaa;margin-top:1px;';
+                    metaEl.textContent = metaParts.join(' · ');
+                    typeWrap.appendChild(metaEl);
+                  }
+                }
+                const useBtn = document.createElement('button');
+                useBtn.textContent = '✏️ Use this';
+                useBtn.style.cssText = 'padding:2px 8px;border:1px solid #fd7e14;border-radius:4px;background:#fff;color:#fd7e14;font-size:10px;cursor:pointer;font-weight:600;flex-shrink:0;';
+                useBtn.onclick = (e) => { e.stopPropagation(); editorEl.innerHTML = bodyHtml; editorEl.scrollIntoView({ behavior:'smooth', block:'nearest' }); };
+                lbl.appendChild(typeWrap); lbl.appendChild(useBtn);
+                const content = document.createElement('div');
+                content.innerHTML = bodyHtml;
+                wrap.appendChild(lbl); wrap.appendChild(content);
+                wrap.onclick = () => { editorEl.innerHTML = bodyHtml; editorEl.scrollIntoView({ behavior:'smooth', block:'nearest' }); };
+                popBody.appendChild(wrap);
+              };
+
+              // Opening description
+              const moDesc = td.ticket.description || td.ticket.description_text || '';
+              if (moDesc) {
+                addSelectMsg('📩 Customer (opening)', '#f8f9fa', '#6c757d', td.ticket.description || moStrip(moDesc), {
+                  author: td.ticket.requester?.name || td.ticket.requester?.email || null,
+                  date: moFmtDate(td.ticket.created_at),
+                });
+              }
+
+              // Conversations
+              (td.conversations || []).forEach(c => {
+                const isNote = c.private;
+                const isIncoming = !isNote && c.incoming;
+                const label  = isNote ? '📌 Agent note' : isIncoming ? '📩 Customer' : '📤 Agent reply';
+                const bg     = isNote ? '#fffbf0' : isIncoming ? '#f8f9fa' : '#f0f4ff';
+                const border = isNote ? '#fd7e14'  : isIncoming ? '#6c757d' : '#0056d2';
+                const author = isIncoming ? (c.from_email || null) : (moAgents[c.user_id] || c.from_email || null);
+                addSelectMsg(label, bg, border, c.body || moStrip(c.body_text || ''), {
+                  author,
+                  date: moFmtDate(c.created_at),
+                });
+              });
+
+              if (!popBody.children.length) popBody.innerHTML = '<span style="color:#999;">(no content)</span>';
+              pop.appendChild(popHeader); pop.appendChild(popBody); pop.appendChild(editorArea);
+              document.body.appendChild(pop);
             };
           row.appendChild(previewBtn); row.appendChild(mergeOutBtn);
           return row;
@@ -1893,7 +2017,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
         }
         if (dups.length) {
           const hdr = document.createElement('div');
-          hdr.style.cssText = 'font-weight:600;font-size:11px;color:#856404;margin-bottom:6px;';
+          hdr.style.cssText = 'font-weight:600;font-size:13px;color:#856404;margin-bottom:6px;';
           hdr.textContent = `⚠️ ${dups.length} open thread${dups.length > 1 ? 's' : ''} found`;
           dupSection.appendChild(hdr);
           dups.forEach(dup => dupSection.appendChild(buildDupRow(dup)));
