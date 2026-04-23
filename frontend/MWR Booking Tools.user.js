@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.16
+// @version      6.17
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -3510,7 +3510,7 @@ function showReplyComposer(recipientType, toEmail, booking, details, user, suppl
         replyArea.insertAdjacentElement('afterend', origRef);
       }
       origRef.innerHTML =
-        `<div style="font-size:10px;color:#00897b;font-weight:600;margin-bottom:2px;">🌐 ${lang} — editing above</div>` +
+        `<div style="font-size:10px;color:#00897b;font-weight:600;margin-bottom:2px;">🌐 ${lang}</div>` +
         `<div style="font-size:10px;color:#aaa;font-weight:600;margin-top:6px;margin-bottom:2px;">📄 Original</div>` +
         `<div style="color:#555;">${originalHtml}</div>`;
     });
