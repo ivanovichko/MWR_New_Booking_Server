@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.17
+// @version      6.18
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -3497,22 +3497,15 @@ function showReplyComposer(recipientType, toEmail, booking, details, user, suppl
       if (!ok || !aiData.text) { showToast('Translation failed.', 'error'); return; }
 
       const translatedHtml = stripTranslationNoise(aiData.text).replace(/\n/g, '<br>');
-      // Put only the translated text into replyArea — no wrapper divs so Enter
-      // doesn't clone bordered sections inside contenteditable
-      replyArea.innerHTML = translatedHtml;
-
-      // Show lang label + original in a read-only reference block outside replyArea
-      let origRef = container.querySelector('.translation-orig-ref');
-      if (!origRef) {
-        origRef = document.createElement('div');
-        origRef.className = 'translation-orig-ref';
-        origRef.style.cssText = 'border:1px solid #ddd;border-radius:4px;padding:8px 10px;margin-top:4px;font-size:12px;color:#888;line-height:1.5;background:#fafafa;';
-        replyArea.insertAdjacentElement('afterend', origRef);
-      }
-      origRef.innerHTML =
-        `<div style="font-size:10px;color:#00897b;font-weight:600;margin-bottom:2px;">🌐 ${lang}</div>` +
-        `<div style="font-size:10px;color:#aaa;font-weight:600;margin-top:6px;margin-bottom:2px;">📄 Original</div>` +
-        `<div style="color:#555;">${originalHtml}</div>`;
+      // Both translation and original go into replyArea so both are sent.
+      // No border wrappers — borders were what caused Enter to clone a
+      // visually outlined section inside contenteditable.
+      replyArea.innerHTML =
+        `<div><span style="font-size:10px;color:#00897b;font-weight:600;">🌐 ${lang}</span></div>` +
+        translatedHtml +
+        `<br><hr style="border:none;border-top:1px solid #ddd;margin:8px 0;">` +
+        `<div><span style="font-size:10px;color:#aaa;font-weight:600;">📄 Original</span></div>` +
+        originalHtml;
     });
   }
 
