@@ -416,7 +416,6 @@ async function fetchAgentMap() {
     });
     _agentMapCache = map;
     _agentMapCacheTime = Date.now();
-    console.log(`[fetchAgentMap] loaded ${Object.keys(map).length} agents from bootstrap endpoint`);
     return map;
   } catch (e) {
     console.warn(`[fetchAgentMap] fdGet failed: ${e.message}`);
@@ -642,42 +641,30 @@ async function resolveAgentName(id) {
     return v === false ? null : v;
   }
   const tryGet = async (path) => {
-    try {
-      const data = await fdGet(path);
-      console.log(`[resolveAgentName] id=${id} GET ${path} → ok`);
-      return data;
-    } catch (e) {
-      console.log(`[resolveAgentName] id=${id} GET ${path} → ${e.message}`);
-      return null;
-    }
+    try { return await fdGet(path); } catch { return null; }
   };
   const a = await tryGet(`/api/v2/agents/${id}`);
   if (a) {
     const name = a.contact?.name || a.name || a.contact?.email || null;
-    if (name) { _agentNameCache.set(id, name); console.log(`[resolveAgentName] id=${id} resolved via /agents → ${name}`); return name; }
+    if (name) { _agentNameCache.set(id, name); return name; }
   }
   const c = await tryGet(`/api/v2/contacts/${id}`);
   if (c) {
     const name = c.name || c.email || null;
-    if (name) { _agentNameCache.set(id, name); console.log(`[resolveAgentName] id=${id} resolved via /contacts → ${name}`); return name; }
+    if (name) { _agentNameCache.set(id, name); return name; }
   }
-  console.warn(`[resolveAgentName] id=${id} UNRESOLVED — caching as missing`);
   _agentNameCache.set(id, false);
   return null;
 }
 
 // Given a base map and a list of candidate IDs, resolve missing entries via per-ID lookup.
 async function fillMissingAgentNames(baseMap, ids) {
-  const uniq = [...new Set(ids.filter(id => id != null))];
-  const missing = uniq.filter(id => baseMap[id] == null);
-  console.log(`[fillMissingAgentNames] baseMapKeys=${Object.keys(baseMap).length} candidates=${uniq.length} missingFromBulk=${missing.length} ids=${JSON.stringify(missing)}`);
+  const missing = [...new Set(ids.filter(id => id != null && baseMap[id] == null))];
   if (!missing.length) return baseMap;
   const resolved = await Promise.all(missing.map(id => resolveAgentName(id).then(name => [id, name])));
-  let added = 0;
   for (const [id, name] of resolved) {
-    if (name) { baseMap[id] = name; added++; }
+    if (name) baseMap[id] = name;
   }
-  console.log(`[fillMissingAgentNames] added=${added}/${missing.length} via per-id lookup`);
   return baseMap;
 }
 
@@ -700,7 +687,6 @@ async function fetchAllConversations(domain, auth, ticketId) {
 // Fast ticket fetch — ticket + full conversation thread, no Groq
 app.get('/guided-prewarm/ticket/:id', async (req, res) => {
   const ticketId = req.params.id;
-  console.log(`[/guided-prewarm/ticket/${ticketId}] start`);
   const domain   = process.env.FRESHDESK_DOMAIN;
   const auth     = getAuthHeader();
   const headers  = { Authorization: auth };
@@ -711,20 +697,9 @@ app.get('/guided-prewarm/ticket/:id', async (req, res) => {
     fetchAllConversations(domain, auth, ticketId),
     fetchAllAgents(),
   ]);
-  console.log(`[/guided-prewarm/ticket/${ticketId}] bulk agents=${Object.keys(agents).length} conversations=${conversations.length} responder_id=${ticket.responder_id}`);
   // Fill in any user_ids the bulk agent list missed (deactivated agents, contacts who posted notes, etc.)
-  const candidateIds = [
-    ticket.responder_id,
-    ...conversations.map(c => c.user_id),
-  ];
+  const candidateIds = [ticket.responder_id, ...conversations.map(c => c.user_id)];
   await fillMissingAgentNames(agents, candidateIds);
-  // Final check: any candidate IDs still missing after fallback?
-  const stillMissing = [...new Set(candidateIds.filter(id => id != null && agents[id] == null))];
-  if (stillMissing.length) {
-    console.warn(`[/guided-prewarm/ticket/${ticketId}] STILL UNRESOLVED ids: ${JSON.stringify(stillMissing)} — these will render as #id in frontend`);
-  } else {
-    console.log(`[/guided-prewarm/ticket/${ticketId}] all candidate ids resolved`);
-  }
   res.json({ success: true, ticket, conversations, agents });
 });
 
