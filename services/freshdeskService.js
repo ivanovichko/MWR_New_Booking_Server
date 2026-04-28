@@ -327,4 +327,4 @@ async function sendEmailWithAttachments(ticketId, toEmail, bodyHtml, files = [])
   return response.json();
 }
 
-module.exports = { getAuthHeader, addNote, addNoteWithImages, sendEmail, sendEmailWithAttachments, setTicketPending, updateTicket, tagTicket, searchDuplicates, getTicketContext };
+module.exports = { getAuthHeader, fdGet, addNote, addNoteWithImages, sendEmail, sendEmailWithAttachments, setTicketPending, updateTicket, tagTicket, searchDuplicates, getTicketContext };

@@ -8,7 +8,7 @@ const { parseUserHtml, findUser }        = require('./services/userService');
 const { buildNoteHtml }                  = require('./services/noteBuilder');
 const { lookupSupplier }                 = require('./services/supplierService');
 const { aiAssist, findHotelEmail }       = require('./services/aiService');
-const { getAuthHeader, addNote, addNoteWithImages, sendEmail, sendEmailWithAttachments, setTicketPending, tagTicket, updateTicket, searchDuplicates, getTicketContext } = require('./services/freshdeskService');
+const { getAuthHeader, fdGet, addNote, addNoteWithImages, sendEmail, sendEmailWithAttachments, setTicketPending, tagTicket, updateTicket, searchDuplicates, getTicketContext } = require('./services/freshdeskService');
 const { initDb, getCachedBooking, cacheBooking, storeSession, getPrompts, createPrompt, updatePrompt, deletePrompt, getMacros, createMacro, updateMacro, deleteMacro, storeFreshdeskSession } = require('./services/dbService');
 const { prewarm, fetchAndCacheBooking, extractBookingId, checkPendings, checkInPriority, setTicketPriority, postNote } = require('./services/prewarmService');
 const { taGet, taPost }                  = require('./services/taAuthService');
@@ -393,17 +393,19 @@ app.post('/update-ticket', async (req, res) => {
   }
 });
 
-// ─── Shared: fetch agent id→name map ─────────────────────────────────────────
+// ─── Shared: fetch agent id→name map (uses session cookie via fdGet) ─────────
+// API key auth on /api/v2/agents requires admin scope; the stored Freshdesk
+// browser session lets us call agent endpoints as a logged-in user instead.
 async function fetchAgentMap() {
-  const domain = process.env.FRESHDESK_DOMAIN;
-  const auth   = getAuthHeader();
   try {
-    const r = await fetch(`https://${domain}/api/v2/agents?per_page=100`, { headers: { Authorization: auth } });
-    const list = r.ok ? await r.json() : [];
+    const list = await fdGet('/api/v2/agents?per_page=100');
     const map = {};
     (Array.isArray(list) ? list : []).forEach(a => { map[a.id] = a.contact?.name || a.name || null; });
     return map;
-  } catch { return {}; }
+  } catch (e) {
+    console.warn(`[fetchAgentMap] fdGet failed: ${e.message}`);
+    return {};
+  }
 }
 
 // ─── Check for duplicate tickets ─────────────────────────────────────────────
@@ -607,23 +609,25 @@ app.get('/attachment', async (req, res) => {
  * Fetches all pages of a ticket's conversations (Freshdesk max 100/page).
  * Returns a flat array of all conversation objects.
  */
-async function fetchAllAgents(domain, auth) {
+// Paginated agent fetch via session cookie. API-key auth requires admin scope
+// and 403s for non-admin keys; the session impersonates a logged-in user.
+async function fetchAllAgents() {
   const map = {};
   let page = 1;
   while (true) {
-    const res = await fetch(`https://${domain}/api/v2/agents?per_page=100&page=${page}`, { headers: { Authorization: auth } });
-    if (!res.ok) {
-      console.warn(`[agents] bulk fetch failed page=${page} status=${res.status}`);
+    try {
+      const batch = await fdGet(`/api/v2/agents?per_page=100&page=${page}`);
+      if (!Array.isArray(batch) || batch.length === 0) break;
+      batch.forEach(a => {
+        const name = a.contact?.name || a.name || a.contact?.email || null;
+        if (name) map[a.id] = name;
+      });
+      if (batch.length < 100) break;
+      page++;
+    } catch (e) {
+      console.warn(`[fetchAllAgents] fdGet failed page=${page}: ${e.message}`);
       break;
     }
-    const batch = await res.json();
-    if (!Array.isArray(batch) || batch.length === 0) break;
-    batch.forEach(a => {
-      const name = a.contact?.name || a.name || a.contact?.email || null;
-      if (name) map[a.id] = name;
-    });
-    if (batch.length < 100) break;
-    page++;
   }
   return map;
 }
@@ -631,30 +635,28 @@ async function fetchAllAgents(domain, auth) {
 // Per-id resolution cache (survives across requests; agent names rarely change)
 const _agentNameCache = new Map(); // id -> name | false (false = confirmed unresolvable)
 
-async function resolveAgentName(domain, auth, id) {
+async function resolveAgentName(id) {
   if (id == null) return null;
   if (_agentNameCache.has(id)) {
     const v = _agentNameCache.get(id);
-    console.log(`[resolveAgentName] id=${id} cache hit → ${v === false ? 'UNRESOLVED' : v}`);
     return v === false ? null : v;
   }
-  const tryFetch = async (path) => {
+  const tryGet = async (path) => {
     try {
-      const r = await fetch(`https://${domain}/api/v2${path}`, { headers: { Authorization: auth } });
-      console.log(`[resolveAgentName] id=${id} GET ${path} → ${r.status}`);
-      if (!r.ok) return null;
-      return await r.json();
+      const data = await fdGet(path);
+      console.log(`[resolveAgentName] id=${id} GET ${path} → ok`);
+      return data;
     } catch (e) {
-      console.warn(`[resolveAgentName] id=${id} GET ${path} threw: ${e.message}`);
+      console.log(`[resolveAgentName] id=${id} GET ${path} → ${e.message}`);
       return null;
     }
   };
-  const a = await tryFetch(`/agents/${id}`);
+  const a = await tryGet(`/api/v2/agents/${id}`);
   if (a) {
     const name = a.contact?.name || a.name || a.contact?.email || null;
     if (name) { _agentNameCache.set(id, name); console.log(`[resolveAgentName] id=${id} resolved via /agents → ${name}`); return name; }
   }
-  const c = await tryFetch(`/contacts/${id}`);
+  const c = await tryGet(`/api/v2/contacts/${id}`);
   if (c) {
     const name = c.name || c.email || null;
     if (name) { _agentNameCache.set(id, name); console.log(`[resolveAgentName] id=${id} resolved via /contacts → ${name}`); return name; }
@@ -665,12 +667,12 @@ async function resolveAgentName(domain, auth, id) {
 }
 
 // Given a base map and a list of candidate IDs, resolve missing entries via per-ID lookup.
-async function fillMissingAgentNames(domain, auth, baseMap, ids) {
+async function fillMissingAgentNames(baseMap, ids) {
   const uniq = [...new Set(ids.filter(id => id != null))];
   const missing = uniq.filter(id => baseMap[id] == null);
   console.log(`[fillMissingAgentNames] baseMapKeys=${Object.keys(baseMap).length} candidates=${uniq.length} missingFromBulk=${missing.length} ids=${JSON.stringify(missing)}`);
   if (!missing.length) return baseMap;
-  const resolved = await Promise.all(missing.map(id => resolveAgentName(domain, auth, id).then(name => [id, name])));
+  const resolved = await Promise.all(missing.map(id => resolveAgentName(id).then(name => [id, name])));
   let added = 0;
   for (const [id, name] of resolved) {
     if (name) { baseMap[id] = name; added++; }
@@ -707,7 +709,7 @@ app.get('/guided-prewarm/ticket/:id', async (req, res) => {
   const [ticket, conversations, agents] = await Promise.all([
     tRes.json(),
     fetchAllConversations(domain, auth, ticketId),
-    fetchAllAgents(domain, auth),
+    fetchAllAgents(),
   ]);
   console.log(`[/guided-prewarm/ticket/${ticketId}] bulk agents=${Object.keys(agents).length} conversations=${conversations.length} responder_id=${ticket.responder_id}`);
   // Fill in any user_ids the bulk agent list missed (deactivated agents, contacts who posted notes, etc.)
@@ -715,7 +717,7 @@ app.get('/guided-prewarm/ticket/:id', async (req, res) => {
     ticket.responder_id,
     ...conversations.map(c => c.user_id),
   ];
-  await fillMissingAgentNames(domain, auth, agents, candidateIds);
+  await fillMissingAgentNames(agents, candidateIds);
   // Final check: any candidate IDs still missing after fallback?
   const stillMissing = [...new Set(candidateIds.filter(id => id != null && agents[id] == null))];
   if (stillMissing.length) {
