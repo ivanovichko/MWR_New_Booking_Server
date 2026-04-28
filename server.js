@@ -394,17 +394,33 @@ app.post('/update-ticket', async (req, res) => {
 });
 
 // ─── Shared: fetch agent id→name map (uses session cookie via fdGet) ─────────
-// API key auth on /api/v2/agents requires admin scope; the stored Freshdesk
-// browser session lets us call agent endpoints as a logged-in user instead.
+// /api/v2/agents requires admin scope (403 for non-admin keys & sessions).
+// /api/_/bootstrap/agents_groups is the internal endpoint the Freshdesk web
+// UI uses to populate assignee dropdowns — works for any logged-in agent.
+// In-memory cache keeps Render hot — agent rosters rarely change.
+let _agentMapCache = null;
+let _agentMapCacheTime = 0;
+const AGENT_MAP_TTL_MS = 10 * 60 * 1000; // 10 min
+
 async function fetchAgentMap() {
+  if (_agentMapCache && Date.now() - _agentMapCacheTime < AGENT_MAP_TTL_MS) {
+    return _agentMapCache;
+  }
   try {
-    const list = await fdGet('/api/v2/agents?per_page=100');
+    const data = await fdGet('/api/_/bootstrap/agents_groups');
+    const agents = data?.data?.agents || [];
     const map = {};
-    (Array.isArray(list) ? list : []).forEach(a => { map[a.id] = a.contact?.name || a.name || null; });
+    agents.forEach(a => {
+      const name = a.contact?.name || a.contact?.email || null;
+      if (name) map[a.id] = name;
+    });
+    _agentMapCache = map;
+    _agentMapCacheTime = Date.now();
+    console.log(`[fetchAgentMap] loaded ${Object.keys(map).length} agents from bootstrap endpoint`);
     return map;
   } catch (e) {
     console.warn(`[fetchAgentMap] fdGet failed: ${e.message}`);
-    return {};
+    return _agentMapCache || {};
   }
 }
 
@@ -609,27 +625,11 @@ app.get('/attachment', async (req, res) => {
  * Fetches all pages of a ticket's conversations (Freshdesk max 100/page).
  * Returns a flat array of all conversation objects.
  */
-// Paginated agent fetch via session cookie. API-key auth requires admin scope
-// and 403s for non-admin keys; the session impersonates a logged-in user.
+// Bulk agent map for ticket conversations — same source as fetchAgentMap.
+// Kept as a separate function name for clarity at call sites and to allow
+// future divergence (e.g. caching tier or shape).
 async function fetchAllAgents() {
-  const map = {};
-  let page = 1;
-  while (true) {
-    try {
-      const batch = await fdGet(`/api/v2/agents?per_page=100&page=${page}`);
-      if (!Array.isArray(batch) || batch.length === 0) break;
-      batch.forEach(a => {
-        const name = a.contact?.name || a.name || a.contact?.email || null;
-        if (name) map[a.id] = name;
-      });
-      if (batch.length < 100) break;
-      page++;
-    } catch (e) {
-      console.warn(`[fetchAllAgents] fdGet failed page=${page}: ${e.message}`);
-      break;
-    }
-  }
-  return map;
+  return { ...(await fetchAgentMap()) };
 }
 
 // Per-id resolution cache (survives across requests; agent names rarely change)
