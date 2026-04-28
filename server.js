@@ -635,37 +635,47 @@ async function resolveAgentName(domain, auth, id) {
   if (id == null) return null;
   if (_agentNameCache.has(id)) {
     const v = _agentNameCache.get(id);
+    console.log(`[resolveAgentName] id=${id} cache hit → ${v === false ? 'UNRESOLVED' : v}`);
     return v === false ? null : v;
   }
   const tryFetch = async (path) => {
     try {
       const r = await fetch(`https://${domain}/api/v2${path}`, { headers: { Authorization: auth } });
+      console.log(`[resolveAgentName] id=${id} GET ${path} → ${r.status}`);
       if (!r.ok) return null;
       return await r.json();
-    } catch { return null; }
+    } catch (e) {
+      console.warn(`[resolveAgentName] id=${id} GET ${path} threw: ${e.message}`);
+      return null;
+    }
   };
   const a = await tryFetch(`/agents/${id}`);
   if (a) {
     const name = a.contact?.name || a.name || a.contact?.email || null;
-    if (name) { _agentNameCache.set(id, name); return name; }
+    if (name) { _agentNameCache.set(id, name); console.log(`[resolveAgentName] id=${id} resolved via /agents → ${name}`); return name; }
   }
   const c = await tryFetch(`/contacts/${id}`);
   if (c) {
     const name = c.name || c.email || null;
-    if (name) { _agentNameCache.set(id, name); return name; }
+    if (name) { _agentNameCache.set(id, name); console.log(`[resolveAgentName] id=${id} resolved via /contacts → ${name}`); return name; }
   }
+  console.warn(`[resolveAgentName] id=${id} UNRESOLVED — caching as missing`);
   _agentNameCache.set(id, false);
   return null;
 }
 
 // Given a base map and a list of candidate IDs, resolve missing entries via per-ID lookup.
 async function fillMissingAgentNames(domain, auth, baseMap, ids) {
-  const missing = [...new Set(ids.filter(id => id != null && baseMap[id] == null))];
+  const uniq = [...new Set(ids.filter(id => id != null))];
+  const missing = uniq.filter(id => baseMap[id] == null);
+  console.log(`[fillMissingAgentNames] baseMapKeys=${Object.keys(baseMap).length} candidates=${uniq.length} missingFromBulk=${missing.length} ids=${JSON.stringify(missing)}`);
   if (!missing.length) return baseMap;
   const resolved = await Promise.all(missing.map(id => resolveAgentName(domain, auth, id).then(name => [id, name])));
+  let added = 0;
   for (const [id, name] of resolved) {
-    if (name) baseMap[id] = name;
+    if (name) { baseMap[id] = name; added++; }
   }
+  console.log(`[fillMissingAgentNames] added=${added}/${missing.length} via per-id lookup`);
   return baseMap;
 }
 
@@ -688,6 +698,7 @@ async function fetchAllConversations(domain, auth, ticketId) {
 // Fast ticket fetch — ticket + full conversation thread, no Groq
 app.get('/guided-prewarm/ticket/:id', async (req, res) => {
   const ticketId = req.params.id;
+  console.log(`[/guided-prewarm/ticket/${ticketId}] start`);
   const domain   = process.env.FRESHDESK_DOMAIN;
   const auth     = getAuthHeader();
   const headers  = { Authorization: auth };
@@ -698,12 +709,20 @@ app.get('/guided-prewarm/ticket/:id', async (req, res) => {
     fetchAllConversations(domain, auth, ticketId),
     fetchAllAgents(domain, auth),
   ]);
+  console.log(`[/guided-prewarm/ticket/${ticketId}] bulk agents=${Object.keys(agents).length} conversations=${conversations.length} responder_id=${ticket.responder_id}`);
   // Fill in any user_ids the bulk agent list missed (deactivated agents, contacts who posted notes, etc.)
   const candidateIds = [
     ticket.responder_id,
     ...conversations.map(c => c.user_id),
   ];
   await fillMissingAgentNames(domain, auth, agents, candidateIds);
+  // Final check: any candidate IDs still missing after fallback?
+  const stillMissing = [...new Set(candidateIds.filter(id => id != null && agents[id] == null))];
+  if (stillMissing.length) {
+    console.warn(`[/guided-prewarm/ticket/${ticketId}] STILL UNRESOLVED ids: ${JSON.stringify(stillMissing)} — these will render as #id in frontend`);
+  } else {
+    console.log(`[/guided-prewarm/ticket/${ticketId}] all candidate ids resolved`);
+  }
   res.json({ success: true, ticket, conversations, agents });
 });
 
