@@ -39,16 +39,63 @@ async function addNote(ticketId, bodyHtml) {
 /**
  * Posts an internal note with inline images.
  *
- * Freshdesk's API strips data: URLs from the note body. This function:
- *   1. Extracts each base64 data-URL <img> and replaces it with a sentinel.
- *   2. Posts the note as multipart/form-data with the images as attachments[].
- *   3. Freshdesk stores the images and returns attachment_url for each.
- *   4. Patches the note body, replacing sentinels with proxy URLs that
- *      route through our /attachment endpoint (which adds the auth header).
+ * Primary path (session cookie, mirrors what the Freshdesk web editor does):
+ *   1. POST each data-URL image to /api/_/attachments → get { id, inline_url }.
+ *   2. Replace each data: src in the body with the tokenized inline_url.
+ *   3. POST /api/_/tickets/{id}/notes with inline_attachment_ids: [...].
+ *   inline_url is a Freshdesk-hosted tokenized URL — renders without our proxy.
  *
- * Falls back to plain addNote if no data-URL images are found, or on error.
+ * Fallback (API-key multipart): if the session path fails, use the old flow
+ * that uploads via attachments[] and patches the body with /attachment proxy URLs.
  */
 async function addNoteWithImages(ticketId, bodyHtml) {
+  const dataUrlRe = /src="(data:([^;]+);base64,([^"]+))"/g;
+  const images = [];
+  let m;
+  while ((m = dataUrlRe.exec(bodyHtml)) !== null) {
+    const [, fullDataUrl, mimeType, base64Data] = m;
+    images.push({ fullDataUrl, mimeType, buffer: Buffer.from(base64Data, 'base64') });
+  }
+  if (images.length === 0) return addNote(ticketId, bodyHtml);
+
+  // ── Primary path: session cookie via /api/_/... ────────────────────────────
+  try {
+    const uploaded = await Promise.all(images.map((img, i) => {
+      const ext = img.mimeType.split('/')[1]?.replace('jpeg', 'jpg') || 'png';
+      return uploadInlineAttachment(img.buffer, `inline-${Date.now()}-${i}.${ext}`, img.mimeType);
+    }));
+
+    let finalHtml = bodyHtml;
+    const inlineIds = [];
+    images.forEach((img, i) => {
+      const att = uploaded[i];
+      inlineIds.push(att.id);
+      // Replace the entire src="data:..." with src="<inline_url>" data-id="<id>"
+      finalHtml = finalHtml.replace(
+        `src="${img.fullDataUrl}"`,
+        `src="${att.inline_url}" data-id="${att.id}"`
+      );
+    });
+
+    return await fdPost(`/api/_/tickets/${ticketId}/notes`, JSON.stringify({
+      body: finalHtml,
+      attachment_ids: [],
+      cloud_files: [],
+      notify_emails: [],
+      private: true,
+      inline_attachment_ids: inlineIds,
+    }), { 'Content-Type': 'application/json' });
+  } catch (err) {
+    console.warn(`⚠️ addNoteWithImages session path failed (${err.message}) — falling back to API-key multipart`);
+  }
+
+  // ── Fallback: API-key multipart (old flow) ─────────────────────────────────
+  return addNoteWithImagesViaApiKey(ticketId, bodyHtml);
+}
+
+// Old API-key + /attachment-proxy flow, kept as a fallback when the session
+// path fails (expired cookie, internal endpoint changes, etc.).
+async function addNoteWithImagesViaApiKey(ticketId, bodyHtml) {
   const BACKEND_URL = process.env.BACKEND_URL || 'https://mwr-new-booking-server.onrender.com';
   const dataUrlRe = /src="(data:([^;]+);base64,([^"]+))"/g;
   const images = [];
@@ -69,7 +116,6 @@ async function addNoteWithImages(ticketId, bodyHtml) {
   if (images.length === 0) return addNote(ticketId, bodyHtml);
 
   try {
-    // Step 1 — post note with attachments
     const fd = new FormData();
     fd.append('body', processedHtml);
     fd.append('private', 'true');
@@ -92,7 +138,6 @@ async function addNoteWithImages(ticketId, bodyHtml) {
     const noteId = note.id;
     const attachments = note.attachments || [];
 
-    // Step 2 — replace sentinels with proxy URLs pointing at our /attachment endpoint
     let finalHtml = processedHtml;
     for (let i = 0; i < images.length; i++) {
       const att = attachments[i];
@@ -104,7 +149,6 @@ async function addNoteWithImages(ticketId, bodyHtml) {
       );
     }
 
-    // Step 3 — patch note body with final inline URLs
     const patchRes = await fetch(`${getBaseUrl()}/tickets/${ticketId}/notes/${noteId}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'Authorization': getAuthHeader() },
@@ -117,7 +161,7 @@ async function addNoteWithImages(ticketId, bodyHtml) {
 
     return note;
   } catch (err) {
-    console.warn(`⚠️ addNoteWithImages failed (${err.message}) — falling back to plain note`);
+    console.warn(`⚠️ addNoteWithImagesViaApiKey failed (${err.message}) — falling back to plain note`);
     return addNote(ticketId, bodyHtml);
   }
 }
@@ -231,6 +275,50 @@ async function fdGet(path) {
 }
 
 /**
+ * POST using Freshdesk internal session cookie. body can be a JSON string
+ * (set extraHeaders['Content-Type'] = 'application/json') or a FormData
+ * (pass form.getHeaders() as extraHeaders).
+ */
+async function fdPost(path, body, extraHeaders = {}) {
+  const cookie = await getFreshdeskSession();
+  if (!cookie) throw new Error('No Freshdesk session stored. Visit /freshdesk-auth to set one.');
+  const url = `https://${process.env.FRESHDESK_DOMAIN}${path}`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Cookie': cookie,
+      'X-Requested-With': 'XMLHttpRequest',
+      'Accept': 'application/json',
+      ...extraHeaders,
+    },
+    body,
+  });
+  if (response.status === 401 || response.status === 403) {
+    throw new Error('FRESHDESK_SESSION_EXPIRED');
+  }
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Freshdesk internal API error ${response.status}: ${text.slice(0, 200)}`);
+  }
+  return response.json();
+}
+
+/**
+ * Upload an inline image to Freshdesk via the internal /api/_/attachments
+ * endpoint. Returns the attachment object (id, inline_url, attachment_url, ...).
+ * The inline_url is tokenized and renderable directly in note bodies — no
+ * need to proxy it through our backend.
+ */
+async function uploadInlineAttachment(buffer, filename, mimeType) {
+  const fd = new FormData();
+  fd.append('inline', 'true');
+  fd.append('inline_type', '1');
+  fd.append('content', buffer, { filename, contentType: mimeType });
+  const data = await fdPost('/api/_/attachments', fd, fd.getHeaders());
+  return data.attachment;
+}
+
+/**
  * Search for duplicate tickets using Freshdesk internal full-text search.
  * Falls back to empty array on session errors so callers degrade gracefully.
  */
@@ -327,4 +415,4 @@ async function sendEmailWithAttachments(ticketId, toEmail, bodyHtml, files = [])
   return response.json();
 }
 
-module.exports = { getAuthHeader, fdGet, addNote, addNoteWithImages, sendEmail, sendEmailWithAttachments, setTicketPending, updateTicket, tagTicket, searchDuplicates, getTicketContext };
+module.exports = { getAuthHeader, fdGet, fdPost, addNote, addNoteWithImages, uploadInlineAttachment, sendEmail, sendEmailWithAttachments, setTicketPending, updateTicket, tagTicket, searchDuplicates, getTicketContext };
