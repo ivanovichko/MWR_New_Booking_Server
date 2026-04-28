@@ -612,16 +612,61 @@ async function fetchAllAgents(domain, auth) {
   let page = 1;
   while (true) {
     const res = await fetch(`https://${domain}/api/v2/agents?per_page=100&page=${page}`, { headers: { Authorization: auth } });
-    if (!res.ok) break;
+    if (!res.ok) {
+      console.warn(`[agents] bulk fetch failed page=${page} status=${res.status}`);
+      break;
+    }
     const batch = await res.json();
     if (!Array.isArray(batch) || batch.length === 0) break;
     batch.forEach(a => {
-      map[a.id] = a.contact?.name || a.name || a.contact?.email || null;
+      const name = a.contact?.name || a.name || a.contact?.email || null;
+      if (name) map[a.id] = name;
     });
     if (batch.length < 100) break;
     page++;
   }
   return map;
+}
+
+// Per-id resolution cache (survives across requests; agent names rarely change)
+const _agentNameCache = new Map(); // id -> name | false (false = confirmed unresolvable)
+
+async function resolveAgentName(domain, auth, id) {
+  if (id == null) return null;
+  if (_agentNameCache.has(id)) {
+    const v = _agentNameCache.get(id);
+    return v === false ? null : v;
+  }
+  const tryFetch = async (path) => {
+    try {
+      const r = await fetch(`https://${domain}/api/v2${path}`, { headers: { Authorization: auth } });
+      if (!r.ok) return null;
+      return await r.json();
+    } catch { return null; }
+  };
+  const a = await tryFetch(`/agents/${id}`);
+  if (a) {
+    const name = a.contact?.name || a.name || a.contact?.email || null;
+    if (name) { _agentNameCache.set(id, name); return name; }
+  }
+  const c = await tryFetch(`/contacts/${id}`);
+  if (c) {
+    const name = c.name || c.email || null;
+    if (name) { _agentNameCache.set(id, name); return name; }
+  }
+  _agentNameCache.set(id, false);
+  return null;
+}
+
+// Given a base map and a list of candidate IDs, resolve missing entries via per-ID lookup.
+async function fillMissingAgentNames(domain, auth, baseMap, ids) {
+  const missing = [...new Set(ids.filter(id => id != null && baseMap[id] == null))];
+  if (!missing.length) return baseMap;
+  const resolved = await Promise.all(missing.map(id => resolveAgentName(domain, auth, id).then(name => [id, name])));
+  for (const [id, name] of resolved) {
+    if (name) baseMap[id] = name;
+  }
+  return baseMap;
 }
 
 async function fetchAllConversations(domain, auth, ticketId) {
@@ -653,6 +698,12 @@ app.get('/guided-prewarm/ticket/:id', async (req, res) => {
     fetchAllConversations(domain, auth, ticketId),
     fetchAllAgents(domain, auth),
   ]);
+  // Fill in any user_ids the bulk agent list missed (deactivated agents, contacts who posted notes, etc.)
+  const candidateIds = [
+    ticket.responder_id,
+    ...conversations.map(c => c.user_id),
+  ];
+  await fillMissingAgentNames(domain, auth, agents, candidateIds);
   res.json({ success: true, ticket, conversations, agents });
 });
 

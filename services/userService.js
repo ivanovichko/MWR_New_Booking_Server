@@ -67,6 +67,11 @@ function parseUserHtml(html) {
   // ── Open Full Profile link ────────────────────────────────────────────────
   const profileLink = doc.querySelector('a[href*="viewCustomer"]')?.href || null;
 
+  // ── Customer ID — extracted from either link (used for /user/:id/reservations) ──
+  const idMatch = (loginLink && loginLink.match(/webadminCustomerLogin\/(\d+)/)) ||
+                  (profileLink && profileLink.match(/viewCustomer\/(\d+)/));
+  const id = idMatch ? idMatch[1] : null;
+
   // ── Secondary members ─────────────────────────────────────────────────────
   const secondaryMembers = [];
   doc.querySelectorAll('[id^="body_"]').forEach(memberDiv => {
@@ -86,6 +91,7 @@ function parseUserHtml(html) {
   });
 
   return {
+    id,
     fullName,
     firstName,
     lastName,

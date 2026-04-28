@@ -1187,6 +1187,9 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
 
     let currentBookingId = null;
     let currentAction = null;
+    // Set inside the analyse callback once renderDupResults exists; called by
+    // manual booking-fetch handlers to refresh open-thread search for a new booking.
+    let dupCheckFn = null;
 
     // Inline reservations renderer (compact, smaller than full profile modal)
     const renderLocalReservations = (reservations) => {
@@ -1307,8 +1310,10 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
               const bid = el.dataset.bookingid;
               currentBookingId = bid;
               gmGet(`${BACKEND_URL}/guided-prewarm/booking/${encodeURIComponent(bid)}`).then(({ ok: fok, data: fd }) => {
-                if (fok && fd.bookingData) renderBookingSection(fd.bookingData, user);
-                else showToast('Booking not found.', 'error');
+                if (fok && fd.bookingData) {
+                  renderBookingSection(fd.bookingData, user);
+                  dupCheckFn?.(fd.bookingData.booking, fd.bookingData.user);
+                } else showToast('Booking not found.', 'error');
               });
             };
           });
@@ -1414,8 +1419,11 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
           fetchManualBtn.disabled = true; fetchManualBtn.textContent = '⏳';
           const { ok: fok, data: fd } = await gmGet(`${BACKEND_URL}/guided-prewarm/booking/${encodeURIComponent(id)}`);
           fetchManualBtn.disabled = false; fetchManualBtn.textContent = '🔍 Fetch';
-          if (fok && fd.bookingData) { currentBookingId = id; renderBookingSection(fd.bookingData); }
-          else showToast('Booking not found in TA.', 'error');
+          if (fok && fd.bookingData) {
+            currentBookingId = id;
+            renderBookingSection(fd.bookingData);
+            dupCheckFn?.(fd.bookingData.booking, fd.bookingData.user);
+          } else showToast('Booking not found in TA.', 'error');
         };
         manualInput.addEventListener('keydown', e => { if (e.key === 'Enter') fetchManualBtn.click(); });
         manualRow.appendChild(manualInput); manualRow.appendChild(fetchManualBtn);
@@ -1513,8 +1521,11 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
         changeBookingBtn.disabled = true; changeBookingBtn.textContent = '⏳';
         const { ok: fok, data: fd } = await gmGet(`${BACKEND_URL}/guided-prewarm/booking/${encodeURIComponent(id)}`);
         changeBookingBtn.disabled = false; changeBookingBtn.textContent = '🔍 Fetch';
-        if (fok && fd.bookingData) { currentBookingId = id; renderBookingSection(fd.bookingData); }
-        else showToast('Booking not found.', 'error');
+        if (fok && fd.bookingData) {
+          currentBookingId = id;
+          renderBookingSection(fd.bookingData);
+          dupCheckFn?.(fd.bookingData.booking, fd.bookingData.user);
+        } else showToast('Booking not found.', 'error');
       };
       changeBookingInput.addEventListener('keydown', e => { if (e.key === 'Enter') changeBookingBtn.click(); });
       changeBookingRow.appendChild(changeBookingInput); changeBookingRow.appendChild(changeBookingBtn);
@@ -2065,21 +2076,35 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
         dupSection.appendChild(searchRow); dupSection.appendChild(manualResults);
       };
 
+      // Single helper used for both initial auto-search and manual booking refetches.
+      dupCheckFn = (bookingObj, userObj) => {
+        const hasRefs = bookingObj && (bookingObj.supplierId || bookingObj.internalBookingId);
+        if (hasRefs) {
+          dupSection.innerHTML = '<div style="color:#999;font-size:11px;">Checking for open threads...</div>';
+          gmPost(`${BACKEND_URL}/check-duplicates`, {
+            vendorConf: bookingObj.supplierId,
+            internalId: bookingObj.internalBookingId,
+            memberEmail: userObj?.email || null,
+            freshdeskTicketId: String(t.id),
+          }).then(({ ok, data: dd }) => renderDupResults((ok && dd.duplicates) ? dd.duplicates : []));
+        } else if (userObj?.email) {
+          dupSection.innerHTML = '<div style="color:#999;font-size:11px;">Checking for open threads by member email...</div>';
+          gmPost(`${BACKEND_URL}/check-duplicates`, {
+            memberEmail: userObj.email, freshdeskTicketId: String(t.id),
+          }).then(({ ok, data: dd }) => renderDupResults((ok && dd.duplicates) ? dd.duplicates : []));
+        } else {
+          renderDupResults([]);
+        }
+      };
+
       // Auto-search: by booking refs if available, by member email if user-only, else skip
       if (analysis.bookingId && analysis.bookingData) {
-        dupSection.innerHTML = '<div style="color:#999;font-size:11px;">Checking for open threads...</div>';
         const { booking, user } = analysis.bookingData;
-        gmPost(`${BACKEND_URL}/check-duplicates`, {
-          vendorConf: booking.supplierId, internalId: booking.internalBookingId,
-          memberEmail: user?.email || null, freshdeskTicketId: String(t.id),
-        }).then(({ ok, data: dd }) => renderDupResults((ok && dd.duplicates) ? dd.duplicates : []));
+        dupCheckFn(booking, user);
       } else if (analysis.userData && analysis.userData.email) {
-        dupSection.innerHTML = '<div style="color:#999;font-size:11px;">Checking for open threads by member email...</div>';
-        gmPost(`${BACKEND_URL}/check-duplicates`, {
-          memberEmail: analysis.userData.email, freshdeskTicketId: String(t.id),
-        }).then(({ ok, data: dd }) => renderDupResults((ok && dd.duplicates) ? dd.duplicates : []));
+        dupCheckFn(null, analysis.userData);
       } else {
-        renderDupResults([]);
+        dupCheckFn(null, null);
       }
     });
 
