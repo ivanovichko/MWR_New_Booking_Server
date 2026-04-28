@@ -602,20 +602,32 @@ app.post('/send-reply', upload.array('files'), async (req, res) => {
   }
 });
 
-// ─── Attachment proxy — fetches Freshdesk attachment with API auth ────────────
+// ─── Attachment proxy — fetches Freshdesk attachment ──────────────────────────
 // Usage: GET /attachment?url=<encoded attachment_url>
+// Most attachment URLs are tokenized signed URLs on CDN hosts
+// (attachment.freshdesk.com, cache.freshdesk.com) and need NO auth — sending
+// Basic auth to a CDN often causes the CDN to reject the request. Only attach
+// our API-key header when the host is the actual Freshdesk API domain.
 app.get('/attachment', async (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).send('url param required');
   try {
-    const upstream = await fetch(url, { headers: { Authorization: getAuthHeader() } });
-    if (!upstream.ok) return res.status(upstream.status).send('Upstream error');
+    const apiHost = process.env.FRESHDESK_DOMAIN;
+    const targetHost = (() => { try { return new URL(url).host; } catch { return null; } })();
+    const headers = (targetHost === apiHost) ? { Authorization: getAuthHeader() } : {};
+    const upstream = await fetch(url, { headers });
+    if (!upstream.ok) {
+      const text = await upstream.text().catch(() => '');
+      console.warn(`[/attachment] upstream ${upstream.status} for ${targetHost} — ${text.slice(0, 200)}`);
+      return res.status(upstream.status).send(`Upstream error ${upstream.status}: ${text.slice(0, 300)}`);
+    }
     const ct = upstream.headers.get('content-type') || 'application/octet-stream';
     const cd = upstream.headers.get('content-disposition');
     res.set('Content-Type', ct);
     if (cd) res.set('Content-Disposition', cd);
     upstream.body.pipe(res);
   } catch (err) {
+    console.error(`[/attachment] fetch failed: ${err.message}`);
     res.status(500).send(err.message);
   }
 });
