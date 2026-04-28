@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.3
+// @version      6.4
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -1749,7 +1749,22 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
           const row = document.createElement('div');
           row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid #f5f5f5;';
           const assigneeName = dup.responder_name || (dup.responder_id ? (ticketAgents[dup.responder_id] || `#${dup.responder_id}`) : '—');
-          row.innerHTML = `<a href="https://mwrlife.freshdesk.com/a/tickets/${dup.id}" target="_blank" style="color:#007bff;font-weight:600;font-size:12px;white-space:nowrap;">#${dup.id}</a><span style="flex:1;color:#555;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${dup.subject||'—'}</span><span style="color:#6f42c1;font-size:10px;white-space:nowrap;" title="Assigned to">${assigneeName}</span><span style="color:#aaa;font-size:10px;white-space:nowrap;">${(dup.matchedBy||[]).join(', ')}</span>`;
+          // Freshdesk status codes: 2=Open, 3=Pending, 4=Resolved, 5=Closed (6+ are custom)
+          const statusInfo = (() => {
+            switch (dup.status) {
+              case 2: return { label: 'Open',     bg: '#e8f4ff', fg: '#0056d2' };
+              case 3: return { label: 'Pending',  bg: '#fff3cd', fg: '#856404' };
+              case 4: return { label: 'Resolved', bg: '#e6f4ea', fg: '#1e7e34' };
+              case 5: return { label: 'Closed',   bg: '#f1f3f5', fg: '#6c757d' };
+              default: return dup.status != null
+                ? { label: `Status ${dup.status}`, bg: '#f1f3f5', fg: '#6c757d' }
+                : null;
+            }
+          })();
+          const statusBadge = statusInfo
+            ? `<span style="background:${statusInfo.bg};color:${statusInfo.fg};font-size:10px;font-weight:600;padding:1px 6px;border-radius:8px;white-space:nowrap;">${statusInfo.label}</span>`
+            : '';
+          row.innerHTML = `<a href="https://mwrlife.freshdesk.com/a/tickets/${dup.id}" target="_blank" style="color:#007bff;font-weight:600;font-size:12px;white-space:nowrap;">#${dup.id}</a><span style="flex:1;color:#555;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${dup.subject||'—'}</span>${statusBadge}<span style="color:#6f42c1;font-size:10px;white-space:nowrap;" title="Assigned to">${assigneeName}</span><span style="color:#aaa;font-size:10px;white-space:nowrap;">${(dup.matchedBy||[]).join(', ')}</span>`;
             const previewBtn = document.createElement('button');
             previewBtn.textContent = 'Preview / Merge';
             previewBtn.style.cssText = 'padding:1px 6px;border:1px solid #fd7e14;border-radius:4px;background:#fff;color:#fd7e14;font-size:10px;cursor:pointer;flex-shrink:0;font-weight:500;';
