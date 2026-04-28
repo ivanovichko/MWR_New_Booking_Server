@@ -47,18 +47,21 @@
   <hr>
 
   <h2>🔑 Freshdesk Session</h2>
-  <p class="sub">Paste your Freshdesk session cookie to enable full-text ticket search (duplicate detection). Expires periodically — re-paste when duplicate checks stop working.</p>
+  <p class="sub">Paste your full Freshdesk request cookie + CSRF token. Required for duplicate search, agent name resolution, and posting notes with inline images.</p>
 
   <div class="steps">
-    <strong>How to get the cookie:</strong><br>
+    <strong>How to get them (one DevTools session captures both):</strong><br>
     1. Open <code>mwrlife.freshdesk.com</code> and log in<br>
-    2. Press <code>F12</code> → Application → Cookies → mwrlife.freshdesk.com<br>
-    3. Find the <code>_helpkit_session</code> cookie<br>
-    4. Copy the <strong>Value</strong> and paste it below
+    2. Press <code>F12</code> → Network tab → click any ticket so requests fire<br>
+    3. Click any request to <code>mwrlife.freshdesk.com</code> → <strong>Headers</strong> → <strong>Request Headers</strong><br>
+    4. Copy the entire <code>cookie:</code> header value into <em>Cookie</em> below<br>
+    5. Copy the <code>x-csrf-token:</code> header value into <em>CSRF Token</em> below (leave blank for read-only access)
   </div>
 
-  <label>Cookie Value</label>
-  <textarea id="fdCookieValue" placeholder="_helpkit_session=..."></textarea>
+  <label>Cookie (full string)</label>
+  <textarea id="fdCookieValue" placeholder="_helpkit_session=...; user_credentials=...; session_state=...; ..."></textarea>
+  <label>CSRF Token (required for posting)</label>
+  <input id="fdCsrfToken" type="text" placeholder="FqOfu4htQSv4q63IsLtpPVBK0...">
   <button id="fdSaveBtn" onclick="saveFdSession()">Save Freshdesk Session →</button>
   <div class="status" id="fdStatus"></div>
 
@@ -105,8 +108,12 @@
   }
 
   async function saveFdSession() {
-    const value = document.getElementById('fdCookieValue').value.trim();
-    if (!value) return showFdStatus('Please paste the cookie value.', 'error');
+    const cookieRaw = document.getElementById('fdCookieValue').value.trim();
+    const csrfToken = document.getElementById('fdCsrfToken').value.trim();
+    if (!cookieRaw) return showFdStatus('Please paste the cookie value.', 'error');
+
+    // Accept either a full cookie header (contains "=") or just the _helpkit_session value
+    const cookie = cookieRaw.includes('=') ? cookieRaw : `_helpkit_session=${cookieRaw}`;
 
     const btn = document.getElementById('fdSaveBtn');
     btn.disabled = true;
@@ -114,16 +121,16 @@
     showFdStatus('Saving session...', 'info');
 
     try {
-      const cookie = value.startsWith('_helpkit_session=') ? value : `_helpkit_session=${value}`;
       const res = await fetch('/freshdesk-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cookie }),
+        body: JSON.stringify({ cookie, csrfToken: csrfToken || null }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to save');
-      showFdStatus('✅ Freshdesk session saved! Duplicate search enabled.', 'success');
+      showFdStatus(`✅ Freshdesk session saved! ${csrfToken ? 'Posting enabled.' : 'Read-only mode (no CSRF token).'}`, 'success');
       document.getElementById('fdCookieValue').value = '';
+      document.getElementById('fdCsrfToken').value = '';
     } catch (err) {
       showFdStatus(`❌ ${err.message}`, 'error');
     } finally {

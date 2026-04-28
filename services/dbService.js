@@ -32,8 +32,10 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS freshdesk_sessions (
       id          SERIAL PRIMARY KEY,
       cookie      TEXT NOT NULL,
+      csrf_token  TEXT,
       created_at  TIMESTAMPTZ DEFAULT NOW()
     );
+    ALTER TABLE freshdesk_sessions ADD COLUMN IF NOT EXISTS csrf_token TEXT;
 
     CREATE TABLE IF NOT EXISTS ta_sessions (
       id          SERIAL PRIMARY KEY,
@@ -86,14 +88,19 @@ async function initDb() {
 }
 
 // ─── Freshdesk session ────────────────────────────────────────────────────────
-async function storeFreshdeskSession(cookie) {
+async function storeFreshdeskSession(cookie, csrfToken = null) {
   await pool.query(`DELETE FROM freshdesk_sessions`);
-  await pool.query(`INSERT INTO freshdesk_sessions (cookie) VALUES ($1)`, [cookie]);
+  await pool.query(`INSERT INTO freshdesk_sessions (cookie, csrf_token) VALUES ($1, $2)`, [cookie, csrfToken]);
 }
 
 async function getFreshdeskSession() {
   const res = await pool.query(`SELECT cookie FROM freshdesk_sessions ORDER BY created_at DESC LIMIT 1`);
   return res.rows[0]?.cookie || null;
+}
+
+async function getFreshdeskCsrfToken() {
+  const res = await pool.query(`SELECT csrf_token FROM freshdesk_sessions ORDER BY created_at DESC LIMIT 1`);
+  return res.rows[0]?.csrf_token || null;
 }
 
 // ─── Session ──────────────────────────────────────────────────────────────────
@@ -174,4 +181,4 @@ async function deleteMacro(id) {
   await pool.query(`DELETE FROM agent_macros WHERE id=$1`, [id]);
 }
 
-module.exports = { initDb, storeSession, getSession, cacheBooking, getCachedBooking, storeTicketSummary, getTicketSummaries, pool, getPrompts, createPrompt, updatePrompt, deletePrompt, getMacros, createMacro, updateMacro, deleteMacro, storeFreshdeskSession, getFreshdeskSession };
+module.exports = { initDb, storeSession, getSession, cacheBooking, getCachedBooking, storeTicketSummary, getTicketSummaries, pool, getPrompts, createPrompt, updatePrompt, deletePrompt, getMacros, createMacro, updateMacro, deleteMacro, storeFreshdeskSession, getFreshdeskSession, getFreshdeskCsrfToken };

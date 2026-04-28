@@ -247,7 +247,7 @@ async function tagTicket(ticketId, tags, type) {
  * Search for tickets containing a reference number.
  * Returns array of matching tickets (excluding the current ticket).
  */
-const { getFreshdeskSession } = require('./dbService');
+const { getFreshdeskSession, getFreshdeskCsrfToken } = require('./dbService');
 const { FD_STATUS } = require('../config');
 
 /**
@@ -277,22 +277,21 @@ async function fdGet(path) {
 /**
  * POST using Freshdesk internal session cookie. body can be a JSON string
  * (set extraHeaders['Content-Type'] = 'application/json') or a FormData
- * (pass form.getHeaders() as extraHeaders).
+ * (pass form.getHeaders() as extraHeaders). Sends X-CSRF-Token if a token
+ * has been stored alongside the cookie.
  */
 async function fdPost(path, body, extraHeaders = {}) {
-  const cookie = await getFreshdeskSession();
+  const [cookie, csrfToken] = await Promise.all([getFreshdeskSession(), getFreshdeskCsrfToken()]);
   if (!cookie) throw new Error('No Freshdesk session stored. Visit /freshdesk-auth to set one.');
   const url = `https://${process.env.FRESHDESK_DOMAIN}${path}`;
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Cookie': cookie,
-      'X-Requested-With': 'XMLHttpRequest',
-      'Accept': 'application/json',
-      ...extraHeaders,
-    },
-    body,
-  });
+  const headers = {
+    'Cookie': cookie,
+    'X-Requested-With': 'XMLHttpRequest',
+    'Accept': 'application/json',
+    ...extraHeaders,
+  };
+  if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+  const response = await fetch(url, { method: 'POST', headers, body });
   if (response.status === 401 || response.status === 403) {
     throw new Error('FRESHDESK_SESSION_EXPIRED');
   }

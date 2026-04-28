@@ -31,11 +31,11 @@ app.get('/auth', (req, res) => res.sendFile(path.join(__dirname, 'auth.html')));
 
 // ─── Freshdesk Session ────────────────────────────────────────────────────────
 app.post('/freshdesk-session', async (req, res) => {
-  const { cookie } = req.body;
+  const { cookie, csrfToken } = req.body;
   if (!cookie) return res.status(400).json({ error: 'cookie is required' });
   try {
-    await storeFreshdeskSession(cookie);
-    console.log(`✅ Freshdesk session stored (length: ${cookie.length})`);
+    await storeFreshdeskSession(cookie, csrfToken || null);
+    console.log(`✅ Freshdesk session stored (cookie len: ${cookie.length}, csrf: ${csrfToken ? 'yes' : 'no'})`);
     res.json({ success: true });
   } catch (err) {
     console.error('❌ Freshdesk session store error:', err.message);
