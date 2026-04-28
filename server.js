@@ -684,20 +684,72 @@ async function fetchAllConversations(domain, auth, ticketId) {
   return all;
 }
 
-// Fast ticket fetch — ticket + full conversation thread, no Groq
-app.get('/guided-prewarm/ticket/:id', async (req, res) => {
-  const ticketId = req.params.id;
-  const domain   = process.env.FRESHDESK_DOMAIN;
-  const auth     = getAuthHeader();
-  const headers  = { Authorization: auth };
-  const tRes = await fetch(`https://${domain}/api/v2/tickets/${ticketId}?include=requester`, { headers });
-  if (!tRes.ok) return res.status(500).json({ error: 'Could not fetch ticket' });
-  const [ticket, conversations, agents] = await Promise.all([
+// Paginated conversations via the internal session-cookie endpoint.
+// Response shape: { conversations: [...], meta: { count } } — slightly
+// different from /api/v2 which returns a bare array.
+async function fetchAllConversationsViaSession(ticketId) {
+  const all = [];
+  let page = 1;
+  while (true) {
+    const data = await fdGet(`/api/_/tickets/${ticketId}/conversations?per_page=100&page=${page}&order_type=asc&include=requester`);
+    const batch = data?.conversations || [];
+    if (batch.length === 0) break;
+    all.push(...batch);
+    if (batch.length < 100) break;
+    page++;
+  }
+  return all;
+}
+
+async function fetchTicketViaSession(ticketId) {
+  const [tWrap, conversations] = await Promise.all([
+    fdGet(`/api/_/tickets/${ticketId}?include=requester,stats`),
+    fetchAllConversationsViaSession(ticketId),
+  ]);
+  if (!tWrap?.ticket) throw new Error('Internal ticket endpoint returned no ticket');
+  return { ticket: tWrap.ticket, conversations };
+}
+
+async function fetchTicketViaApiKey(ticketId) {
+  const domain = process.env.FRESHDESK_DOMAIN;
+  const auth = getAuthHeader();
+  const tRes = await fetch(`https://${domain}/api/v2/tickets/${ticketId}?include=requester`, { headers: { Authorization: auth } });
+  if (!tRes.ok) throw new Error(`API-key ticket fetch failed ${tRes.status}`);
+  const [ticket, conversations] = await Promise.all([
     tRes.json(),
     fetchAllConversations(domain, auth, ticketId),
-    fetchAllAgents(),
   ]);
-  // Fill in any user_ids the bulk agent list missed (deactivated agents, contacts who posted notes, etc.)
+  return { ticket, conversations };
+}
+
+// Fast ticket fetch — ticket + full conversation thread, no Groq.
+// Primary path: internal /api/_ endpoints via session cookie (no API rate
+// limit, conversations include inline `requester` so deactivated-agent posts
+// resolve for free). Fallback: public /api/v2 with API key.
+app.get('/guided-prewarm/ticket/:id', async (req, res) => {
+  const ticketId = req.params.id;
+  let ticketData;
+  try {
+    ticketData = await fetchTicketViaSession(ticketId);
+  } catch (err) {
+    console.warn(`[/guided-prewarm/ticket/${ticketId}] session path failed (${err.message}) — falling back to API key`);
+    try {
+      ticketData = await fetchTicketViaApiKey(ticketId);
+    } catch (apiErr) {
+      return res.status(500).json({ error: `Both ticket-fetch paths failed: ${err.message} / ${apiErr.message}` });
+    }
+  }
+  const { ticket, conversations } = ticketData;
+  const agents = await fetchAllAgents();
+  // Augment agents map from inline conversation requesters (handles deactivated
+  // agents the bootstrap endpoint excludes — only available on the session path).
+  conversations.forEach(c => {
+    if (c.user_id && !agents[c.user_id] && c.requester) {
+      const name = c.requester.name || c.requester.email || null;
+      if (name) agents[c.user_id] = name;
+    }
+  });
+  // Last resort: per-id lookup for anything still unresolved.
   const candidateIds = [ticket.responder_id, ...conversations.map(c => c.user_id)];
   await fillMissingAgentNames(agents, candidateIds);
   res.json({ success: true, ticket, conversations, agents });
