@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.4
+// @version      6.5
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -912,7 +912,18 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
           }
 
           const content = document.createElement('div');
+          content.style.cssText = 'word-break:break-word;overflow-wrap:anywhere;';
           content.innerHTML = bodyHtml;
+          // Force images / tables to fit the column — original message HTML
+          // often has fixed-pixel widths that overflow the (overflow:hidden) wrap.
+          content.querySelectorAll('img').forEach(img => {
+            img.style.maxWidth = '100%';
+            img.style.height = 'auto';
+          });
+          content.querySelectorAll('table').forEach(t => {
+            t.style.maxWidth = '100%';
+            t.style.tableLayout = 'auto';
+          });
           collapsible.appendChild(content);
 
           // Attachments
