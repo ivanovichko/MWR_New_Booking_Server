@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.13
+// @version      6.14
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -1884,7 +1884,20 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
           const statusBadge = statusInfo
             ? `<span style="background:${statusInfo.bg};color:${statusInfo.fg};font-size:11px;font-weight:600;padding:2px 8px;border-radius:8px;white-space:nowrap;">${statusInfo.label}</span>`
             : '';
-          row.innerHTML = `<a href="https://mwrlife.freshdesk.com/a/tickets/${dup.id}" target="_blank" style="color:#007bff;font-weight:600;font-size:14px;white-space:nowrap;">#${dup.id}</a><span style="flex:1;color:#444;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${dup.subject||'—'}</span>${statusBadge}<span style="color:#6f42c1;font-size:12px;white-space:nowrap;font-weight:500;" title="Assigned to">${assigneeName}</span><span style="color:#aaa;font-size:11px;white-space:nowrap;">${(dup.matchedBy||[]).join(', ')}</span>`;
+          // Freshdesk priority codes: 1=Low, 2=Medium, 3=High, 4=Urgent
+          const priorityInfo = (() => {
+            switch (dup.priority) {
+              case 1: return { label: 'Low',    bg: '#f1f3f5', fg: '#6c757d' };
+              case 2: return { label: 'Medium', bg: '#e8f4ff', fg: '#0056d2' };
+              case 3: return { label: 'High',   bg: '#ffe8d6', fg: '#b35200' };
+              case 4: return { label: 'Urgent', bg: '#fde2e2', fg: '#c82333' };
+              default: return null;
+            }
+          })();
+          const priorityBadge = priorityInfo
+            ? `<span style="background:${priorityInfo.bg};color:${priorityInfo.fg};font-size:11px;font-weight:600;padding:2px 8px;border-radius:8px;white-space:nowrap;" title="Priority">${priorityInfo.label}</span>`
+            : '';
+          row.innerHTML = `<a href="https://mwrlife.freshdesk.com/a/tickets/${dup.id}" target="_blank" style="color:#007bff;font-weight:600;font-size:14px;white-space:nowrap;">#${dup.id}</a><span style="flex:1;color:#444;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${dup.subject||'—'}</span>${statusBadge}${priorityBadge}<span style="color:#6f42c1;font-size:12px;white-space:nowrap;font-weight:500;" title="Assigned to">${assigneeName}</span><span style="color:#aaa;font-size:11px;white-space:nowrap;">${(dup.matchedBy||[]).join(', ')}</span>`;
             const previewBtn = document.createElement('button');
             previewBtn.textContent = 'Preview / Merge';
             previewBtn.style.cssText = 'padding:3px 8px;border:1px solid #fd7e14;border-radius:4px;background:#fff;color:#fd7e14;font-size:11px;cursor:pointer;flex-shrink:0;font-weight:500;';
