@@ -9,6 +9,8 @@ const { buildNoteHtml }                  = require('./services/noteBuilder');
 const { lookupSupplier }                 = require('./services/supplierService');
 const { aiAssist, findHotelEmail }       = require('./services/aiService');
 const { getAuthHeader, fdGet, addNote, addNoteWithImages, sendEmail, sendEmailWithAttachments, setTicketPending, tagTicket, updateTicket, searchDuplicates, getTicketContext } = require('./services/freshdeskService');
+const { fetchAgentMap, fetchAllAgents, fillMissingAgentNames } = require('./services/agentService');
+const { fetchTicket } = require('./services/ticketService');
 const { initDb, getCachedBooking, cacheBooking, storeSession, getPrompts, createPrompt, updatePrompt, deletePrompt, getMacros, createMacro, updateMacro, deleteMacro, storeFreshdeskSession } = require('./services/dbService');
 const { prewarm, fetchAndCacheBooking, extractBookingId, checkPendings, checkInPriority, setTicketPriority, postNote } = require('./services/prewarmService');
 const { taGet, taPost }                  = require('./services/taAuthService');
@@ -393,35 +395,7 @@ app.post('/update-ticket', async (req, res) => {
   }
 });
 
-// ─── Shared: fetch agent id→name map (uses session cookie via fdGet) ─────────
-// /api/v2/agents requires admin scope (403 for non-admin keys & sessions).
-// /api/_/bootstrap/agents_groups is the internal endpoint the Freshdesk web
-// UI uses to populate assignee dropdowns — works for any logged-in agent.
-// In-memory cache keeps Render hot — agent rosters rarely change.
-let _agentMapCache = null;
-let _agentMapCacheTime = 0;
-const AGENT_MAP_TTL_MS = 10 * 60 * 1000; // 10 min
-
-async function fetchAgentMap() {
-  if (_agentMapCache && Date.now() - _agentMapCacheTime < AGENT_MAP_TTL_MS) {
-    return _agentMapCache;
-  }
-  try {
-    const data = await fdGet('/api/_/bootstrap/agents_groups');
-    const agents = data?.data?.agents || [];
-    const map = {};
-    agents.forEach(a => {
-      const name = a.contact?.name || a.contact?.email || null;
-      if (name) map[a.id] = name;
-    });
-    _agentMapCache = map;
-    _agentMapCacheTime = Date.now();
-    return map;
-  } catch (e) {
-    console.warn(`[fetchAgentMap] fdGet failed: ${e.message}`);
-    return _agentMapCache || {};
-  }
-}
+// Agent name resolution lives in services/agentService.js.
 
 // ─── Check for duplicate tickets ─────────────────────────────────────────────
 app.post('/check-duplicates', async (req, res) => {
@@ -632,124 +606,17 @@ app.get('/attachment', async (req, res) => {
   }
 });
 
-/**
- * Fetches all pages of a ticket's conversations (Freshdesk max 100/page).
- * Returns a flat array of all conversation objects.
- */
-// Bulk agent map for ticket conversations — same source as fetchAgentMap.
-// Kept as a separate function name for clarity at call sites and to allow
-// future divergence (e.g. caching tier or shape).
-async function fetchAllAgents() {
-  return { ...(await fetchAgentMap()) };
-}
-
-// Per-id resolution cache (survives across requests; agent names rarely change)
-const _agentNameCache = new Map(); // id -> name | false (false = confirmed unresolvable)
-
-async function resolveAgentName(id) {
-  if (id == null) return null;
-  if (_agentNameCache.has(id)) {
-    const v = _agentNameCache.get(id);
-    return v === false ? null : v;
-  }
-  const tryGet = async (path) => {
-    try { return await fdGet(path); } catch { return null; }
-  };
-  const a = await tryGet(`/api/v2/agents/${id}`);
-  if (a) {
-    const name = a.contact?.name || a.name || a.contact?.email || null;
-    if (name) { _agentNameCache.set(id, name); return name; }
-  }
-  const c = await tryGet(`/api/v2/contacts/${id}`);
-  if (c) {
-    const name = c.name || c.email || null;
-    if (name) { _agentNameCache.set(id, name); return name; }
-  }
-  _agentNameCache.set(id, false);
-  return null;
-}
-
-// Given a base map and a list of candidate IDs, resolve missing entries via per-ID lookup.
-async function fillMissingAgentNames(baseMap, ids) {
-  const missing = [...new Set(ids.filter(id => id != null && baseMap[id] == null))];
-  if (!missing.length) return baseMap;
-  const resolved = await Promise.all(missing.map(id => resolveAgentName(id).then(name => [id, name])));
-  for (const [id, name] of resolved) {
-    if (name) baseMap[id] = name;
-  }
-  return baseMap;
-}
-
-async function fetchAllConversations(domain, auth, ticketId) {
-  const all = [];
-  let page = 1;
-  while (true) {
-    const url = `https://${domain}/api/v2/tickets/${ticketId}/conversations?per_page=100&page=${page}`;
-    const res = await fetch(url, { headers: { Authorization: auth } });
-    if (!res.ok) break;
-    const batch = await res.json();
-    if (!Array.isArray(batch) || batch.length === 0) break;
-    all.push(...batch);
-    if (batch.length < 100) break; // last page
-    page++;
-  }
-  return all;
-}
-
-// Paginated conversations via the internal session-cookie endpoint.
-// Response shape: { conversations: [...], meta: { count } } — slightly
-// different from /api/v2 which returns a bare array.
-async function fetchAllConversationsViaSession(ticketId) {
-  const all = [];
-  let page = 1;
-  while (true) {
-    const data = await fdGet(`/api/_/tickets/${ticketId}/conversations?per_page=100&page=${page}&order_type=asc&include=requester`);
-    const batch = data?.conversations || [];
-    if (batch.length === 0) break;
-    all.push(...batch);
-    if (batch.length < 100) break;
-    page++;
-  }
-  return all;
-}
-
-async function fetchTicketViaSession(ticketId) {
-  const [tWrap, conversations] = await Promise.all([
-    fdGet(`/api/_/tickets/${ticketId}?include=requester,stats`),
-    fetchAllConversationsViaSession(ticketId),
-  ]);
-  if (!tWrap?.ticket) throw new Error('Internal ticket endpoint returned no ticket');
-  return { ticket: tWrap.ticket, conversations };
-}
-
-async function fetchTicketViaApiKey(ticketId) {
-  const domain = process.env.FRESHDESK_DOMAIN;
-  const auth = getAuthHeader();
-  const tRes = await fetch(`https://${domain}/api/v2/tickets/${ticketId}?include=requester`, { headers: { Authorization: auth } });
-  if (!tRes.ok) throw new Error(`API-key ticket fetch failed ${tRes.status}`);
-  const [ticket, conversations] = await Promise.all([
-    tRes.json(),
-    fetchAllConversations(domain, auth, ticketId),
-  ]);
-  return { ticket, conversations };
-}
-
 // Fast ticket fetch — ticket + full conversation thread, no Groq.
-// Primary path: internal /api/_ endpoints via session cookie (no API rate
-// limit, conversations include inline `requester` so deactivated-agent posts
-// resolve for free). Fallback: public /api/v2 with API key.
+// Heavy lifting (session-cookie + API-key fallback, conversation pagination)
+// lives in services/ticketService.js. This handler just composes the agent
+// map on top of the returned data.
 app.get('/guided-prewarm/ticket/:id', async (req, res) => {
   const ticketId = req.params.id;
   let ticketData;
   try {
-    ticketData = await fetchTicketViaSession(ticketId);
+    ticketData = await fetchTicket(ticketId);
   } catch (err) {
-    console.warn(`[/guided-prewarm/ticket/${ticketId}] session path failed (${err.message}) — falling back to API key`);
-    try {
-      ticketData = await fetchTicketViaApiKey(ticketId);
-    } catch (apiErr) {
-      return res.status(500).json({ error: `Both ticket-fetch paths failed: ${err.message} / ${apiErr.message}` });
-    }
+    return res.status(500).json({ error: `Ticket fetch failed: ${err.message}` });
   }
   const { ticket, conversations } = ticketData;
   const agents = await fetchAllAgents();
@@ -822,19 +689,16 @@ app.get('/guided-prewarm/analyse/:id', async (req, res) => {
   const ticketId = req.params.id;
   const domain   = process.env.FRESHDESK_DOMAIN;
   const auth     = getAuthHeader();
-  console.log(`🎯 Analysing ticket #${ticketId}`);
+  console.log(`[analyse] ticket #${ticketId}`);
 
   try {
-    // Fetch ticket (include requester for email fallback)
-    const tRes = await fetch(`https://${domain}/api/v2/tickets/${ticketId}?include=requester`, { headers: { Authorization: auth } });
-    if (!tRes.ok) return res.status(500).json({ error: `Could not fetch ticket: ${tRes.status}` });
-    const ticket = await tRes.json();
+    // Ticket + conversations via the unified ticket service (session cookie
+    // primary, API-key fallback). Inline-requester data on each conversation
+    // is currently unused here but may help future refinements.
+    const { ticket, conversations: convData } = await fetchTicket(ticketId);
     const requesterEmail = ticket.requester?.email || null;
-
-    // Fetch all conversations (paginated)
-    const convData = await fetchAllConversations(domain, auth, ticketId);
     const conversationCount = convData.length;
-    console.log(`💬 Conversations: ${conversationCount}`);
+    console.log(`[analyse] ticket #${ticketId} — ${conversationCount} conversations`);
 
     // Groq: extract booking ID
     console.log(`🤖 Running Groq extraction...`);
