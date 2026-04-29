@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.5
+// @version      6.6
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -397,7 +397,7 @@ function showNoteModal(noteHtml) {
 
 
 // ── Chat modal ────────────────────────────────────────────────────────────────
-async function showChatModal(ticketId) {
+async function showChatModal(ticketId, onNotePosted) {
   const freshdeskTicketId = ticketId || getFreshdeskTicketId();
   if (!freshdeskTicketId) { showToast('No ticket detected.', 'error'); return; }
 
@@ -443,7 +443,7 @@ async function showChatModal(ticketId) {
     const noteHtml = '<p>' + text.replace(/\n/g, '<br>') + '</p>';
     const { ok } = await gmPost(`${BACKEND_URL}/post-note`, { freshdeskTicketId, noteHtml });
     postChatNoteBtn.disabled = false; postChatNoteBtn.textContent = '📋 Post as Note';
-    if (ok) { showToast('✅ Note posted!', 'success'); refreshFreshdeskTicket(); }
+    if (ok) { showToast('✅ Note posted!', 'success'); refreshFreshdeskTicket(); onNotePosted?.(); }
     else showToast('❌ Failed to post note.', 'error');
   };
   chatBtnRow.appendChild(postChatNoteBtn);
@@ -633,7 +633,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
     const chatBtnEl = document.createElement('button');
     chatBtnEl.textContent = '💬 Chat';
     chatBtnEl.style.cssText = 'padding:5px 10px;border:1px solid #e83e8c;border-radius:6px;background:#fff;color:#e83e8c;font-size:12px;font-weight:600;cursor:pointer;';
-    chatBtnEl.onclick = () => showChatModal(String(t.id));
+    chatBtnEl.onclick = () => showChatModal(String(t.id), refreshThread);
     const addNoteBtn = document.createElement('button');
     addNoteBtn.textContent = '📝 Note';
     addNoteBtn.style.cssText = 'padding:5px 10px;border:1px solid #6f42c1;border-radius:6px;background:#fff;color:#6f42c1;font-size:12px;font-weight:600;cursor:pointer;';
