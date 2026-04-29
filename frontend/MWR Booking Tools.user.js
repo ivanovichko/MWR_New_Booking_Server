@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.10
+// @version      6.11
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -1868,7 +1868,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       // Helper: build a dup row with Preview/Merge and Merge out buttons
       const buildDupRow = (dup) => {
           const row = document.createElement('div');
-          row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid #f5f5f5;';
+          row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #f5f5f5;';
           const assigneeName = dup.responder_name || (dup.responder_id ? (ticketAgents[dup.responder_id] || `#${dup.responder_id}`) : '—');
           // Freshdesk status codes: 2=Open, 3=Pending, 4=Resolved, 5=Closed (6+ are custom)
           const statusInfo = (() => {
@@ -1883,12 +1883,12 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
             }
           })();
           const statusBadge = statusInfo
-            ? `<span style="background:${statusInfo.bg};color:${statusInfo.fg};font-size:10px;font-weight:600;padding:1px 6px;border-radius:8px;white-space:nowrap;">${statusInfo.label}</span>`
+            ? `<span style="background:${statusInfo.bg};color:${statusInfo.fg};font-size:11px;font-weight:600;padding:2px 8px;border-radius:8px;white-space:nowrap;">${statusInfo.label}</span>`
             : '';
-          row.innerHTML = `<a href="https://mwrlife.freshdesk.com/a/tickets/${dup.id}" target="_blank" style="color:#007bff;font-weight:600;font-size:12px;white-space:nowrap;">#${dup.id}</a><span style="flex:1;color:#555;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${dup.subject||'—'}</span>${statusBadge}<span style="color:#6f42c1;font-size:10px;white-space:nowrap;" title="Assigned to">${assigneeName}</span><span style="color:#aaa;font-size:10px;white-space:nowrap;">${(dup.matchedBy||[]).join(', ')}</span>`;
+          row.innerHTML = `<a href="https://mwrlife.freshdesk.com/a/tickets/${dup.id}" target="_blank" style="color:#007bff;font-weight:600;font-size:14px;white-space:nowrap;">#${dup.id}</a><span style="flex:1;color:#444;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${dup.subject||'—'}</span>${statusBadge}<span style="color:#6f42c1;font-size:12px;white-space:nowrap;font-weight:500;" title="Assigned to">${assigneeName}</span><span style="color:#aaa;font-size:11px;white-space:nowrap;">${(dup.matchedBy||[]).join(', ')}</span>`;
             const previewBtn = document.createElement('button');
             previewBtn.textContent = 'Preview / Merge';
-            previewBtn.style.cssText = 'padding:1px 6px;border:1px solid #fd7e14;border-radius:4px;background:#fff;color:#fd7e14;font-size:10px;cursor:pointer;flex-shrink:0;font-weight:500;';
+            previewBtn.style.cssText = 'padding:3px 8px;border:1px solid #fd7e14;border-radius:4px;background:#fff;color:#fd7e14;font-size:11px;cursor:pointer;flex-shrink:0;font-weight:500;';
             previewBtn.onclick = async () => {
               previewBtn.disabled = true; previewBtn.textContent = '⏳';
               const { ok: tok, data: td } = await gmGet(`${BACKEND_URL}/guided-prewarm/ticket/${dup.id}`);
@@ -2016,7 +2016,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
             };
             const mergeOutBtn = document.createElement('button');
             mergeOutBtn.textContent = '📤 Merge out';
-            mergeOutBtn.style.cssText = 'padding:1px 6px;border:1px solid #6c757d;border-radius:4px;background:#fff;color:#6c757d;font-size:10px;cursor:pointer;flex-shrink:0;font-weight:500;';
+            mergeOutBtn.style.cssText = 'padding:3px 8px;border:1px solid #6c757d;border-radius:4px;background:#fff;color:#6c757d;font-size:11px;cursor:pointer;flex-shrink:0;font-weight:500;';
             mergeOutBtn.onclick = async () => {
               mergeOutBtn.disabled = true; mergeOutBtn.textContent = '⏳';
               const { ok: tok, data: td } = await gmGet(`${BACKEND_URL}/guided-prewarm/ticket/${t.id}`);
