@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.12
+// @version      6.13
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -753,6 +753,22 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
     const summarizeBtn = document.createElement('button');
     summarizeBtn.textContent = '✨ Summarize';
     summarizeBtn.style.cssText = 'padding:3px 9px;border:1px solid #6f42c1;border-radius:4px;background:#fff;color:#6f42c1;font-size:11px;font-weight:500;cursor:pointer;';
+    // Collapse All — sits next to Summarize in the card header. Visibility +
+    // state are reset by refreshThread (which builds the message list).
+    const collapseAllBtn = document.createElement('button');
+    collapseAllBtn.textContent = '⊟ Collapse All';
+    collapseAllBtn.style.cssText = 'padding:3px 9px;border:1px solid #ccc;border-radius:4px;background:#fff;color:#666;font-size:11px;font-weight:500;cursor:pointer;display:none;';
+    let collapseAllState = false;
+    collapseAllBtn.onclick = () => {
+      collapseAllState = !collapseAllState;
+      descEl.querySelectorAll('[data-collapsible]').forEach(el => {
+        el.style.display = collapseAllState ? 'none' : '';
+      });
+      descEl.querySelectorAll('[data-chevron]').forEach(el => {
+        el.style.transform = collapseAllState ? '' : 'rotate(90deg)';
+      });
+      collapseAllBtn.textContent = collapseAllState ? '⊞ Expand All' : '⊟ Collapse All';
+    };
     // ── Inline subject editor ──────────────────────────────────────────────────
     const editSubjectBtn = document.createElement('button');
     editSubjectBtn.textContent = '✏️';
@@ -818,6 +834,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
         setTimeout(() => { copyLinkBtn.textContent = '🔗 Copy'; }, 1500);
       });
     };
+    cardActions.appendChild(collapseAllBtn);
     cardActions.appendChild(summarizeBtn);
     cardActions.appendChild(editSubjectBtn);
     cardActions.appendChild(copyLinkBtn);
@@ -1029,24 +1046,11 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
 
         if (!descEl.children.length) descEl.innerHTML = '<span style="color:#999;">(no content)</span>';
 
-        // Collapse All button — inserted before the first message
-        if (descEl.children.length > 1) {
-          const collapseAllBtn = document.createElement('button');
-          collapseAllBtn.textContent = '⊟ Collapse All';
-          collapseAllBtn.style.cssText = 'display:block;margin-bottom:6px;padding:3px 10px;border:1px solid #ccc;border-radius:4px;background:#fff;color:#666;font-size:11px;cursor:pointer;';
-          let allCollapsed = false;
-          collapseAllBtn.onclick = () => {
-            allCollapsed = !allCollapsed;
-            descEl.querySelectorAll('[data-collapsible]').forEach(el => {
-              el.style.display = allCollapsed ? 'none' : '';
-            });
-            descEl.querySelectorAll('[data-chevron]').forEach(el => {
-              el.style.transform = allCollapsed ? '' : 'rotate(90deg)';
-            });
-            collapseAllBtn.textContent = allCollapsed ? '⊞ Expand All' : '⊟ Collapse All';
-          };
-          descEl.insertBefore(collapseAllBtn, descEl.firstChild);
-        }
+        // Reset Collapse All button (lives in cardActions). Show it only when
+        // there is more than one message; messages start expanded after a refresh.
+        collapseAllState = false;
+        collapseAllBtn.textContent = '⊟ Collapse All';
+        collapseAllBtn.style.display = (descEl.children.length > 1) ? '' : 'none';
         renderStatusTagBar(td.ticket);
         // Scroll to bottom of thread on every load/refresh
         requestAnimationFrame(() => { descEl.scrollTop = descEl.scrollHeight; });
