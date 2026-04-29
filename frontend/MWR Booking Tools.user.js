@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.6
+// @version      6.7
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -2054,7 +2054,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
         }
         if (dups.length) {
           const hdr = document.createElement('div');
-          hdr.style.cssText = 'font-weight:600;font-size:13px;color:#856404;margin-bottom:6px;';
+          hdr.style.cssText = 'font-weight:700;font-size:18px;color:#856404;margin-bottom:10px;letter-spacing:0.2px;';
           hdr.textContent = `⚠️ ${dups.length} open thread${dups.length > 1 ? 's' : ''} found`;
           dupSection.appendChild(hdr);
           dups.forEach(dup => dupSection.appendChild(buildDupRow(dup)));
