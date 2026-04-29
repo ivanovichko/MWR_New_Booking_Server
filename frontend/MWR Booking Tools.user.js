@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.7
+// @version      6.8
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -1076,16 +1076,6 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       });
       statusTagBar.appendChild(sel);
 
-      const updateStatusBtn = document.createElement('button');
-      updateStatusBtn.textContent = 'Update';
-      updateStatusBtn.style.cssText = 'padding:2px 8px;border:none;border-radius:4px;background:#007bff;color:#fff;font-size:11px;cursor:pointer;font-weight:500;';
-      updateStatusBtn.onclick = () => withButtonLoading(updateStatusBtn, '⏳', async () => {
-        const { ok } = await gmPost(`${BACKEND_URL}/update-ticket`, { ticketId: String(t.id), fields: { status: Number(sel.value) } });
-        if (ok) { showToast('✅ Status updated', 'success', 2000); refreshThread(); }
-        else showToast('❌ Failed to update status', 'error');
-      });
-      statusTagBar.appendChild(updateStatusBtn);
-
       // ── Divider ────────────────────────────────────────────────────────────
       const divider = document.createElement('span');
       divider.style.cssText = 'color:#ddd;font-size:14px;';
@@ -1109,21 +1099,59 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       });
       statusTagBar.appendChild(prioritySel);
 
-      const updatePriorityBtn = document.createElement('button');
-      updatePriorityBtn.textContent = 'Update';
-      updatePriorityBtn.style.cssText = 'padding:2px 8px;border:none;border-radius:4px;background:#007bff;color:#fff;font-size:11px;cursor:pointer;font-weight:500;';
-      updatePriorityBtn.onclick = () => withButtonLoading(updatePriorityBtn, '⏳', async () => {
-        const { ok } = await gmPost(`${BACKEND_URL}/update-ticket`, { ticketId: String(t.id), fields: { priority: Number(prioritySel.value) } });
-        if (ok) { showToast('✅ Priority updated', 'success', 2000); refreshThread(); }
-        else showToast('❌ Failed to update priority', 'error');
-      });
-      statusTagBar.appendChild(updatePriorityBtn);
-
       // ── Divider ────────────────────────────────────────────────────────────
       const divider2 = document.createElement('span');
       divider2.style.cssText = 'color:#ddd;font-size:14px;';
       divider2.textContent = '|';
       statusTagBar.appendChild(divider2);
+
+      // ── Assignee section ───────────────────────────────────────────────────
+      const agentLabel = document.createElement('span');
+      agentLabel.style.cssText = 'color:#888;font-weight:500;white-space:nowrap;';
+      agentLabel.textContent = 'Assignee:';
+      statusTagBar.appendChild(agentLabel);
+
+      const agentSel = document.createElement('select');
+      agentSel.style.cssText = 'padding:2px 6px;border:1px solid #ddd;border-radius:4px;font-size:12px;background:#fff;cursor:pointer;max-width:180px;';
+      const unassignedOpt = document.createElement('option');
+      unassignedOpt.value = ''; unassignedOpt.textContent = 'Unassigned';
+      if (!ticket.responder_id) unassignedOpt.selected = true;
+      agentSel.appendChild(unassignedOpt);
+      const sortedAgents = Object.entries(ticketAgents)
+        .map(([id, name]) => ({ id, name: name || `#${id}` }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+      sortedAgents.forEach(({ id, name }) => {
+        const opt = document.createElement('option');
+        opt.value = id; opt.textContent = name;
+        if (Number(id) === ticket.responder_id) opt.selected = true;
+        agentSel.appendChild(opt);
+      });
+      statusTagBar.appendChild(agentSel);
+
+      // ── Single Update button — pushes status, priority, and assignee ───────
+      const updateBtn = document.createElement('button');
+      updateBtn.textContent = 'Update';
+      updateBtn.style.cssText = 'padding:2px 10px;border:none;border-radius:4px;background:#007bff;color:#fff;font-size:11px;cursor:pointer;font-weight:600;margin-left:4px;';
+      updateBtn.onclick = () => withButtonLoading(updateBtn, '⏳', async () => {
+        const fields = {};
+        const newStatus    = Number(sel.value);
+        const newPriority  = Number(prioritySel.value);
+        const newResponder = agentSel.value === '' ? null : Number(agentSel.value);
+        if (newStatus    !== ticket.status)               fields.status        = newStatus;
+        if (newPriority  !== ticket.priority)             fields.priority      = newPriority;
+        if (newResponder !== (ticket.responder_id||null)) fields.responder_id  = newResponder;
+        if (!Object.keys(fields).length) { showToast('No changes to save', 'info', 1500); return; }
+        const { ok } = await gmPost(`${BACKEND_URL}/update-ticket`, { ticketId: String(t.id), fields });
+        if (ok) { showToast('✅ Ticket updated', 'success', 2000); refreshThread(); }
+        else showToast('❌ Update failed', 'error');
+      });
+      statusTagBar.appendChild(updateBtn);
+
+      // ── Divider before Tags ────────────────────────────────────────────────
+      const divider3 = document.createElement('span');
+      divider3.style.cssText = 'color:#ddd;font-size:14px;';
+      divider3.textContent = '|';
+      statusTagBar.appendChild(divider3);
 
       // ── Tags section ───────────────────────────────────────────────────────
       const tagsLabel = document.createElement('span');
