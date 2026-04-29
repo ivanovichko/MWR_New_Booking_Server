@@ -1091,6 +1091,54 @@ app.delete('/settings/macros/:id', async (req, res) => {
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ─── Quick translation via Google Translate (free public endpoint) ───────────
+// Used by per-message and per-reply translate buttons. Faster + cheaper than
+// routing through Groq for simple translations. The chat cleanup flow stays
+// on Groq because it does cleanup + translation + summary in one shot.
+const LANG_NAME_TO_CODE = {
+  english:'en', spanish:'es', french:'fr', portuguese:'pt', italian:'it',
+  german:'de', russian:'ru', dutch:'nl', arabic:'ar', chinese:'zh-CN',
+  japanese:'ja', korean:'ko', polish:'pl', turkish:'tr', hindi:'hi',
+  greek:'el', hebrew:'he', romanian:'ro', czech:'cs', swedish:'sv',
+  danish:'da', finnish:'fi', norwegian:'no', hungarian:'hu', ukrainian:'uk',
+  bulgarian:'bg', vietnamese:'vi', thai:'th', indonesian:'id', malay:'ms',
+  filipino:'tl', tagalog:'tl', mongolian:'mn', persian:'fa', farsi:'fa',
+  urdu:'ur', bengali:'bn', tamil:'ta', telugu:'te', marathi:'mr',
+  croatian:'hr', serbian:'sr', slovak:'sk', slovene:'sl', slovenian:'sl',
+  estonian:'et', latvian:'lv', lithuanian:'lt', albanian:'sq',
+  catalan:'ca', galician:'gl', basque:'eu', welsh:'cy', irish:'ga',
+  swahili:'sw',
+};
+
+function normalizeLang(input, fallback = 'en') {
+  if (!input) return fallback;
+  const t = String(input).trim().toLowerCase();
+  if (t === 'auto') return 'auto';
+  if (/^[a-z]{2}(-[a-z]{2,4})?$/i.test(t)) return t;
+  return LANG_NAME_TO_CODE[t] || fallback;
+}
+
+app.post('/translate', async (req, res) => {
+  const { text, target = 'en', source = 'auto' } = req.body || {};
+  if (!text || typeof text !== 'string') return res.status(400).json({ error: 'text required' });
+  const tl = normalizeLang(target, 'en');
+  const sl = normalizeLang(source, 'auto');
+  try {
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${sl}&tl=${tl}&dt=t&q=${encodeURIComponent(text)}`;
+    const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    if (!r.ok) throw new Error(`Google Translate returned ${r.status}`);
+    const data = await r.json();
+    const translated = (Array.isArray(data?.[0]) ? data[0] : [])
+      .map(seg => seg?.[0] || '')
+      .join('');
+    const detectedLang = data?.[2] || null;
+    res.json({ success: true, text: translated, detectedLang });
+  } catch (err) {
+    console.error('[/translate] failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── AI assist ────────────────────────────────────────────────────────────────
 app.post('/ai-assist', async (req, res) => {
   const { booking, details, user, supplier, prompt, freshdeskTicketId } = req.body;

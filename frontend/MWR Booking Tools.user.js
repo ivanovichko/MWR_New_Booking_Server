@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.9
+// @version      6.10
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -835,16 +835,12 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
           btn.onclick = async () => {
             btn.disabled = true; btn.textContent = '⏳';
             const text = getText();
-            const prompt = 'Translate the following to English. Output ONLY the translated text — no notes, no headers, no labels, no markdown, no separators, no explanations, no commentary about your translation. The response must contain nothing except the translated text.\n\n' + text;
-            const { ok: aok, data: aiData } = await gmPost(BACKEND_URL + '/ai-assist', {
-              booking: {}, details: {}, user: null, supplier: null,
-              freshdeskTicketId: String(t.id), prompt,
-            });
+            const { ok, data } = await gmPost(BACKEND_URL + '/translate', { text, target: 'en' });
             const parent = btn.parentElement;
             btn.remove();
             const resultEl = document.createElement('div');
             resultEl.style.cssText = 'margin-top:6px;padding:6px 8px;background:#f0fffe;border:1px solid #17a2b8;border-radius:4px;font-size:12px;color:#333;white-space:pre-wrap;';
-            resultEl.textContent = (aok && aiData.text) ? stripTranslationNoise(aiData.text) : '❌ Translation failed.';
+            resultEl.textContent = (ok && data?.text) ? data.text : '❌ Translation failed.';
             parent && parent.appendChild(resultEl);
           };
           return btn;
@@ -3553,15 +3549,11 @@ function showReplyComposer(recipientType, toEmail, booking, details, user, suppl
       const textToTranslate = lines.slice(0, cutIdx).join('\n').trim();
       if (!textToTranslate) { showToast('Nothing to translate after stripping sign-off.', 'warning'); return; }
 
-      const lang = langInput.value.trim() || detectedLang || 'the customer\'s language';
-      const prompt = 'Translate the following text to ' + lang + '. Output ONLY the translated text — no notes, no headers, no labels, no markdown, no separators, no explanations, no commentary about your translation. The response must contain nothing except the translated text.\n\n' + textToTranslate;
-      const { ok, data: aiData } = await gmPost(BACKEND_URL + '/ai-assist', {
-        booking: booking || {}, details: details || {}, user, supplier: supplier || null,
-        freshdeskTicketId: getFreshdeskTicketId(), prompt,
-      });
-      if (!ok || !aiData.text) { showToast('Translation failed.', 'error'); return; }
+      const lang = langInput.value.trim() || detectedLang || 'en';
+      const { ok, data } = await gmPost(BACKEND_URL + '/translate', { text: textToTranslate, target: lang });
+      if (!ok || !data?.text) { showToast('Translation failed.', 'error'); return; }
 
-      const translatedHtml = stripTranslationNoise(aiData.text).replace(/\n/g, '<br>');
+      const translatedHtml = data.text.replace(/\n/g, '<br>');
       // Both translation and original go into replyArea so both are sent.
       // No border wrappers — borders were what caused Enter to clone a
       // visually outlined section inside contenteditable.
