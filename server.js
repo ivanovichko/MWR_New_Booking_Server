@@ -1128,8 +1128,12 @@ app.post('/translate', async (req, res) => {
     const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     if (!r.ok) throw new Error(`Google Translate returned ${r.status}`);
     const data = await r.json();
+    // Google's response is an array of segments — each is
+    // [translated, original, ...]. Whitespace/newline segments often have an
+    // empty translation but carry the original chunk in seg[1]; falling back
+    // to seg[1] preserves paragraph breaks and other inter-sentence whitespace.
     const translated = (Array.isArray(data?.[0]) ? data[0] : [])
-      .map(seg => seg?.[0] || '')
+      .map(seg => seg?.[0] || seg?.[1] || '')
       .join('');
     const detectedLang = data?.[2] || null;
     res.json({ success: true, text: translated, detectedLang });
