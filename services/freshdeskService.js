@@ -167,9 +167,59 @@ async function addNoteWithImagesViaApiKey(ticketId, bodyHtml) {
 }
 
 /**
- * Sends an outbound reply email from the ticket to the hotel.
+ * Sends an outbound reply email from the ticket.
+ * Primary path: /api/_/tickets/{id}/reply via session cookie. Inline data:
+ * images in the body are uploaded to /api/_/attachments and embedded as
+ * tokenized inline_url references — same flow as note-with-images.
+ * Fallback: public /api/v2 reply with API key (loses inline images).
  */
 async function sendEmail(ticketId, toEmail, subject, bodyHtml) {
+  // Extract inline data: images
+  const dataUrlRe = /src="(data:([^;]+);base64,([^"]+))"/g;
+  const images = [];
+  let m;
+  while ((m = dataUrlRe.exec(bodyHtml)) !== null) {
+    const [, fullDataUrl, mimeType, base64Data] = m;
+    images.push({ fullDataUrl, mimeType, buffer: Buffer.from(base64Data, 'base64') });
+  }
+
+  // ── Primary path: session cookie via /api/_/tickets/{id}/reply ─────────────
+  try {
+    let finalHtml = bodyHtml;
+    const inlineIds = [];
+    if (images.length > 0) {
+      const uploaded = await Promise.all(images.map((img, i) => {
+        const ext = img.mimeType.split('/')[1]?.replace('jpeg', 'jpg') || 'png';
+        return uploadInlineAttachment(img.buffer, `inline-${Date.now()}-${i}.${ext}`, img.mimeType);
+      }));
+      images.forEach((img, i) => {
+        const att = uploaded[i];
+        inlineIds.push(att.id);
+        finalHtml = finalHtml.replace(
+          `src="${img.fullDataUrl}"`,
+          `src="${att.inline_url}" data-id="${att.id}"`
+        );
+      });
+    }
+    return await fdPost(`/api/_/tickets/${ticketId}/reply`, JSON.stringify({
+      body: finalHtml,
+      attachment_ids: [],
+      cloud_files: [],
+      cc_emails: [],
+      bcc_emails: [],
+      reply_ticket_id: Number(ticketId),
+      to_emails: [toEmail],
+      inline_attachment_ids: inlineIds,
+    }), { 'Content-Type': 'application/json' });
+  } catch (err) {
+    console.warn(`⚠️ sendEmail session path failed (${err.message}) — falling back to API-key`);
+  }
+
+  // ── Fallback: API-key /api/v2/.../reply (no inline image support) ──────────
+  return sendEmailViaApiKey(ticketId, toEmail, bodyHtml);
+}
+
+async function sendEmailViaApiKey(ticketId, toEmail, bodyHtml) {
   const response = await fetch(`${getBaseUrl()}/tickets/${ticketId}/reply`, {
     method: 'POST',
     headers: {
