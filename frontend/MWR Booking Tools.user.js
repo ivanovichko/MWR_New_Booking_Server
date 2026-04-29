@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.11
+// @version      6.12
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -710,9 +710,35 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
     replyPanelWrapper.appendChild(replyPanelToggle);
     replyPanelWrapper.appendChild(replyPanelContent);
 
+    // ── Note panel — its own collapsible, sibling of Reply ─────────────────
+    const notePanelWrapper = document.createElement('div');
+    notePanelWrapper.style.cssText = 'border:1px solid #eee;border-radius:8px;overflow:hidden;flex-shrink:0;';
+    let notePanelExpanded = false;
+    let notePanelInitialized = false;
+    const notePanelToggle = document.createElement('div');
+    notePanelToggle.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:8px 14px;background:#f8f9fa;cursor:pointer;user-select:none;border-bottom:1px solid transparent;';
+    notePanelToggle.innerHTML = '<span style="font-size:12px;font-weight:600;color:#6f42c1;">📝 Note</span><span style="font-size:11px;color:#aaa;">▶ expand</span>';
+    const notePanelContent = document.createElement('div');
+    notePanelContent.style.display = 'none';
+    notePanelContent.style.padding = '10px 14px';
+    notePanelToggle.onclick = () => {
+      notePanelExpanded = !notePanelExpanded;
+      notePanelContent.style.display = notePanelExpanded ? '' : 'none';
+      notePanelToggle.style.borderBottomColor = notePanelExpanded ? '#eee' : 'transparent';
+      notePanelToggle.querySelector('span:last-child').textContent = notePanelExpanded ? '▼ collapse' : '▶ expand';
+      // Lazy-render the editor on first expand so we capture the (by then defined) buildNoteTabContent.
+      if (notePanelExpanded && !notePanelInitialized) {
+        buildNoteTabContent(notePanelContent);
+        notePanelInitialized = true;
+      }
+    };
+    notePanelWrapper.appendChild(notePanelToggle);
+    notePanelWrapper.appendChild(notePanelContent);
+
     columns.appendChild(leftCol); columns.appendChild(rightCol);
     body.appendChild(columns);
     body.appendChild(replyPanelWrapper);
+    body.appendChild(notePanelWrapper);
 
     // Ticket card with description — fetch immediately (fast, no Groq)
     const card = document.createElement('div');
@@ -1460,19 +1486,10 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
               replyBody.style.cssText = 'padding:10px 14px;';
               const custTab = document.createElement('button');
               custTab.textContent = '📩 Customer';
-              const noteTab = document.createElement('button');
-              noteTab.textContent = '📝 Note';
-              const setActive = (which) => {
-                custTab.style.cssText = rts('#0056d2', which === 'cust');
-                noteTab.style.cssText = rts('#6f42c1', which === 'note');
-              };
-              custTab.onclick = () => { setActive('cust'); replyBody.innerHTML = ''; showReplyComposer('customer', u.email, {}, {}, pickedUser, null, replyBody, refreshThread, String(t.id)); };
-              noteTab.onclick = () => { setActive('note'); buildNoteTabContent(replyBody); };
+              custTab.style.cssText = rts('#0056d2', true);
               tabBar.appendChild(custTab);
-              tabBar.appendChild(noteTab);
               replyPanelContent.appendChild(tabBar);
               replyPanelContent.appendChild(replyBody);
-              setActive('cust');
               showReplyComposer('customer', u.email, {}, {}, pickedUser, null, replyBody, refreshThread, String(t.id));
               replyPanelExpanded = true;
               replyPanelContent.style.display = '';
@@ -1502,6 +1519,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       customerSection.innerHTML = '<div style="color:#999;font-size:11px;">No member data</div>';
 
       if (!bd) {
+        replyPanelWrapper.style.display = 'none';
         const msg = document.createElement('div');
         msg.style.cssText = 'color:#dc3545;font-size:12px;margin-bottom:8px;';
         msg.textContent = currentBookingId ? `⚠️ Could not fetch booking for "${currentBookingId}".` : '⚠️ No booking ID found in this ticket.';
@@ -1532,38 +1550,24 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
         confirmBtn.disabled = true; confirmBtn.style.opacity = '0.4';
         // Populate customer section from userData fallback (no booking found)
         renderCustomerSection(userData || null);
-        // Reply panel — always shown with at least a Note tab; Customer tab too if email exists
-        replyPanelWrapper.style.display = '';
-        replyPanelContent.innerHTML = '';
-        const rTabStyle = (color, active) =>
-          `padding:8px 16px;border:none;border-bottom:2px solid ${active ? color : 'transparent'};background:${active ? '#fff' : 'transparent'};color:${color};font-size:12px;font-weight:600;cursor:pointer;`;
-        const replyTabBar = document.createElement('div');
-        replyTabBar.style.cssText = 'display:flex;background:#f8f9fa;border-bottom:1px solid #eee;';
-        const replyBody = document.createElement('div');
-        replyBody.style.cssText = 'padding:10px 14px;';
-        let custTabBtn = null;
-        const noteTabBtn = document.createElement('button');
-        noteTabBtn.textContent = '📝 Note';
-        const setActive = (which) => {
-          if (custTabBtn) custTabBtn.style.cssText = rTabStyle('#0056d2', which === 'cust');
-          noteTabBtn.style.cssText = rTabStyle('#6f42c1', which === 'note');
-        };
+        // Enable reply panel if we have a customer email
         if (userData && userData.email) {
-          custTabBtn = document.createElement('button');
+          replyPanelWrapper.style.display = '';
+          replyPanelContent.innerHTML = '';
+          const rTabStyle = (color, active) =>
+            `padding:8px 16px;border:none;border-bottom:2px solid ${active ? color : 'transparent'};background:${active ? '#fff' : 'transparent'};color:${color};font-size:12px;font-weight:600;cursor:pointer;`;
+          const replyTabBar = document.createElement('div');
+          replyTabBar.style.cssText = 'display:flex;background:#f8f9fa;border-bottom:1px solid #eee;';
+          const replyBody = document.createElement('div');
+          replyBody.style.cssText = 'padding:10px 14px;';
+          const custTabBtn = document.createElement('button');
           custTabBtn.textContent = '📩 Customer';
-          custTabBtn.onclick = () => { setActive('cust'); replyBody.innerHTML = ''; showReplyComposer('customer', userData.email, {}, {}, userData, null, replyBody, refreshThread, String(t.id)); };
+          custTabBtn.style.cssText = rTabStyle('#0056d2', true);
+          custTabBtn.onclick = () => showReplyComposer('customer', userData.email, {}, {}, userData, null, replyBody, refreshThread, String(t.id));
           replyTabBar.appendChild(custTabBtn);
-        }
-        noteTabBtn.onclick = () => { setActive('note'); buildNoteTabContent(replyBody); };
-        replyTabBar.appendChild(noteTabBtn);
-        replyPanelContent.appendChild(replyTabBar);
-        replyPanelContent.appendChild(replyBody);
-        if (custTabBtn) {
-          setActive('cust');
+          replyPanelContent.appendChild(replyTabBar);
+          replyPanelContent.appendChild(replyBody);
           showReplyComposer('customer', userData.email, {}, {}, userData, null, replyBody, refreshThread, String(t.id));
-        } else {
-          setActive('note');
-          buildNoteTabContent(replyBody);
         }
         return;
       }
@@ -1709,19 +1713,11 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       custTabBtn.textContent = '📩 Customer';
       const suppTabBtn = document.createElement('button');
       suppTabBtn.textContent = '📤 Supplier';
-      const noteTabBtn = document.createElement('button');
-      noteTabBtn.textContent = '📝 Note';
 
       const setReplyTab = (type) => {
         custTabBtn.style.cssText = rTabStyle('#0056d2', type === 'customer');
         suppTabBtn.style.cssText = rTabStyle('#28a745', type === 'supplier');
-        noteTabBtn.style.cssText = rTabStyle('#6f42c1', type === 'note');
         replyBody.innerHTML = '';
-
-        if (type === 'note') {
-          buildNoteTabContent(replyBody);
-          return;
-        }
 
         if (type === 'customer') {
           if (!customerEmail) {
@@ -1831,8 +1827,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
 
       custTabBtn.onclick = () => setReplyTab('customer');
       suppTabBtn.onclick = () => setReplyTab('supplier');
-      noteTabBtn.onclick = () => setReplyTab('note');
-      replyTabBar.appendChild(custTabBtn); replyTabBar.appendChild(suppTabBtn); replyTabBar.appendChild(noteTabBtn);
+      replyTabBar.appendChild(custTabBtn); replyTabBar.appendChild(suppTabBtn);
       replyPanelContent.innerHTML = '';
       replyPanelContent.appendChild(replyTabBar); replyPanelContent.appendChild(replyBody);
       setReplyTab(customerEmail ? 'customer' : 'supplier');
