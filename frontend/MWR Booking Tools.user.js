@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.8
+// @version      6.9
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -634,11 +634,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
     chatBtnEl.textContent = '💬 Chat';
     chatBtnEl.style.cssText = 'padding:5px 10px;border:1px solid #e83e8c;border-radius:6px;background:#fff;color:#e83e8c;font-size:12px;font-weight:600;cursor:pointer;';
     chatBtnEl.onclick = () => showChatModal(String(t.id), refreshThread);
-    const addNoteBtn = document.createElement('button');
-    addNoteBtn.textContent = '📝 Note';
-    addNoteBtn.style.cssText = 'padding:5px 10px;border:1px solid #6f42c1;border-radius:6px;background:#fff;color:#6f42c1;font-size:12px;font-weight:600;cursor:pointer;';
     btnRow.appendChild(confirmBtn);
-    btnRow.appendChild(addNoteBtn);
     btnRow.appendChild(backBtn);
     btnRow.appendChild(skipBtn);
     btnRow.appendChild(closeTicketBtn);
@@ -1055,6 +1051,68 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
     };
     refreshThread();
 
+    // ── Note tab content — drops a paste-aware editor + post button into `body` ─
+    const buildNoteTabContent = (body) => {
+      body.innerHTML = '';
+      const editor = document.createElement('div');
+      editor.contentEditable = 'true';
+      editor.style.cssText = 'min-height:80px;max-height:220px;overflow-y:auto;border:1px solid #ddd;border-radius:5px;padding:8px 10px;font-size:13px;font-family:system-ui,sans-serif;line-height:1.5;color:#333;outline:none;';
+      editor.setAttribute('data-placeholder', 'Type note here… or paste an image (Ctrl+V)');
+      const phStyle = document.createElement('style');
+      phStyle.textContent = '[data-placeholder]:empty:before{content:attr(data-placeholder);color:#aaa;pointer-events:none;}';
+      body.appendChild(phStyle);
+      editor.addEventListener('paste', (e) => {
+        const items = e.clipboardData && e.clipboardData.items;
+        if (!items) return;
+        for (const item of items) {
+          if (item.type.startsWith('image/')) {
+            e.preventDefault();
+            const file = item.getAsFile();
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+              const img = document.createElement('img');
+              img.src = ev.target.result;
+              img.style.cssText = 'max-width:100%;height:auto;display:block;margin:4px 0;border-radius:3px;';
+              const sel = window.getSelection();
+              if (sel && sel.rangeCount) {
+                const range = sel.getRangeAt(0);
+                range.deleteContents();
+                range.insertNode(img);
+                range.setStartAfter(img);
+                range.collapse(true);
+                sel.removeAllRanges();
+                sel.addRange(range);
+              } else {
+                editor.appendChild(img);
+              }
+            };
+            reader.readAsDataURL(file);
+            return;
+          }
+        }
+      });
+      body.appendChild(editor);
+      const actionsRow = document.createElement('div');
+      actionsRow.style.cssText = 'display:flex;gap:8px;margin-top:8px;';
+      const postBtn = document.createElement('button');
+      postBtn.textContent = '📤 Post Note';
+      postBtn.style.cssText = 'padding:7px 16px;border:none;border-radius:6px;background:#6f42c1;color:#fff;font-size:13px;font-weight:600;cursor:pointer;';
+      postBtn.onclick = () => withButtonLoading(postBtn, '⏳ Posting...', async () => {
+        const html = editor.innerHTML.trim();
+        if (!html) { showToast('Note is empty.', 'warning'); return; }
+        const { ok } = await gmPost(`${BACKEND_URL}/post-note`, { freshdeskTicketId: String(t.id), noteHtml: html });
+        if (ok) { editor.innerHTML = ''; showToast('✅ Note posted!', 'success', 2000); refreshThread(); }
+        else showToast('❌ Failed to post note.', 'error');
+      });
+      const clearBtn = document.createElement('button');
+      clearBtn.textContent = 'Clear';
+      clearBtn.style.cssText = 'padding:7px 12px;border:1px solid #ddd;border-radius:6px;background:#fff;color:#666;font-size:13px;cursor:pointer;';
+      clearBtn.onclick = () => { editor.innerHTML = ''; editor.focus(); };
+      actionsRow.appendChild(postBtn); actionsRow.appendChild(clearBtn);
+      body.appendChild(actionsRow);
+      setTimeout(() => editor.focus(), 30);
+    };
+
     // ── Status + tag bar renderer ──────────────────────────────────────────────
     const renderStatusTagBar = (ticket) => {
       statusTagBar.innerHTML = '';
@@ -1406,10 +1464,19 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
               replyBody.style.cssText = 'padding:10px 14px;';
               const custTab = document.createElement('button');
               custTab.textContent = '📩 Customer';
-              custTab.style.cssText = rts('#0056d2', true);
+              const noteTab = document.createElement('button');
+              noteTab.textContent = '📝 Note';
+              const setActive = (which) => {
+                custTab.style.cssText = rts('#0056d2', which === 'cust');
+                noteTab.style.cssText = rts('#6f42c1', which === 'note');
+              };
+              custTab.onclick = () => { setActive('cust'); replyBody.innerHTML = ''; showReplyComposer('customer', u.email, {}, {}, pickedUser, null, replyBody, refreshThread, String(t.id)); };
+              noteTab.onclick = () => { setActive('note'); buildNoteTabContent(replyBody); };
               tabBar.appendChild(custTab);
+              tabBar.appendChild(noteTab);
               replyPanelContent.appendChild(tabBar);
               replyPanelContent.appendChild(replyBody);
+              setActive('cust');
               showReplyComposer('customer', u.email, {}, {}, pickedUser, null, replyBody, refreshThread, String(t.id));
               replyPanelExpanded = true;
               replyPanelContent.style.display = '';
@@ -1439,7 +1506,6 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       customerSection.innerHTML = '<div style="color:#999;font-size:11px;">No member data</div>';
 
       if (!bd) {
-        replyPanelWrapper.style.display = 'none';
         const msg = document.createElement('div');
         msg.style.cssText = 'color:#dc3545;font-size:12px;margin-bottom:8px;';
         msg.textContent = currentBookingId ? `⚠️ Could not fetch booking for "${currentBookingId}".` : '⚠️ No booking ID found in this ticket.';
@@ -1470,28 +1536,39 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
         confirmBtn.disabled = true; confirmBtn.style.opacity = '0.4';
         // Populate customer section from userData fallback (no booking found)
         renderCustomerSection(userData || null);
-        // Enable reply panel if we have a customer email
+        // Reply panel — always shown with at least a Note tab; Customer tab too if email exists
+        replyPanelWrapper.style.display = '';
+        replyPanelContent.innerHTML = '';
+        const rTabStyle = (color, active) =>
+          `padding:8px 16px;border:none;border-bottom:2px solid ${active ? color : 'transparent'};background:${active ? '#fff' : 'transparent'};color:${color};font-size:12px;font-weight:600;cursor:pointer;`;
+        const replyTabBar = document.createElement('div');
+        replyTabBar.style.cssText = 'display:flex;background:#f8f9fa;border-bottom:1px solid #eee;';
+        const replyBody = document.createElement('div');
+        replyBody.style.cssText = 'padding:10px 14px;';
+        let custTabBtn = null;
+        const noteTabBtn = document.createElement('button');
+        noteTabBtn.textContent = '📝 Note';
+        const setActive = (which) => {
+          if (custTabBtn) custTabBtn.style.cssText = rTabStyle('#0056d2', which === 'cust');
+          noteTabBtn.style.cssText = rTabStyle('#6f42c1', which === 'note');
+        };
         if (userData && userData.email) {
-            replyPanelWrapper.style.display = '';
-            replyPanelContent.innerHTML = '';
-            const rTabStyle = (color, active) =>
-              `padding:8px 16px;border:none;border-bottom:2px solid ${active ? color : 'transparent'};background:${active ? '#fff' : 'transparent'};color:${color};font-size:12px;font-weight:600;cursor:pointer;`;
-            const replyTabBar = document.createElement('div');
-            replyTabBar.style.cssText = 'display:flex;background:#f8f9fa;border-bottom:1px solid #eee;';
-            const replyBody = document.createElement('div');
-            replyBody.style.cssText = 'padding:10px 14px;';
-            const custTabBtn = document.createElement('button');
-            custTabBtn.textContent = '📩 Customer';
-            custTabBtn.style.cssText = rTabStyle('#0056d2', true);
-            custTabBtn.onclick = () => {
-              custTabBtn.style.cssText = rTabStyle('#0056d2', true);
-              showReplyComposer('customer', userData.email, {}, {}, userData, null, replyBody, refreshThread, String(t.id));
-            };
-            replyTabBar.appendChild(custTabBtn);
-            replyPanelContent.appendChild(replyTabBar);
-            replyPanelContent.appendChild(replyBody);
-            showReplyComposer('customer', userData.email, {}, {}, userData, null, replyBody, refreshThread, String(t.id));
-          }
+          custTabBtn = document.createElement('button');
+          custTabBtn.textContent = '📩 Customer';
+          custTabBtn.onclick = () => { setActive('cust'); replyBody.innerHTML = ''; showReplyComposer('customer', userData.email, {}, {}, userData, null, replyBody, refreshThread, String(t.id)); };
+          replyTabBar.appendChild(custTabBtn);
+        }
+        noteTabBtn.onclick = () => { setActive('note'); buildNoteTabContent(replyBody); };
+        replyTabBar.appendChild(noteTabBtn);
+        replyPanelContent.appendChild(replyTabBar);
+        replyPanelContent.appendChild(replyBody);
+        if (custTabBtn) {
+          setActive('cust');
+          showReplyComposer('customer', userData.email, {}, {}, userData, null, replyBody, refreshThread, String(t.id));
+        } else {
+          setActive('note');
+          buildNoteTabContent(replyBody);
+        }
         return;
       }
 
@@ -1636,11 +1713,19 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       custTabBtn.textContent = '📩 Customer';
       const suppTabBtn = document.createElement('button');
       suppTabBtn.textContent = '📤 Supplier';
+      const noteTabBtn = document.createElement('button');
+      noteTabBtn.textContent = '📝 Note';
 
       const setReplyTab = (type) => {
         custTabBtn.style.cssText = rTabStyle('#0056d2', type === 'customer');
         suppTabBtn.style.cssText = rTabStyle('#28a745', type === 'supplier');
+        noteTabBtn.style.cssText = rTabStyle('#6f42c1', type === 'note');
         replyBody.innerHTML = '';
+
+        if (type === 'note') {
+          buildNoteTabContent(replyBody);
+          return;
+        }
 
         if (type === 'customer') {
           if (!customerEmail) {
@@ -1750,7 +1835,8 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
 
       custTabBtn.onclick = () => setReplyTab('customer');
       suppTabBtn.onclick = () => setReplyTab('supplier');
-      replyTabBar.appendChild(custTabBtn); replyTabBar.appendChild(suppTabBtn);
+      noteTabBtn.onclick = () => setReplyTab('note');
+      replyTabBar.appendChild(custTabBtn); replyTabBar.appendChild(suppTabBtn); replyTabBar.appendChild(noteTabBtn);
       replyPanelContent.innerHTML = '';
       replyPanelContent.appendChild(replyTabBar); replyPanelContent.appendChild(replyBody);
       setReplyTab(customerEmail ? 'customer' : 'supplier');
@@ -2162,106 +2248,6 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       }
     });
 
-    // ── Add Note panel ─────────────────────────────────────────────────────
-    const notePanelWrapper = document.createElement('div');
-    notePanelWrapper.style.cssText = 'display:none;border:1px solid #ddd;border-radius:8px;overflow:hidden;flex-shrink:0;background:#fff;';
-
-    const notePanelHeader = document.createElement('div');
-    notePanelHeader.style.cssText = 'display:flex;justify-content:space-between;align-items:center;padding:7px 12px;background:#f8f9fa;border-bottom:1px solid #eee;cursor:pointer;';
-    const notePanelTitle = document.createElement('span');
-    notePanelTitle.style.cssText = 'font-size:12px;font-weight:600;color:#6f42c1;';
-    notePanelTitle.textContent = '📝 Add Note';
-    const notePanelClose = document.createElement('button');
-    notePanelClose.textContent = '×';
-    notePanelClose.style.cssText = 'background:none;border:none;font-size:18px;color:#aaa;cursor:pointer;line-height:1;padding:0;';
-    notePanelHeader.appendChild(notePanelTitle);
-    notePanelHeader.appendChild(notePanelClose);
-
-    const notePanelBody = document.createElement('div');
-    notePanelBody.style.cssText = 'padding:10px 12px;display:flex;flex-direction:column;gap:8px;';
-
-    const noteEditor = document.createElement('div');
-    noteEditor.contentEditable = 'true';
-    noteEditor.style.cssText = 'min-height:80px;max-height:220px;overflow-y:auto;border:1px solid #ddd;border-radius:5px;padding:8px 10px;font-size:13px;font-family:system-ui,sans-serif;line-height:1.5;color:#333;outline:none;';
-    noteEditor.setAttribute('data-placeholder', 'Type note here… or paste an image (Ctrl+V)');
-
-    // Placeholder styling via attribute
-    const notePlaceholderStyle = document.createElement('style');
-    notePlaceholderStyle.textContent = '[data-placeholder]:empty:before{content:attr(data-placeholder);color:#aaa;pointer-events:none;}';
-    notePanelBody.appendChild(notePlaceholderStyle);
-
-    // Intercept paste to convert image blobs → base64 data URLs
-    noteEditor.addEventListener('paste', (e) => {
-      const items = e.clipboardData && e.clipboardData.items;
-      if (!items) return;
-      for (const item of items) {
-        if (item.type.startsWith('image/')) {
-          e.preventDefault();
-          const file = item.getAsFile();
-          const reader = new FileReader();
-          reader.onload = (ev) => {
-            const img = document.createElement('img');
-            img.src = ev.target.result;
-            img.style.cssText = 'max-width:100%;height:auto;display:block;margin:4px 0;border-radius:3px;';
-            const sel = window.getSelection();
-            if (sel && sel.rangeCount) {
-              const range = sel.getRangeAt(0);
-              range.deleteContents();
-              range.insertNode(img);
-              range.setStartAfter(img);
-              range.collapse(true);
-              sel.removeAllRanges();
-              sel.addRange(range);
-            } else {
-              noteEditor.appendChild(img);
-            }
-          };
-          reader.readAsDataURL(file);
-          return;
-        }
-      }
-    });
-
-    const noteActionsRow = document.createElement('div');
-    noteActionsRow.style.cssText = 'display:flex;gap:8px;';
-
-    const notePostBtn = document.createElement('button');
-    notePostBtn.textContent = '📤 Post Note';
-    notePostBtn.style.cssText = 'padding:7px 16px;border:none;border-radius:6px;background:#6f42c1;color:#fff;font-size:13px;font-weight:600;cursor:pointer;';
-    notePostBtn.onclick = () => withButtonLoading(notePostBtn, '⏳ Posting...', async () => {
-      const html = noteEditor.innerHTML.trim();
-      if (!html || html === '') { showToast('Note is empty.', 'warning'); return; }
-      const { ok } = await gmPost(`${BACKEND_URL}/post-note`, { freshdeskTicketId: String(t.id), noteHtml: html });
-      if (ok) {
-        noteEditor.innerHTML = '';
-        notePanelWrapper.style.display = 'none';
-        showToast('✅ Note posted!', 'success', 2000);
-        refreshThread();
-      } else {
-        showToast('❌ Failed to post note.', 'error');
-      }
-    });
-
-    const noteClearBtn = document.createElement('button');
-    noteClearBtn.textContent = 'Clear';
-    noteClearBtn.style.cssText = 'padding:7px 12px;border:1px solid #ddd;border-radius:6px;background:#fff;color:#666;font-size:13px;cursor:pointer;';
-    noteClearBtn.onclick = () => { noteEditor.innerHTML = ''; noteEditor.focus(); };
-
-    noteActionsRow.appendChild(notePostBtn);
-    noteActionsRow.appendChild(noteClearBtn);
-    notePanelBody.appendChild(noteEditor);
-    notePanelBody.appendChild(noteActionsRow);
-    notePanelWrapper.appendChild(notePanelHeader);
-    notePanelWrapper.appendChild(notePanelBody);
-
-    addNoteBtn.onclick = () => {
-      const open = notePanelWrapper.style.display !== 'none';
-      notePanelWrapper.style.display = open ? 'none' : '';
-      if (!open) setTimeout(() => noteEditor.focus(), 30);
-    };
-    notePanelClose.onclick = () => { notePanelWrapper.style.display = 'none'; };
-
-    body.appendChild(notePanelWrapper);
   };
 
   renderTicket();
