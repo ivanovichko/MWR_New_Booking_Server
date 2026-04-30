@@ -37,16 +37,14 @@ async function addNote(ticketId, bodyHtml) {
 }
 
 /**
- * Posts an internal note with inline images.
+ * Posts an internal note with inline images via the session-cookie flow.
  *
- * Primary path (session cookie, mirrors what the Freshdesk web editor does):
  *   1. POST each data-URL image to /api/_/attachments → get { id, inline_url }.
  *   2. Replace each data: src in the body with the tokenized inline_url.
  *   3. POST /api/_/tickets/{id}/notes with inline_attachment_ids: [...].
- *   inline_url is a Freshdesk-hosted tokenized URL — renders without our proxy.
  *
- * Fallback (API-key multipart): if the session path fails, use the old flow
- * that uploads via attachments[] and patches the body with /attachment proxy URLs.
+ * inline_url is a Freshdesk-hosted tokenized URL — renders without our proxy.
+ * If a note has no inline images, falls through to the simple addNote path.
  */
 async function addNoteWithImages(ticketId, bodyHtml) {
   const dataUrlRe = /src="(data:([^;]+);base64,([^"]+))"/g;
@@ -58,112 +56,30 @@ async function addNoteWithImages(ticketId, bodyHtml) {
   }
   if (images.length === 0) return addNote(ticketId, bodyHtml);
 
-  // ── Primary path: session cookie via /api/_/... ────────────────────────────
-  try {
-    const uploaded = await Promise.all(images.map((img, i) => {
-      const ext = img.mimeType.split('/')[1]?.replace('jpeg', 'jpg') || 'png';
-      return uploadInlineAttachment(img.buffer, `inline-${Date.now()}-${i}.${ext}`, img.mimeType);
-    }));
+  const uploaded = await Promise.all(images.map((img, i) => {
+    const ext = img.mimeType.split('/')[1]?.replace('jpeg', 'jpg') || 'png';
+    return uploadInlineAttachment(img.buffer, `inline-${Date.now()}-${i}.${ext}`, img.mimeType);
+  }));
 
-    let finalHtml = bodyHtml;
-    const inlineIds = [];
-    images.forEach((img, i) => {
-      const att = uploaded[i];
-      inlineIds.push(att.id);
-      // Replace the entire src="data:..." with src="<inline_url>" data-id="<id>"
-      finalHtml = finalHtml.replace(
-        `src="${img.fullDataUrl}"`,
-        `src="${att.inline_url}" data-id="${att.id}"`
-      );
-    });
+  let finalHtml = bodyHtml;
+  const inlineIds = [];
+  images.forEach((img, i) => {
+    const att = uploaded[i];
+    inlineIds.push(att.id);
+    finalHtml = finalHtml.replace(
+      `src="${img.fullDataUrl}"`,
+      `src="${att.inline_url}" data-id="${att.id}"`
+    );
+  });
 
-    return await fdPost(`/api/_/tickets/${ticketId}/notes`, JSON.stringify({
-      body: finalHtml,
-      attachment_ids: [],
-      cloud_files: [],
-      notify_emails: [],
-      private: true,
-      inline_attachment_ids: inlineIds,
-    }), { 'Content-Type': 'application/json' });
-  } catch (err) {
-    console.warn(`⚠️ addNoteWithImages session path failed (${err.message}) — falling back to API-key multipart`);
-  }
-
-  // ── Fallback: API-key multipart (old flow) ─────────────────────────────────
-  return addNoteWithImagesViaApiKey(ticketId, bodyHtml);
-}
-
-// Old API-key + /attachment-proxy flow, kept as a fallback when the session
-// path fails (expired cookie, internal endpoint changes, etc.).
-async function addNoteWithImagesViaApiKey(ticketId, bodyHtml) {
-  const BACKEND_URL = process.env.BACKEND_URL || 'https://mwr-new-booking-server.onrender.com';
-  const dataUrlRe = /src="(data:([^;]+);base64,([^"]+))"/g;
-  const images = [];
-  let processedHtml = bodyHtml;
-  let idx = 0;
-  let m;
-
-  while ((m = dataUrlRe.exec(bodyHtml)) !== null) {
-    const [, dataUrl, mimeType, base64Data] = m;
-    const ext = mimeType.split('/')[1]?.replace('jpeg', 'jpg') || 'png';
-    const filename = `inline-image-${idx}.${ext}`;
-    const sentinel = `__INLINE_IMG_${idx}__`;
-    images.push({ dataUrl, mimeType, filename, sentinel, buffer: Buffer.from(base64Data, 'base64') });
-    processedHtml = processedHtml.replace(dataUrl, sentinel);
-    idx++;
-  }
-
-  if (images.length === 0) return addNote(ticketId, bodyHtml);
-
-  try {
-    const fd = new FormData();
-    fd.append('body', processedHtml);
-    fd.append('private', 'true');
-    for (const img of images) {
-      fd.append('attachments[]', img.buffer, { filename: img.filename, contentType: img.mimeType });
-    }
-
-    const postRes = await fetch(`${getBaseUrl()}/tickets/${ticketId}/notes`, {
-      method: 'POST',
-      headers: { 'Authorization': getAuthHeader(), ...fd.getHeaders() },
-      body: fd,
-    });
-
-    if (!postRes.ok) {
-      const err = await postRes.text();
-      throw new Error(`Freshdesk note POST failed ${postRes.status}: ${err}`);
-    }
-
-    const note = await postRes.json();
-    const noteId = note.id;
-    const attachments = note.attachments || [];
-
-    let finalHtml = processedHtml;
-    for (let i = 0; i < images.length; i++) {
-      const att = attachments[i];
-      if (!att) continue;
-      const proxyUrl = `${BACKEND_URL}/attachment?url=${encodeURIComponent(att.attachment_url)}`;
-      finalHtml = finalHtml.replace(
-        images[i].sentinel,
-        `${proxyUrl}" style="max-width:100%;height:auto;display:block;margin:4px 0;`
-      );
-    }
-
-    const patchRes = await fetch(`${getBaseUrl()}/tickets/${ticketId}/notes/${noteId}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'Authorization': getAuthHeader() },
-      body: JSON.stringify({ body: finalHtml }),
-    });
-
-    if (!patchRes.ok) {
-      console.warn(`⚠️ Note body patch failed ${patchRes.status} — images posted as attachments only`);
-    }
-
-    return note;
-  } catch (err) {
-    console.warn(`⚠️ addNoteWithImagesViaApiKey failed (${err.message}) — falling back to plain note`);
-    return addNote(ticketId, bodyHtml);
-  }
+  return await fdPost(`/api/_/tickets/${ticketId}/notes`, JSON.stringify({
+    body: finalHtml,
+    attachment_ids: [],
+    cloud_files: [],
+    notify_emails: [],
+    private: true,
+    inline_attachment_ids: inlineIds,
+  }), { 'Content-Type': 'application/json' });
 }
 
 /**
@@ -212,7 +128,7 @@ async function sendEmail(ticketId, toEmail, subject, bodyHtml) {
       inline_attachment_ids: inlineIds,
     }), { 'Content-Type': 'application/json' });
   } catch (err) {
-    console.warn(`⚠️ sendEmail session path failed (${err.message}) — falling back to API-key`);
+    console.warn(`[freshdesk] sendEmail session path failed (${err.message}) — falling back to API key`);
   }
 
   // ── Fallback: API-key /api/v2/.../reply (no inline image support) ──────────
@@ -373,13 +289,9 @@ async function uploadInlineAttachment(buffer, filename, mimeType) {
  */
 async function searchDuplicates(ref, excludeTicketId, isEmail = false, includeClosed = false) {
   if (!ref) return [];
-  console.log(`🔍 searchDuplicates: ref="${ref}"`);
   try {
     const data = await fdGet(`/api/_/search/tickets?term=${encodeURIComponent(ref)}&context=spotlight`);
     const results = data.results || data.tickets || data || [];
-    if (isEmail && Array.isArray(results) && results.length > 0) {
-      console.log(`🔍 email result sample:`, JSON.stringify(results[0]).slice(0, 400));
-    }
     const filtered = Array.isArray(results)
       ? results.filter(t => {
           if (String(t.id) === String(excludeTicketId)) return false;
@@ -387,13 +299,13 @@ async function searchDuplicates(ref, excludeTicketId, isEmail = false, includeCl
           return t.status === FD_STATUS.OPEN || t.status === FD_STATUS.PENDING;
         })
       : [];
-    console.log(`🔍 searchDuplicates: ${filtered.length} found (excluding current)`);
+    console.log(`[freshdesk] searchDuplicates ref="${ref}" → ${filtered.length} match(es)`);
     return filtered;
   } catch (err) {
     if (err.message === 'FRESHDESK_SESSION_EXPIRED') {
-      console.warn('⚠️ Freshdesk session expired — duplicate check skipped');
+      console.warn('[freshdesk] session expired — duplicate check skipped');
     } else {
-      console.warn(`⚠️ searchDuplicates error: ${err.message}`);
+      console.warn(`[freshdesk] searchDuplicates error: ${err.message}`);
     }
     return [];
   }

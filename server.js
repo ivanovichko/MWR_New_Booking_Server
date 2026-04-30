@@ -23,7 +23,7 @@ app.use(express.json({ limit: '20mb' }));
 app.use(express.static(path.join(__dirname)));
 
 // ─── Init DB on startup ───────────────────────────────────────────────────────
-initDb().catch(err => console.error('❌ DB init failed:', err.message));
+initDb().catch(err => console.error('[db] init failed:', err.message));
 
 // ─── Health check ─────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
@@ -37,10 +37,10 @@ app.post('/freshdesk-session', async (req, res) => {
   if (!cookie) return res.status(400).json({ error: 'cookie is required' });
   try {
     await storeFreshdeskSession(cookie, csrfToken || null);
-    console.log(`✅ Freshdesk session stored (cookie len: ${cookie.length}, csrf: ${csrfToken ? 'yes' : 'no'})`);
+    console.log(`[freshdesk-session] stored (cookie len: ${cookie.length}, csrf: ${csrfToken ? 'yes' : 'no'})`);
     res.json({ success: true });
   } catch (err) {
-    console.error('❌ Freshdesk session store error:', err.message);
+    console.error('[freshdesk-session] store error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -51,10 +51,10 @@ app.post('/ta-session', async (req, res) => {
   if (!cookie) return res.status(400).json({ error: 'cookie is required' });
   try {
     await storeSession(cookie);
-    console.log(`✅ TA session stored (length: ${cookie.length})`);
+    console.log(`[ta-session] stored (length: ${cookie.length})`);
     res.json({ success: true });
   } catch (err) {
-    console.error('❌ Session store error:', err.message);
+    console.error('[ta-session] store error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -137,14 +137,14 @@ app.get('/check-pendings/status', (req, res) => {
 
 app.get('/booking/:id', async (req, res) => {
   const bookingId = req.params.id;
-  console.log(`\n🔍 Booking lookup — ${bookingId}`);
+  console.log(`[booking] lookup ${bookingId}`);
 
   try {
     let cached = await getCachedBooking(bookingId);
     let fromCache = true;
 
     if (!cached) {
-      console.log(`⚠️  Cache miss — live fetching ${bookingId}`);
+      console.log(`[booking] cache miss — live fetching ${bookingId}`);
       fromCache = false;
       await fetchAndCacheBooking(bookingId);
       cached = await getCachedBooking(bookingId);
@@ -174,7 +174,7 @@ app.get('/booking/:id', async (req, res) => {
     });
 
   } catch (err) {
-    console.error('❌ Booking lookup error:', err.message);
+    console.error('[booking] lookup error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -189,7 +189,7 @@ app.post('/new-booking', async (req, res) => {
     return res.status(400).json({ error: 'dataRow, bookingHtml, userHtml, and freshdeskTicketId are required' });
   }
 
-  console.log(`\n📦 /new-booking (legacy) — ticketId=${freshdeskTicketId}`);
+  console.log(`[new-booking] legacy — ticketId=${freshdeskTicketId}`);
 
   try {
     const booking              = parseDataRow(dataRow);
@@ -197,7 +197,7 @@ app.post('/new-booking', async (req, res) => {
     const user                 = parseUserHtml(userHtml);
     const supplier             = lookupSupplier(booking.supplierName);
 
-    console.log(`✅ Parsed: ${booking.productType} — ${booking.guestName} — ${booking.supplierName}`);
+    console.log(`[new-booking] parsed ${booking.productType} — ${booking.guestName} — ${booking.supplierName}`);
 
     const noteHtml = buildNoteHtml(booking, cleanHtml, details, user, supplier);
 
@@ -206,7 +206,7 @@ app.post('/new-booking', async (req, res) => {
         bookingId: booking.internalBookingId,
         dataRow, bookingHtml, userHtml,
         parsed: { booking, details, user },
-      }).catch(e => console.warn('⚠️ Cache write failed:', e.message));
+      }).catch(e => console.warn('[new-booking] cache write failed:', e.message));
     }
 
     res.json({
@@ -219,7 +219,7 @@ app.post('/new-booking', async (req, res) => {
     });
 
   } catch (err) {
-    console.error('❌ Error in /new-booking:', err.message);
+    console.error('[new-booking] error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -234,10 +234,10 @@ app.post('/post-note', async (req, res) => {
 
   try {
     await addNoteWithImages(freshdeskTicketId, noteHtml);
-    console.log(`✅ Note posted to ticket ${freshdeskTicketId}`);
+    console.log(`[post-note] posted to ticket ${freshdeskTicketId}`);
     res.json({ success: true });
   } catch (err) {
-    console.error('❌ Error in /post-note:', err.message);
+    console.error('[post-note] error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -250,14 +250,14 @@ app.post('/find-hotel-email', async (req, res) => {
     return res.status(400).json({ error: 'hotelName is required' });
   }
 
-  console.log(`\n🔍 Hotel email search — ${hotelName}`);
+  console.log(`[hotel-email] search — ${hotelName}`);
 
   try {
     const result = await findHotelEmail(hotelName, hotelAddress, hotelCountry);
-    console.log(`✅ Groq result: ${result.email} (${result.confidence})`);
+    console.log(`[hotel-email] groq → ${result.email} (${result.confidence})`);
     res.json({ success: true, ...result });
   } catch (err) {
-    console.error('❌ Error in /find-hotel-email:', err.message);
+    console.error('[hotel-email] error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -270,7 +270,7 @@ app.post('/send-hotel-email', async (req, res) => {
     return res.status(400).json({ error: 'freshdeskTicketId, hotelEmail, and booking are required' });
   }
 
-  console.log(`\n✉️  Sending hotel email — ticketId=${freshdeskTicketId} to=${hotelEmail}`);
+  console.log(`[hotel-email] sending — ticket=${freshdeskTicketId} to=${hotelEmail}`);
 
   try {
     const emailBody = buildHotelEmailHtml(booking, details || {});
@@ -280,14 +280,14 @@ app.post('/send-hotel-email', async (req, res) => {
       `Prepaid Reservation Confirmation — ${booking.guestName} / ${booking.checkIn}`,
       emailBody
     );
-    console.log('✅ Email sent to', hotelEmail);
+    console.log('[hotel-email] sent to', hotelEmail);
 
     await setTicketPending(freshdeskTicketId);
-    console.log('✅ Ticket set to Pending');
+    console.log('[hotel-email] ticket → Pending');
 
     res.json({ success: true, emailSent: true, hotelEmail });
   } catch (err) {
-    console.error('❌ Error in /send-hotel-email:', err.message);
+    console.error('[hotel-email] send error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -300,10 +300,10 @@ app.post('/tag-ticket', async (req, res) => {
   }
   try {
     await tagTicket(freshdeskTicketId, tags, type);
-    console.log(`🏷️  Tagged ticket ${freshdeskTicketId}: ${tags.join(', ')}`);
+    console.log(`[tag-ticket] ticket ${freshdeskTicketId}: ${tags.join(', ')}`);
     res.json({ success: true });
   } catch (err) {
-    console.error('❌ Error in /tag-ticket:', err.message);
+    console.error('[tag-ticket] error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -319,7 +319,7 @@ app.post('/merge-ticket', async (req, res) => {
   try {
     const sourceLink = `https://mwrlife.freshdesk.com/a/tickets/${sourceTicketId}`;
     const descHtml = description || '';
-    console.log(`🔀 desc length: ${descHtml.length}`);
+    console.log(`[merge] desc length: ${descHtml.length}`);
     const noteHtml = `<p><a href="${sourceLink}">${sourceLink}</a></p>${descHtml}`;
 
     // Post note on target (duplicate) ticket: source link + description
@@ -338,22 +338,22 @@ app.post('/merge-ticket', async (req, res) => {
       headers: { 'Authorization': auth, 'Content-Type': 'application/json' },
       body: JSON.stringify({ body: sourceNoteHtml, private: true }),
     });
-    if (!sourceNoteRes.ok) { const b = await sourceNoteRes.text(); console.warn(`⚠️ Note on source failed: ${b.slice(0,100)}`); }
+    if (!sourceNoteRes.ok) { const b = await sourceNoteRes.text(); console.warn(`[merge] note on source failed: ${b.slice(0,100)}`); }
 
     // Close source ticket
     const closeBody = JSON.stringify({ status: FD_STATUS.CLOSED, type: 'Reservations' });
-    console.log(`🔒 Closing ticket ${sourceTicketId} with body: ${closeBody}`);
+    console.log(`[merge] closing ticket ${sourceTicketId}`);
     const closeRes = await fetch(`https://${domain}/api/v2/tickets/${sourceTicketId}`, {
       method: 'PUT',
       headers: { 'Authorization': auth, 'Content-Type': 'application/json' },
       body: closeBody,
     });
-    if (!closeRes.ok) { const b = await closeRes.text(); console.error(`❌ Close failed ${closeRes.status}: ${b}`); throw new Error(`Close failed: ${b.slice(0,200)}`); }
+    if (!closeRes.ok) { const b = await closeRes.text(); console.error(`[merge] close failed ${closeRes.status}: ${b}`); throw new Error(`Close failed: ${b.slice(0,200)}`); }
 
-    console.log(`🔀 Merged ticket #${sourceTicketId} → #${targetTicketId}`);
+    console.log(`[merge] #${sourceTicketId} → #${targetTicketId}`);
     res.json({ success: true });
   } catch (err) {
-    console.error(`❌ Merge error: ${err.message}`);
+    console.error(`[merge] error: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });
@@ -365,7 +365,7 @@ app.post('/close-ticket', async (req, res) => {
   try {
     const domain = process.env.FRESHDESK_DOMAIN;
     const closeBody2 = JSON.stringify({ status: FD_STATUS.CLOSED, type: 'Reservations' });
-    console.log(`🔒 Closing ticket ${ticketId} with body: ${closeBody2}`);
+    console.log(`[close] ticket ${ticketId}`);
     const r = await fetch(`https://${domain}/api/v2/tickets/${ticketId}`, {
       method: 'PUT',
       headers: {
@@ -374,11 +374,11 @@ app.post('/close-ticket', async (req, res) => {
       },
       body: closeBody2,
     });
-    if (!r.ok) { const b = await r.text(); console.error(`❌ Close failed ${r.status}: ${b}`); throw new Error(`${r.status}: ${b.slice(0,200)}`); }
-    console.log(`✅ Closed ticket ${ticketId}`);
+    if (!r.ok) { const b = await r.text(); console.error(`[close] failed ${r.status}: ${b}`); throw new Error(`${r.status}: ${b.slice(0,200)}`); }
+    console.log(`[close] ticket ${ticketId} closed`);
     res.json({ success: true });
   } catch (err) {
-    console.error(`❌ Close ticket error: ${err.message}`);
+    console.error(`[close] error: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });
@@ -418,10 +418,10 @@ app.post('/check-duplicates', async (req, res) => {
       ...t,
       responder_name: t.responder_id ? (agentMap[t.responder_id] || null) : null,
     }));
-    console.log(`🔍 Duplicate check for ${vendorConf}/${internalId}/${memberEmail}: ${duplicates.length} found`);
+    console.log(`[check-duplicates] ${vendorConf}/${internalId}/${memberEmail}: ${duplicates.length} found`);
     res.json({ success: true, duplicates });
   } catch (err) {
-    console.error('❌ Error in /check-duplicates:', err.message);
+    console.error('[check-duplicates] error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -440,10 +440,10 @@ app.post('/search-tickets', async (req, res) => {
       matchedBy: ['manual search'],
       responder_name: t.responder_id ? (agentMap[t.responder_id] || null) : null,
     }));
-    console.log(`🔍 Manual ticket search "${query}": ${duplicates.length} found`);
+    console.log(`[search-tickets] "${query}": ${duplicates.length} found`);
     res.json({ success: true, duplicates });
   } catch (err) {
-    console.error('❌ Error in /search-tickets:', err.message);
+    console.error('[search-tickets] error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -452,13 +452,13 @@ app.post('/search-tickets', async (req, res) => {
 app.post('/find-user', async (req, res) => {
   const { query } = req.body;
   if (!query) return res.status(400).json({ error: 'query is required' });
-  console.log(`\n👤 User search — "${query}"`);
+  console.log(`[find-user] "${query}"`);
   try {
     const results = await findUser(query);
-    console.log(`✅ User search: ${results.length} result(s)`);
+    console.log(`[find-user] ${results.length} result(s)`);
     res.json({ success: true, results });
   } catch (err) {
-    console.error('❌ Error in /find-user:', err.message);
+    console.error('[find-user] error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -466,13 +466,13 @@ app.post('/find-user', async (req, res) => {
 // ─── Full user profile ────────────────────────────────────────────────────────
 app.get('/user/:id', async (req, res) => {
   const { id } = req.params;
-  console.log(`\n👤 User profile — ${id}`);
+  console.log(`[user] profile — ${id}`);
   try {
     const html = await taGet(`https://traveladvantage.com/admin/account/viewCustomer/${id}`);
     const user = parseUserHtml(html);
     res.json({ success: true, user });
   } catch (err) {
-    console.error('❌ Error in /user/:id:', err.message);
+    console.error('[user] profile error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -480,7 +480,7 @@ app.get('/user/:id', async (req, res) => {
 // ─── User reservation history ─────────────────────────────────────────────────
 app.get('/user/:id/reservations', async (req, res) => {
   const { id } = req.params;
-  console.log(`\n📋 Reservation history — user ${id}`);
+  console.log(`[reservations] user ${id}`);
   try {
     const params = new URLSearchParams({
       draw: '1', start: '0', length: '25',
@@ -519,21 +519,21 @@ app.get('/user/:id/reservations', async (req, res) => {
 
     res.json({ success: true, reservations, total: data.recordsTotal });
   } catch (err) {
-    console.error('❌ Error in /user/:id/reservations:', err.message);
+    console.error('[reservations] error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`[server] listening on port ${PORT}`));
 
 // ─── Extract booking ID from ticket + fetch + cache ───────────────────────────
 app.post('/extract-booking-id', async (req, res) => {
   const { freshdeskTicketId } = req.body;
   if (!freshdeskTicketId) return res.status(400).json({ error: 'freshdeskTicketId is required' });
 
-  console.log(`\n🔍 Extract booking ID — ticket ${freshdeskTicketId}`);
+  console.log(`[extract-booking] ticket ${freshdeskTicketId}`);
   try {
     const ticketContext = await getTicketContext(freshdeskTicketId);
     const { bookingId } = await extractBookingId({
@@ -543,12 +543,12 @@ app.post('/extract-booking-id', async (req, res) => {
 
     if (!bookingId) return res.json({ success: true, bookingId: null });
 
-    console.log(`📦 Found booking ID: ${bookingId} — fetching from TA...`);
+    console.log(`[extract-booking] ${bookingId} — fetching from TA`);
     await fetchAndCacheBooking(bookingId);
-    console.log(`✅ Booking ${bookingId} cached`);
+    console.log(`[extract-booking] ${bookingId} cached`);
     res.json({ success: true, bookingId });
   } catch (err) {
-    console.error('❌ Error in /extract-booking-id:', err.message);
+    console.error('[extract-booking] error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -561,17 +561,17 @@ app.post('/send-reply', upload.array('files'), async (req, res) => {
     return res.status(400).json({ error: 'freshdeskTicketId, toEmail, and bodyHtml are required' });
 
   const files = req.files || [];
-  console.log(`\n📤 Outbound reply — ticket ${freshdeskTicketId} → ${toEmail} (${files.length} attachment(s))`);
+  console.log(`[send-reply] ticket ${freshdeskTicketId} → ${toEmail} (${files.length} attachment(s))`);
   try {
     if (files.length > 0) {
       await sendEmailWithAttachments(freshdeskTicketId, toEmail, bodyHtml, files);
     } else {
       await sendEmail(freshdeskTicketId, toEmail, null, bodyHtml);
     }
-    console.log(`✅ Reply sent to ${toEmail}`);
+    console.log(`[send-reply] sent to ${toEmail}`);
     res.json({ success: true });
   } catch (err) {
-    console.error('❌ Error in /send-reply:', err.message);
+    console.error('[send-reply] error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -651,7 +651,7 @@ app.get('/guided-prewarm/tickets', async (req, res) => {
 
   const filterKey = (req.query.filter || 'low').toLowerCase();
   const filter = GUIDED_FILTERS[filterKey] || GUIDED_FILTERS.low;
-  console.log(`🎯 Guided prewarm: fetching ${filterKey} tickets for agent ${agentId}`);
+  console.log(`[guided-prewarm] fetching ${filterKey} tickets for agent ${agentId}`);
 
   // Fetch each priority bucket separately (Freshdesk search has no OR operator)
   const priorityBuckets = filter.priorities.length ? filter.priorities : [null];
@@ -664,23 +664,23 @@ app.get('/guided-prewarm/tickets', async (req, res) => {
       if (priority) parts.push(`priority:${priority}`);
       const q = parts.join(' AND ');
       const url = `https://${domain}/api/v2/search/tickets?query="${q.replace(/ /g, '%20')}"&page=${page}`;
-      console.log(`🔍 Fetching: ${url}`);
+      console.log(`[guided-prewarm] fetching ${url}`);
       const r = await fetch(url, { headers: { Authorization: auth } });
       if (!r.ok) {
         const b = await r.text();
-        console.error(`❌ Freshdesk error ${r.status}: ${b.slice(0,200)}`);
+        console.error(`[guided-prewarm] freshdesk error ${r.status}: ${b.slice(0,200)}`);
         return res.status(500).json({ error: `Freshdesk error: ${b.slice(0,200)}` });
       }
       const data = await r.json();
       const batch = data.results || [];
-      console.log(`📋 Priority ${priority ?? 'any'} page ${page}: ${batch.length} tickets`);
+      console.log(`[guided-prewarm] priority ${priority ?? 'any'} page ${page}: ${batch.length} tickets`);
       for (const t of batch) {
         if (!seenIds.has(t.id)) { seenIds.add(t.id); tickets.push(t); }
       }
       if (batch.length < 30) break;
     }
   }
-  console.log(`📋 Total: ${tickets.length} tickets`);
+  console.log(`[guided-prewarm] total: ${tickets.length} tickets`);
   res.json({ success: true, tickets });
 });
 
@@ -701,9 +701,9 @@ app.get('/guided-prewarm/analyse/:id', async (req, res) => {
     console.log(`[analyse] ticket #${ticketId} — ${conversationCount} conversations`);
 
     // Groq: extract booking ID
-    console.log(`🤖 Running Groq extraction...`);
+    console.log(`[analyse] running Groq extraction`);
     const { bookingId, isNewBooking } = await extractBookingId(ticket, conversationCount);
-    console.log(`📦 bookingId=${bookingId} isNewBooking=${isNewBooking}`);
+    console.log(`[analyse] bookingId=${bookingId} isNewBooking=${isNewBooking}`);
 
     // Try to fetch booking
     let bookingData = null;
@@ -712,18 +712,18 @@ app.get('/guided-prewarm/analyse/:id', async (req, res) => {
       try {
         const cached = await (require('./services/dbService').getCachedBooking)(bookingId);
         if (cached && cached.parsed) {
-          console.log(`⚡ Booking ${bookingId} from cache`);
+          console.log(`[analyse] booking ${bookingId} from cache`);
           bookingData = cached.parsed;
           if (!bookingData.supplier) bookingData.supplier = lookupSupplier(bookingData.booking.supplierName);
           if (cached.booking_html) cleanHtmlForNote = parseBookingHtml(cached.booking_html).cleanHtml;
         } else {
-          console.log(`📡 Fetching booking ${bookingId} from TA...`);
+          console.log(`[analyse] fetching booking ${bookingId} from TA`);
           const fetched = await fetchAndCacheBooking(bookingId);
           bookingData = fetched;
           cleanHtmlForNote = fetched.cleanHtml;
         }
       } catch (e) {
-        console.warn(`⚠️ Could not fetch booking ${bookingId}: ${e.message}`);
+        console.warn(`[analyse] could not fetch booking ${bookingId}: ${e.message}`);
       }
     }
 
@@ -737,7 +737,7 @@ app.get('/guided-prewarm/analyse/:id', async (req, res) => {
     let userData = null;
     if (!bookingData && requesterEmail) {
       try {
-        console.log(`👤 No booking — searching user by email: ${requesterEmail}`);
+        console.log(`[analyse] no booking — searching user by email: ${requesterEmail}`);
         const results = await findUser(requesterEmail);
         if (results.length > 0) {
           const u = results[0];
@@ -747,16 +747,16 @@ app.get('/guided-prewarm/analyse/:id', async (req, res) => {
             loginLink:   `${TA_BASE}/admin/account/webadminCustomerLogin/${u.id}`,
             profileLink: `${TA_BASE}/admin/account/viewCustomer/${u.id}`,
           };
-          console.log(`✅ User found: ${u.name} (${u.email})`);
+          console.log(`[analyse] user found: ${u.name} (${u.email})`);
         }
       } catch (e) {
-        console.warn(`⚠️ User fallback failed: ${e.message}`);
+        console.warn(`[analyse] user fallback failed: ${e.message}`);
       }
     }
 
     res.json({ skip: false, conversationCount, bookingId, isNewBooking, bookingData, userData });
   } catch (err) {
-    console.error(`❌ Analyse error for ticket #${ticketId}: ${err.message}`, err.stack);
+    console.error(`[analyse] error for ticket #${ticketId}: ${err.message}`, err.stack);
     res.status(500).json({ error: err.message });
   }
 });
@@ -805,14 +805,14 @@ app.post('/bulk-confirm', async (req, res) => {
   const domain = process.env.FRESHDESK_DOMAIN;
   const auth   = getAuthHeader();
 
-  console.log(`🏨 Bulk confirm: fetching tickets with tag "${tag}"`);
+  console.log(`[bulk-confirm] fetching tickets with tag "${tag}"`);
 
   // Debug: try bare tag query first
   const testUrl = `https://${domain}/api/v2/search/tickets?query="tag:'${tag}'"`;
-  console.log(`🧪 Test query: ${testUrl}`);
+  console.log(`[bulk-confirm] test query: ${testUrl}`);
   const testR = await fetch(testUrl, { headers: { Authorization: auth } });
   const testData = await testR.json();
-  console.log(`🧪 Bare tag results: ${testData.total || 0} total, ${(testData.results||[]).length} returned`);
+  console.log(`[bulk-confirm] bare tag results: ${testData.total || 0} total, ${(testData.results||[]).length} returned`);
 
   // Fetch open tickets with tag, then pending — merge results
   let tickets = [];
@@ -820,16 +820,16 @@ app.post('/bulk-confirm', async (req, res) => {
     for (let page = 1; page <= 10; page++) {
       const q = `tag:'${tag}' AND status:${status}`;
       const url = `https://${domain}/api/v2/search/tickets?query="${q.replace(/ /g, '%20')}"&page=${page}`;
-      console.log(`🔍 Fetching: ${url}`);
+      console.log(`[bulk-confirm] fetching ${url}`);
       const r = await fetch(url, { headers: { Authorization: auth } });
       if (!r.ok) {
         const body = await r.text();
-        console.warn(`⚠️ Freshdesk search error ${r.status}: ${body.slice(0,200)}`);
+        console.warn(`[bulk-confirm] freshdesk search error ${r.status}: ${body.slice(0,200)}`);
         break;
       }
       const data = await r.json();
       const batch = data.results || [];
-      console.log(`📋 status:${status} page:${page} — ${batch.length} results`);
+      console.log(`[bulk-confirm] status=${status} page=${page} → ${batch.length} results`);
       tickets.push(...batch);
       if (batch.length < 30) break;
     }
@@ -838,7 +838,7 @@ app.post('/bulk-confirm', async (req, res) => {
   // Deduplicate by ticket id
   const seen = new Set();
   tickets = tickets.filter(t => { if (seen.has(t.id)) return false; seen.add(t.id); return true; });
-  console.log(`📋 Total unique tickets: ${tickets.length}`);
+  console.log(`[bulk-confirm] total unique tickets: ${tickets.length}`);
 
   const bookings = [];
   const errors   = [];
@@ -1012,23 +1012,23 @@ app.post('/ai-assist', async (req, res) => {
   const { booking, details, user, supplier, prompt, freshdeskTicketId } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
-  console.log(`\n🤖 AI assist — prompt: "${prompt.slice(0, 60)}..."`);
+  console.log(`[ai-assist] prompt: "${prompt.slice(0, 60)}..."`);
   try {
     let ticketContext = null;
     if (freshdeskTicketId) {
       try {
         ticketContext = await getTicketContext(freshdeskTicketId);
-        console.log(`📋 Ticket context fetched: "${ticketContext.subject}"`);
+        console.log(`[ai-assist] ticket context: "${ticketContext.subject}"`);
       } catch (e) {
-        console.warn(`⚠️ Could not fetch ticket context: ${e.message}`);
+        console.warn(`[ai-assist] could not fetch ticket context: ${e.message}`);
       }
     }
 
     const text = await aiAssist({ booking, details, user, supplier, ticketContext, prompt });
-    console.log(`✅ AI assist — ${text.length} chars`);
+    console.log(`[ai-assist] ${text.length} chars`);
     res.json({ success: true, text });
   } catch (err) {
-    console.error('❌ AI assist error:', err.message);
+    console.error('[ai-assist] error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
