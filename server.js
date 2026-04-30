@@ -25,6 +25,26 @@ app.use(express.static(path.join(__dirname)));
 // ─── Init DB on startup ───────────────────────────────────────────────────────
 initDb().catch(err => console.error('[db] init failed:', err.message));
 
+// ─── Route helper: catch async errors and respond uniformly ──────────────────
+// Routes can throw — the wrapper logs and responds with { error: msg }.
+// Throw with `err.statusCode = 4xx` for non-500 responses.
+function safeRoute(handler) {
+  return async (req, res, next) => {
+    try {
+      await handler(req, res, next);
+    } catch (err) {
+      const status = Number.isInteger(err.statusCode) ? err.statusCode : 500;
+      console.error(`[${req.method} ${req.originalUrl}] error: ${err.message}`);
+      res.status(status).json({ error: err.message });
+    }
+  };
+}
+
+// Throw an HttpError to short-circuit a safeRoute with a specific status.
+class HttpError extends Error {
+  constructor(message, statusCode = 400) { super(message); this.statusCode = statusCode; }
+}
+
 // ─── Health check ─────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
@@ -32,32 +52,22 @@ app.get('/health', (req, res) => res.json({ status: 'ok' }));
 app.get('/auth', (req, res) => res.sendFile(path.join(__dirname, 'auth.html')));
 
 // ─── Freshdesk Session ────────────────────────────────────────────────────────
-app.post('/freshdesk-session', async (req, res) => {
+app.post('/freshdesk-session', safeRoute(async (req, res) => {
   const { cookie, csrfToken } = req.body;
-  if (!cookie) return res.status(400).json({ error: 'cookie is required' });
-  try {
-    await storeFreshdeskSession(cookie, csrfToken || null);
-    console.log(`[freshdesk-session] stored (cookie len: ${cookie.length}, csrf: ${csrfToken ? 'yes' : 'no'})`);
-    res.json({ success: true });
-  } catch (err) {
-    console.error('[freshdesk-session] store error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
+  if (!cookie) throw new HttpError('cookie is required');
+  await storeFreshdeskSession(cookie, csrfToken || null);
+  console.log(`[freshdesk-session] stored (cookie len: ${cookie.length}, csrf: ${csrfToken ? 'yes' : 'no'})`);
+  res.json({ success: true });
+}));
 
 // ─── TA Session: manually paste cookie value ──────────────────────────────────
-app.post('/ta-session', async (req, res) => {
+app.post('/ta-session', safeRoute(async (req, res) => {
   const { cookie } = req.body;
-  if (!cookie) return res.status(400).json({ error: 'cookie is required' });
-  try {
-    await storeSession(cookie);
-    console.log(`[ta-session] stored (length: ${cookie.length})`);
-    res.json({ success: true });
-  } catch (err) {
-    console.error('[ta-session] store error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
+  if (!cookie) throw new HttpError('cookie is required');
+  await storeSession(cookie);
+  console.log(`[ta-session] stored (length: ${cookie.length})`);
+  res.json({ success: true });
+}));
 
 // ─── Prewarm: polling-based progress ─────────────────────────────────────────
 // In-memory job store (single job at a time is fine)
@@ -225,88 +235,52 @@ app.post('/new-booking', async (req, res) => {
 });
 
 // ─── Post note to Freshdesk (agent confirmed) ─────────────────────────────────
-app.post('/post-note', async (req, res) => {
+app.post('/post-note', safeRoute(async (req, res) => {
   const { freshdeskTicketId, noteHtml } = req.body;
-
-  if (!freshdeskTicketId || !noteHtml) {
-    return res.status(400).json({ error: 'freshdeskTicketId and noteHtml are required' });
-  }
-
-  try {
-    await addNoteWithImages(freshdeskTicketId, noteHtml);
-    console.log(`[post-note] posted to ticket ${freshdeskTicketId}`);
-    res.json({ success: true });
-  } catch (err) {
-    console.error('[post-note] error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
+  if (!freshdeskTicketId || !noteHtml) throw new HttpError('freshdeskTicketId and noteHtml are required');
+  await addNoteWithImages(freshdeskTicketId, noteHtml);
+  console.log(`[post-note] posted to ticket ${freshdeskTicketId}`);
+  res.json({ success: true });
+}));
 
 // ─── Find hotel email via Groq (hotels only) ──────────────────────────────────
-app.post('/find-hotel-email', async (req, res) => {
+app.post('/find-hotel-email', safeRoute(async (req, res) => {
   const { hotelName, hotelAddress, hotelCountry } = req.body;
-
-  if (!hotelName) {
-    return res.status(400).json({ error: 'hotelName is required' });
-  }
-
+  if (!hotelName) throw new HttpError('hotelName is required');
   console.log(`[hotel-email] search — ${hotelName}`);
-
-  try {
-    const result = await findHotelEmail(hotelName, hotelAddress, hotelCountry);
-    console.log(`[hotel-email] groq → ${result.email} (${result.confidence})`);
-    res.json({ success: true, ...result });
-  } catch (err) {
-    console.error('[hotel-email] error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
+  const result = await findHotelEmail(hotelName, hotelAddress, hotelCountry);
+  console.log(`[hotel-email] groq → ${result.email} (${result.confidence})`);
+  res.json({ success: true, ...result });
+}));
 
 // ─── Send hotel email + set ticket pending (agent confirmed) ──────────────────
-app.post('/send-hotel-email', async (req, res) => {
+app.post('/send-hotel-email', safeRoute(async (req, res) => {
   const { freshdeskTicketId, hotelEmail, booking, details } = req.body;
-
   if (!freshdeskTicketId || !hotelEmail || !booking) {
-    return res.status(400).json({ error: 'freshdeskTicketId, hotelEmail, and booking are required' });
+    throw new HttpError('freshdeskTicketId, hotelEmail, and booking are required');
   }
-
   console.log(`[hotel-email] sending — ticket=${freshdeskTicketId} to=${hotelEmail}`);
-
-  try {
-    const emailBody = buildHotelEmailHtml(booking, details || {});
-    await sendEmail(
-      freshdeskTicketId,
-      hotelEmail,
-      `Prepaid Reservation Confirmation — ${booking.guestName} / ${booking.checkIn}`,
-      emailBody
-    );
-    console.log('[hotel-email] sent to', hotelEmail);
-
-    await setTicketPending(freshdeskTicketId);
-    console.log('[hotel-email] ticket → Pending');
-
-    res.json({ success: true, emailSent: true, hotelEmail });
-  } catch (err) {
-    console.error('[hotel-email] send error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
+  const emailBody = buildHotelEmailHtml(booking, details || {});
+  await sendEmail(
+    freshdeskTicketId,
+    hotelEmail,
+    `Prepaid Reservation Confirmation — ${booking.guestName} / ${booking.checkIn}`,
+    emailBody
+  );
+  console.log('[hotel-email] sent to', hotelEmail);
+  await setTicketPending(freshdeskTicketId);
+  console.log('[hotel-email] ticket → Pending');
+  res.json({ success: true, emailSent: true, hotelEmail });
+}));
 
 // ─── Tag ticket + set type ────────────────────────────────────────────────────
-app.post('/tag-ticket', async (req, res) => {
+app.post('/tag-ticket', safeRoute(async (req, res) => {
   const { freshdeskTicketId, tags, type } = req.body;
-  if (!freshdeskTicketId || !tags) {
-    return res.status(400).json({ error: 'freshdeskTicketId and tags are required' });
-  }
-  try {
-    await tagTicket(freshdeskTicketId, tags, type);
-    console.log(`[tag-ticket] ticket ${freshdeskTicketId}: ${tags.join(', ')}`);
-    res.json({ success: true });
-  } catch (err) {
-    console.error('[tag-ticket] error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
+  if (!freshdeskTicketId || !tags) throw new HttpError('freshdeskTicketId and tags are required');
+  await tagTicket(freshdeskTicketId, tags, type);
+  console.log(`[tag-ticket] ticket ${freshdeskTicketId}: ${tags.join(', ')}`);
+  res.json({ success: true });
+}));
 
 // ─── Merge ticket ─────────────────────────────────────────────────────────────
 app.post('/merge-ticket', async (req, res) => {
@@ -384,98 +358,72 @@ app.post('/close-ticket', async (req, res) => {
 });
 
 // ─── Update ticket fields (tags, status, priority, etc.) ─────────────────────
-app.post('/update-ticket', async (req, res) => {
+app.post('/update-ticket', safeRoute(async (req, res) => {
   const { ticketId, fields } = req.body;
-  if (!ticketId || !fields) return res.status(400).json({ error: 'ticketId and fields required' });
-  try {
-    await updateTicket(String(ticketId), fields);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+  if (!ticketId || !fields) throw new HttpError('ticketId and fields required');
+  await updateTicket(String(ticketId), fields);
+  res.json({ success: true });
+}));
 
 // Agent name resolution lives in services/agentService.js.
 
 // ─── Check for duplicate tickets ─────────────────────────────────────────────
-app.post('/check-duplicates', async (req, res) => {
+app.post('/check-duplicates', safeRoute(async (req, res) => {
   const { vendorConf, internalId, memberEmail, freshdeskTicketId } = req.body;
-  try {
-    const [byVendor, byInternal, byEmail, agentMap] = await Promise.all([
-      vendorConf  ? searchDuplicates(vendorConf,  freshdeskTicketId) : [],
-      internalId  ? searchDuplicates(internalId,  freshdeskTicketId) : [],
-      memberEmail ? searchDuplicates(memberEmail, freshdeskTicketId, true) : [],
-      fetchAgentMap(),
-    ]);
-
-    // Tag each result with its match source, merge and deduplicate by ticket id
-    const seen = new Map();
-    for (const t of byVendor)  { if (!seen.has(t.id)) seen.set(t.id, { ...t, matchedBy: ['supplier ref'] }); else seen.get(t.id).matchedBy.push('supplier ref'); }
-    for (const t of byInternal){ if (!seen.has(t.id)) seen.set(t.id, { ...t, matchedBy: ['booking ID'] }); else seen.get(t.id).matchedBy.push('booking ID'); }
-    for (const t of byEmail)   { if (!seen.has(t.id)) seen.set(t.id, { ...t, matchedBy: ['member email'] }); else seen.get(t.id).matchedBy.push('member email'); }
-
-    const duplicates = [...seen.values()].map(t => ({
-      ...t,
-      responder_name: t.responder_id ? (agentMap[t.responder_id] || null) : null,
-    }));
-    console.log(`[check-duplicates] ${vendorConf}/${internalId}/${memberEmail}: ${duplicates.length} found`);
-    res.json({ success: true, duplicates });
-  } catch (err) {
-    console.error('[check-duplicates] error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
+  const [byVendor, byInternal, byEmail, agentMap] = await Promise.all([
+    vendorConf  ? searchDuplicates(vendorConf,  freshdeskTicketId) : [],
+    internalId  ? searchDuplicates(internalId,  freshdeskTicketId) : [],
+    memberEmail ? searchDuplicates(memberEmail, freshdeskTicketId, true) : [],
+    fetchAgentMap(),
+  ]);
+  // Tag each result with its match source, merge and deduplicate by ticket id
+  const seen = new Map();
+  for (const t of byVendor)  { if (!seen.has(t.id)) seen.set(t.id, { ...t, matchedBy: ['supplier ref'] }); else seen.get(t.id).matchedBy.push('supplier ref'); }
+  for (const t of byInternal){ if (!seen.has(t.id)) seen.set(t.id, { ...t, matchedBy: ['booking ID'] }); else seen.get(t.id).matchedBy.push('booking ID'); }
+  for (const t of byEmail)   { if (!seen.has(t.id)) seen.set(t.id, { ...t, matchedBy: ['member email'] }); else seen.get(t.id).matchedBy.push('member email'); }
+  const duplicates = [...seen.values()].map(t => ({
+    ...t,
+    responder_name: t.responder_id ? (agentMap[t.responder_id] || null) : null,
+  }));
+  console.log(`[check-duplicates] ${vendorConf}/${internalId}/${memberEmail}: ${duplicates.length} found`);
+  res.json({ success: true, duplicates });
+}));
 
 // ─── Manual ticket search (for merge) ────────────────────────────────────────
-app.post('/search-tickets', async (req, res) => {
+app.post('/search-tickets', safeRoute(async (req, res) => {
   const { query, includeClosed, freshdeskTicketId } = req.body;
-  if (!query) return res.status(400).json({ error: 'query required' });
-  try {
-    const [results, agentMap] = await Promise.all([
-      searchDuplicates(query, freshdeskTicketId || null, false, !!includeClosed),
-      fetchAgentMap(),
-    ]);
-    const duplicates = results.map(t => ({
-      ...t,
-      matchedBy: ['manual search'],
-      responder_name: t.responder_id ? (agentMap[t.responder_id] || null) : null,
-    }));
-    console.log(`[search-tickets] "${query}": ${duplicates.length} found`);
-    res.json({ success: true, duplicates });
-  } catch (err) {
-    console.error('[search-tickets] error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
+  if (!query) throw new HttpError('query required');
+  const [results, agentMap] = await Promise.all([
+    searchDuplicates(query, freshdeskTicketId || null, false, !!includeClosed),
+    fetchAgentMap(),
+  ]);
+  const duplicates = results.map(t => ({
+    ...t,
+    matchedBy: ['manual search'],
+    responder_name: t.responder_id ? (agentMap[t.responder_id] || null) : null,
+  }));
+  console.log(`[search-tickets] "${query}": ${duplicates.length} found`);
+  res.json({ success: true, duplicates });
+}));
 
 // ─── Find user (search primary + secondary) ───────────────────────────────────
-app.post('/find-user', async (req, res) => {
+app.post('/find-user', safeRoute(async (req, res) => {
   const { query } = req.body;
-  if (!query) return res.status(400).json({ error: 'query is required' });
+  if (!query) throw new HttpError('query is required');
   console.log(`[find-user] "${query}"`);
-  try {
-    const results = await findUser(query);
-    console.log(`[find-user] ${results.length} result(s)`);
-    res.json({ success: true, results });
-  } catch (err) {
-    console.error('[find-user] error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
+  const results = await findUser(query);
+  console.log(`[find-user] ${results.length} result(s)`);
+  res.json({ success: true, results });
+}));
 
 // ─── Full user profile ────────────────────────────────────────────────────────
-app.get('/user/:id', async (req, res) => {
+app.get('/user/:id', safeRoute(async (req, res) => {
   const { id } = req.params;
   console.log(`[user] profile — ${id}`);
-  try {
-    const html = await taGet(`https://traveladvantage.com/admin/account/viewCustomer/${id}`);
-    const user = parseUserHtml(html);
-    res.json({ success: true, user });
-  } catch (err) {
-    console.error('[user] profile error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
+  const html = await taGet(`https://traveladvantage.com/admin/account/viewCustomer/${id}`);
+  const user = parseUserHtml(html);
+  res.json({ success: true, user });
+}));
 
 // ─── User reservation history ─────────────────────────────────────────────────
 app.get('/user/:id/reservations', async (req, res) => {
@@ -529,29 +477,21 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`[server] listening on port ${PORT}`));
 
 // ─── Extract booking ID from ticket + fetch + cache ───────────────────────────
-app.post('/extract-booking-id', async (req, res) => {
+app.post('/extract-booking-id', safeRoute(async (req, res) => {
   const { freshdeskTicketId } = req.body;
-  if (!freshdeskTicketId) return res.status(400).json({ error: 'freshdeskTicketId is required' });
-
+  if (!freshdeskTicketId) throw new HttpError('freshdeskTicketId is required');
   console.log(`[extract-booking] ticket ${freshdeskTicketId}`);
-  try {
-    const ticketContext = await getTicketContext(freshdeskTicketId);
-    const { bookingId } = await extractBookingId({
-      subject:          ticketContext.subject,
-      description_text: ticketContext.description,
-    });
-
-    if (!bookingId) return res.json({ success: true, bookingId: null });
-
-    console.log(`[extract-booking] ${bookingId} — fetching from TA`);
-    await fetchAndCacheBooking(bookingId);
-    console.log(`[extract-booking] ${bookingId} cached`);
-    res.json({ success: true, bookingId });
-  } catch (err) {
-    console.error('[extract-booking] error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
+  const ticketContext = await getTicketContext(freshdeskTicketId);
+  const { bookingId } = await extractBookingId({
+    subject:          ticketContext.subject,
+    description_text: ticketContext.description,
+  });
+  if (!bookingId) return res.json({ success: true, bookingId: null });
+  console.log(`[extract-booking] ${bookingId} — fetching from TA`);
+  await fetchAndCacheBooking(bookingId);
+  console.log(`[extract-booking] ${bookingId} cached`);
+  res.json({ success: true, bookingId });
+}));
 
 // ─── Send outbound reply to supplier or customer ──────────────────────────────
 // Accepts multipart/form-data (with files[]) or plain JSON (no attachments).
@@ -610,15 +550,9 @@ app.get('/attachment', async (req, res) => {
 // Heavy lifting (session-cookie + API-key fallback, conversation pagination)
 // lives in services/ticketService.js. This handler just composes the agent
 // map on top of the returned data.
-app.get('/guided-prewarm/ticket/:id', async (req, res) => {
+app.get('/guided-prewarm/ticket/:id', safeRoute(async (req, res) => {
   const ticketId = req.params.id;
-  let ticketData;
-  try {
-    ticketData = await fetchTicket(ticketId);
-  } catch (err) {
-    return res.status(500).json({ error: `Ticket fetch failed: ${err.message}` });
-  }
-  const { ticket, conversations } = ticketData;
+  const { ticket, conversations } = await fetchTicket(ticketId);
   const agents = await fetchAllAgents();
   // Augment agents map from inline conversation requesters (handles deactivated
   // agents the bootstrap endpoint excludes — only available on the session path).
@@ -632,7 +566,7 @@ app.get('/guided-prewarm/ticket/:id', async (req, res) => {
   const candidateIds = [ticket.responder_id, ...conversations.map(c => c.user_id)];
   await fillMissingAgentNames(agents, candidateIds);
   res.json({ success: true, ticket, conversations, agents });
-});
+}));
 
 
 // filter → { priority, status } mapping — Freshdesk priority: 1=Low, 2=Medium, 3=High, 4=Urgent
