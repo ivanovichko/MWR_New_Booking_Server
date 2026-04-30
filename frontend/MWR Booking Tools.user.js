@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.15
+// @version      6.16
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -658,7 +658,16 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
     leftCol.appendChild(card);
 
     // Shared agent name map — populated when ticket thread loads, used by buildDupRow
-    let ticketAgents = {};
+    // ── Per-ticket cross-closure state ───────────────────────────────────────
+    // Mutable bag shared by nested closures (refreshThread, renderBookingSection,
+    // analyse callback, confirm button, etc.). Each field is documented at its
+    // declaration so the data flow stays legible.
+    const state = {
+      agents:    {},   // id → name map; populated when the thread loads
+      bookingId: null, // currently-displayed booking id (null until analyse or manual fetch)
+      action:    null, // selected confirm-action key: 'note_only' | 'call_hotel' | 'voucher' | ...
+      dupCheck:  null, // (booking, user) => void; assigned once the duplicate panel is wired up
+    };
 
     // Fetch / refresh ticket thread
     let _threadCacheUsed = false;
@@ -693,7 +702,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
         };
 
         const agents = td.agents || {};
-        ticketAgents = agents; // share with buildDupRow
+        state.agents = agents; // shared with buildDupRow + status-bar dropdown
         const fmtDate = (iso) => {
           if (!iso) return '';
           const d = new Date(iso);
@@ -1004,7 +1013,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       unassignedOpt.value = ''; unassignedOpt.textContent = 'Unassigned';
       if (!ticket.responder_id) unassignedOpt.selected = true;
       agentSel.appendChild(unassignedOpt);
-      const sortedAgents = Object.entries(ticketAgents)
+      const sortedAgents = Object.entries(state.agents)
         .map(([id, name]) => ({ id, name: name || `#${id}` }))
         .sort((a, b) => a.name.localeCompare(b.name));
       sortedAgents.forEach(({ id, name }) => {
@@ -1110,12 +1119,6 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
 
       renderPills();
     };
-
-    let currentBookingId = null;
-    let currentAction = null;
-    // Set inside the analyse callback once renderDupResults exists; called by
-    // manual booking-fetch handlers to refresh open-thread search for a new booking.
-    let dupCheckFn = null;
 
     // Inline reservations renderer (compact, smaller than full profile modal)
     const renderLocalReservations = (reservations) => {
@@ -1234,11 +1237,11 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
             el.onmouseout  = () => { el.style.background = '#fff'; };
             el.onclick = () => {
               const bid = el.dataset.bookingid;
-              currentBookingId = bid;
+              state.bookingId = bid;
               gmGet(`${BACKEND_URL}/guided-prewarm/booking/${encodeURIComponent(bid)}`).then(({ ok: fok, data: fd }) => {
                 if (fok && fd.bookingData) {
                   renderBookingSection(fd.bookingData, user);
-                  dupCheckFn?.(fd.bookingData.booking, fd.bookingData.user);
+                  state.dupCheck?.(fd.bookingData.booking, fd.bookingData.user);
                 } else showToast('Booking not found.', 'error');
               });
             };
@@ -1297,7 +1300,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
               tabBar.appendChild(custTab);
               replyPanelContent.appendChild(tabBar);
               replyPanelContent.appendChild(replyBody);
-              showReplyComposer('customer', u.email, {}, {}, pickedUser, null, replyBody, refreshThread, String(t.id));
+              showReplyComposer({ recipientType:'customer', toEmail:u.email, booking:{}, details:{}, user:pickedUser, supplier:null, body:replyBody, onSent:refreshThread, ticketId:String(t.id) });
               replyPanelExpanded = true;
               replyPanelContent.style.display = '';
             }
@@ -1329,13 +1332,13 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
         replyPanelWrapper.style.display = 'none';
         const msg = document.createElement('div');
         msg.style.cssText = 'color:#dc3545;font-size:12px;margin-bottom:8px;';
-        msg.textContent = currentBookingId ? `⚠️ Could not fetch booking for "${currentBookingId}".` : '⚠️ No booking ID found in this ticket.';
+        msg.textContent = state.bookingId ? `⚠️ Could not fetch booking for "${state.bookingId}".` : '⚠️ No booking ID found in this ticket.';
         bookingSection.appendChild(msg);
         const manualRow = document.createElement('div');
         manualRow.style.cssText = 'display:flex;gap:6px;';
         const manualInput = document.createElement('input');
         manualInput.type = 'text'; manualInput.placeholder = 'Enter booking ID manually...';
-        manualInput.value = currentBookingId || '';
+        manualInput.value = state.bookingId || '';
         manualInput.style.cssText = 'flex:1;padding:6px 10px;border:1px solid #ddd;border-radius:5px;font-size:12px;';
         const fetchManualBtn = document.createElement('button');
         fetchManualBtn.textContent = '🔍 Fetch';
@@ -1346,9 +1349,9 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
           const { ok: fok, data: fd } = await gmGet(`${BACKEND_URL}/guided-prewarm/booking/${encodeURIComponent(id)}`);
           fetchManualBtn.disabled = false; fetchManualBtn.textContent = '🔍 Fetch';
           if (fok && fd.bookingData) {
-            currentBookingId = id;
+            state.bookingId = id;
             renderBookingSection(fd.bookingData);
-            dupCheckFn?.(fd.bookingData.booking, fd.bookingData.user);
+            state.dupCheck?.(fd.bookingData.booking, fd.bookingData.user);
           } else showToast('Booking not found in TA.', 'error');
         };
         manualInput.addEventListener('keydown', e => { if (e.key === 'Enter') fetchManualBtn.click(); });
@@ -1370,11 +1373,11 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
           const custTabBtn = document.createElement('button');
           custTabBtn.textContent = '📩 Customer';
           custTabBtn.style.cssText = rTabStyle('#0056d2', true);
-          custTabBtn.onclick = () => showReplyComposer('customer', userData.email, {}, {}, userData, null, replyBody, refreshThread, String(t.id));
+          custTabBtn.onclick = () => showReplyComposer({ recipientType:'customer', toEmail:userData.email, booking:{}, details:{}, user:userData, supplier:null, body:replyBody, onSent:refreshThread, ticketId:String(t.id) });
           replyTabBar.appendChild(custTabBtn);
           replyPanelContent.appendChild(replyTabBar);
           replyPanelContent.appendChild(replyBody);
-          showReplyComposer('customer', userData.email, {}, {}, userData, null, replyBody, refreshThread, String(t.id));
+          showReplyComposer({ recipientType:'customer', toEmail:userData.email, booking:{}, details:{}, user:userData, supplier:null, body:replyBody, onSent:refreshThread, ticketId:String(t.id) });
         }
         return;
       }
@@ -1402,10 +1405,10 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
 
       let actionLabel = '📋 Post Note'; let actionColor = '#007bff';
       if (isHotel) {
-        if (daysUntil !== null && daysUntil < 3) { currentAction = 'call_hotel'; actionLabel = '📞 Tag Call Hotel + High Priority'; actionColor = '#dc3545'; }
-        else { currentAction = 'note_only'; }
-      } else if (isTransfer) { currentAction = 'voucher'; actionLabel = '🏷️ Tag Voucher & Move On'; actionColor = '#6c757d'; }
-      else { currentAction = 'note_only'; }
+        if (daysUntil !== null && daysUntil < 3) { state.action = 'call_hotel'; actionLabel = '📞 Tag Call Hotel + High Priority'; actionColor = '#dc3545'; }
+        else { state.action = 'note_only'; }
+      } else if (isTransfer) { state.action = 'voucher'; actionLabel = '🏷️ Tag Voucher & Move On'; actionColor = '#6c757d'; }
+      else { state.action = 'note_only'; }
 
       confirmBtn.textContent = actionLabel; confirmBtn.style.background = actionColor;
       confirmBtn.disabled = false; confirmBtn.style.opacity = '1';
@@ -1434,7 +1437,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       changeBookingRow.style.cssText = 'display:none;gap:6px;margin-top:6px;';
       const changeBookingInput = document.createElement('input');
       changeBookingInput.type = 'text'; changeBookingInput.placeholder = 'Enter booking ID...';
-      changeBookingInput.value = currentBookingId || '';
+      changeBookingInput.value = state.bookingId || '';
       changeBookingInput.style.cssText = 'flex:1;padding:4px 8px;border:1px solid #ddd;border-radius:4px;font-size:11px;';
       const changeBookingBtn = document.createElement('button');
       changeBookingBtn.textContent = '🔍 Fetch';
@@ -1445,9 +1448,9 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
         const { ok: fok, data: fd } = await gmGet(`${BACKEND_URL}/guided-prewarm/booking/${encodeURIComponent(id)}`);
         changeBookingBtn.disabled = false; changeBookingBtn.textContent = '🔍 Fetch';
         if (fok && fd.bookingData) {
-          currentBookingId = id;
+          state.bookingId = id;
           renderBookingSection(fd.bookingData);
-          dupCheckFn?.(fd.bookingData.booking, fd.bookingData.user);
+          state.dupCheck?.(fd.bookingData.booking, fd.bookingData.user);
         } else showToast('Booking not found.', 'error');
       };
       changeBookingInput.addEventListener('keydown', e => { if (e.key === 'Enter') changeBookingBtn.click(); });
@@ -1470,7 +1473,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       postNoteBtn.textContent = '📋 Post Note';
       postNoteBtn.style.cssText = 'padding:7px 10px;border:1px solid #6f42c1;border-radius:5px;background:#fff;color:#6f42c1;font-size:12px;font-weight:600;cursor:pointer;';
       postNoteBtn.onclick = () => withButtonLoading(postNoteBtn, '⏳ Posting...', async () => {
-        const { ok, data: cr } = await gmPost(`${BACKEND_URL}/guided-prewarm/confirm`, { ticketId: String(t.id), bookingId: currentBookingId, action: 'note_only', noteHtml: bd.noteHtml || null });
+        const { ok, data: cr } = await gmPost(`${BACKEND_URL}/guided-prewarm/confirm`, { ticketId: String(t.id), bookingId: state.bookingId, action: 'note_only', noteHtml: bd.noteHtml || null });
         if (ok) { showToast('✅ Note posted!', 'success', 2000); refreshFreshdeskTicket(); refreshThread(); }
         else showToast('❌ ' + (cr?.error || 'Error'), 'error');
       });
@@ -1488,7 +1491,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
         hotelEmailBtn.textContent = '📧 Hotel Email';
         hotelEmailBtn.style.cssText = 'padding:7px 10px;border:1px solid #28a745;border-radius:5px;background:#fff;color:#28a745;font-size:12px;font-weight:600;cursor:pointer;';
         hotelEmailBtn.onclick = () => withButtonLoading(hotelEmailBtn, '⏳ Sending...', async () => {
-          const { ok: cok, data: cr } = await gmPost(`${BACKEND_URL}/guided-prewarm/confirm`, { ticketId: String(t.id), bookingId: currentBookingId, action: 'hotel_email' });
+          const { ok: cok, data: cr } = await gmPost(`${BACKEND_URL}/guided-prewarm/confirm`, { ticketId: String(t.id), bookingId: state.bookingId, action: 'hotel_email' });
           if (!cok) { showToast('❌ Error: ' + (cr?.error || 'Server error'), 'error'); return; }
           const r = cr.results; const msgs = [];
           if (r.emailSent) msgs.push(`email → ${r.hotelEmail}`);
@@ -1531,7 +1534,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
             replyBody.innerHTML = '<div style="color:#999;font-size:12px;padding:4px 0;">No customer email found.</div>';
             return;
           }
-          showReplyComposer('customer', customerEmail, booking, details, user, supplierObj, replyBody, refreshThread, String(t.id));
+          showReplyComposer({ recipientType:'customer', toEmail:customerEmail, booking, details, user, supplier:supplierObj, body:replyBody, onSent:refreshThread, ticketId:String(t.id) });
         } else {
           // Supplier — editable To: field + textarea + send
           const toRow = document.createElement('div');
@@ -1641,7 +1644,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
 
       confirmBtn.onclick = async () => {
         confirmBtn.disabled = true; confirmBtn.textContent = '⏳ Processing...';
-        const { ok: cok, data: cr } = await gmPost(`${BACKEND_URL}/guided-prewarm/confirm`, { ticketId: String(t.id), bookingId: currentBookingId, action: currentAction, noteHtml: bd.noteHtml || null });
+        const { ok: cok, data: cr } = await gmPost(`${BACKEND_URL}/guided-prewarm/confirm`, { ticketId: String(t.id), bookingId: state.bookingId, action: state.action, noteHtml: bd.noteHtml || null });
         if (!cok) { showToast('❌ Error: ' + (cr?.error || 'Server error'), 'error'); confirmBtn.disabled = false; confirmBtn.textContent = actionLabel; return; }
         const r = cr.results; const msgs = [];
         if (r.notePosted) msgs.push('note posted');
@@ -1662,7 +1665,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       if (!aok) { bookingSection.innerHTML = '<div style="color:red;font-size:12px;">❌ Analysis failed.</div>'; return; }
       if (analysis.skip) { prog.textContent += ` — skipped (${analysis.reason})`; idx++; renderTicket(); return; }
 
-      currentBookingId = analysis.bookingId;
+      state.bookingId = analysis.bookingId;
       renderBookingSection(analysis.bookingData, analysis.userData);
 
       // ── Open threads / duplicates — dupSection already created above ─────────
@@ -1671,7 +1674,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       const buildDupRow = (dup) => {
           const row = document.createElement('div');
           row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #f5f5f5;';
-          const assigneeName = dup.responder_name || (dup.responder_id ? (ticketAgents[dup.responder_id] || `#${dup.responder_id}`) : '—');
+          const assigneeName = dup.responder_name || (dup.responder_id ? (state.agents[dup.responder_id] || `#${dup.responder_id}`) : '—');
           // Freshdesk status codes: 2=Open, 3=Pending, 4=Resolved, 5=Closed (6+ are custom)
           const statusInfo = (() => {
             switch (dup.status) {
@@ -2028,7 +2031,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       };
 
       // Single helper used for both initial auto-search and manual booking refetches.
-      dupCheckFn = (bookingObj, userObj) => {
+      state.dupCheck = (bookingObj, userObj) => {
         const hasRefs = bookingObj && (bookingObj.supplierId || bookingObj.internalBookingId);
         if (hasRefs) {
           dupSection.innerHTML = '<div style="color:#999;font-size:11px;">Checking for open threads...</div>';
@@ -2051,11 +2054,11 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       // Auto-search: by booking refs if available, by member email if user-only, else skip
       if (analysis.bookingId && analysis.bookingData) {
         const { booking, user } = analysis.bookingData;
-        dupCheckFn(booking, user);
+        state.dupCheck(booking, user);
       } else if (analysis.userData && analysis.userData.email) {
-        dupCheckFn(null, analysis.userData);
+        state.dupCheck(null, analysis.userData);
       } else {
-        dupCheckFn(null, null);
+        state.dupCheck(null, null);
       }
     });
 
@@ -2398,7 +2401,14 @@ function countryToLanguage(countryCode) {
 }
 
 // ── Reply composer (supplier / customer) ──────────────────────────────────────
-function showReplyComposer(recipientType, toEmail, booking, details, user, supplier, bodyEl, onSent, overrideTicketId = null) {
+// opts: { recipientType, toEmail, booking, details, user, supplier, body, onSent, ticketId }
+//   body — DOM element to render the composer into
+//   recipientType — 'customer' | 'supplier'
+//   ticketId — overrides the auto-detected Freshdesk ticket id when set
+function showReplyComposer(opts) {
+  const { recipientType, toEmail, booking, details, user, supplier, body, onSent, ticketId } = opts;
+  const overrideTicketId = ticketId || null;
+  const bodyEl = body;
   const label = recipientType === 'supplier' ? 'Supplier' : 'Customer';
   bodyEl.innerHTML = '';
   const container = bodyEl;
