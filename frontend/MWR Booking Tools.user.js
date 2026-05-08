@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.16
+// @version      6.17
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -17,6 +17,36 @@
 
   // ===== CONFIG =====
   const BACKEND_URL = 'https://mwr-new-booking-server.onrender.com';
+
+  // ===== API LAYER =====
+  // Wraps gmGet / gmPost / gmPostForm in named methods so URLs and request
+  // shapes live in one place. Each method returns `{ ok, status, data }`.
+  const api = {
+    guided: {
+      tickets: (filter)        => gmGet(`${BACKEND_URL}/guided-prewarm/tickets?filter=${encodeURIComponent(filter)}`),
+      ticket:  (id)            => gmGet(`${BACKEND_URL}/guided-prewarm/ticket/${id}`),
+      analyse: (id)            => gmGet(`${BACKEND_URL}/guided-prewarm/analyse/${id}`),
+      booking: (id)            => gmGet(`${BACKEND_URL}/guided-prewarm/booking/${encodeURIComponent(id)}`),
+      confirm: (body)          => gmPost(`${BACKEND_URL}/guided-prewarm/confirm`, body),
+    },
+    postNote:        (ticketId, noteHtml)         => gmPost(`${BACKEND_URL}/post-note`, { freshdeskTicketId: String(ticketId), noteHtml }),
+    updateTicket:    (ticketId, fields)           => gmPost(`${BACKEND_URL}/update-ticket`, { ticketId: String(ticketId), fields }),
+    closeTicket:     (ticketId)                   => gmPost(`${BACKEND_URL}/close-ticket`, { ticketId: String(ticketId) }),
+    mergeTicket:     (body)                       => gmPost(`${BACKEND_URL}/merge-ticket`, body),
+    tagTicket:       (body)                       => gmPost(`${BACKEND_URL}/tag-ticket`, body),
+    sendReply:       (body)                       => gmPost(`${BACKEND_URL}/send-reply`, body),
+    sendReplyForm:   (formData)                   => gmPostForm(`${BACKEND_URL}/send-reply`, formData),
+    findUser:        (query)                      => gmPost(`${BACKEND_URL}/find-user`, { query }),
+    userReservations:(userId)                     => gmGet(`${BACKEND_URL}/user/${userId}/reservations`),
+    searchTickets:   (body)                       => gmPost(`${BACKEND_URL}/search-tickets`, body),
+    checkDuplicates: (body)                       => gmPost(`${BACKEND_URL}/check-duplicates`, body),
+    translate:       (text, target='en')          => gmPost(`${BACKEND_URL}/translate`, { text, target }),
+    aiAssist:        (body)                       => gmPost(`${BACKEND_URL}/ai-assist`, body),
+    prompts:         ()                           => gmGet(`${BACKEND_URL}/settings/prompts`),
+    macros:          ()                           => gmGet(`${BACKEND_URL}/settings/macros`),
+    bulkConfirm:     (tag)                        => gmPost(`${BACKEND_URL}/bulk-confirm`, { tag }),
+    attachmentUrl:   (url)                        => `${BACKEND_URL}/attachment?url=${encodeURIComponent(url)}`,
+  };
 
 
 function showLoader(message = "Loading...") {
@@ -244,7 +274,7 @@ async function showChatModal(ticketId, onNotePosted) {
     if (!text) { showToast('Nothing to post.', 'warning'); return; }
     postChatNoteBtn.disabled = true; postChatNoteBtn.textContent = '⏳ Posting...';
     const noteHtml = '<p>' + text.replace(/\n/g, '<br>') + '</p>';
-    const { ok } = await gmPost(`${BACKEND_URL}/post-note`, { freshdeskTicketId, noteHtml });
+    const { ok } = await api.postNote(freshdeskTicketId, noteHtml);
     postChatNoteBtn.disabled = false; postChatNoteBtn.textContent = '📋 Post as Note';
     if (ok) { showToast('✅ Note posted!', 'success'); refreshFreshdeskTicket(); onNotePosted?.(); }
     else showToast('❌ Failed to post note.', 'error');
@@ -261,13 +291,13 @@ async function showChatModal(ticketId, onNotePosted) {
   makeDraggable(modal, header);
 
   // Translate Chat — fetch prompt from DB then send with ticket context
-  gmGet(`${BACKEND_URL}/settings/prompts`).then(async ({ ok: pok, data: pdata }) => {
+  api.prompts().then(async ({ ok: pok, data: pdata }) => {
     const translatePrompt = (pok && Array.isArray(pdata))
       ? pdata.find(p => p.label && p.label.toLowerCase().includes('translate chat'))
       : null;
     const promptText = translatePrompt ? translatePrompt.text : 'Clean and translate this chat transcript to English. Format as BOT/CUSTOMER/AGENT. Add a 2-sentence summary at the end. Output only the formatted transcript and summary — no headers, no labels, no markdown, no reasoning, no extra commentary.';
 
-    const { ok: aiOk, data: aiData } = await gmPost(`${BACKEND_URL}/ai-assist`, {
+    const { ok: aiOk, data: aiData } = await api.aiAssist({
       booking: {}, details: {}, user: null, supplier: null,
       freshdeskTicketId, prompt: promptText,
     });
@@ -352,7 +382,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
 
     body.innerHTML = '<div style="color:#999;font-size:13px;">Loading tickets...</div>';
 
-    const { ok, data } = await gmGet(`${BACKEND_URL}/guided-prewarm/tickets?filter=${filterKey}`);
+    const { ok, data } = await api.guided.tickets(filterKey);
     if (!ok || !data.tickets) {
       body.innerHTML = '<div style="color:red;">❌ Could not load tickets.</div>';
       return;
@@ -377,8 +407,8 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
     const tid = String(tickets[i].id);
     if (prefetchCache.has(tid)) return;
     prefetchCache.set(tid, {
-      ticketPromise:  gmGet(`${BACKEND_URL}/guided-prewarm/ticket/${tid}`),
-      analysePromise: gmGet(`${BACKEND_URL}/guided-prewarm/analyse/${tid}`),
+      ticketPromise:  api.guided.ticket(tid),
+      analysePromise: api.guided.analyse(tid),
     });
   };
 
@@ -429,7 +459,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
     closeTicketBtn.onclick = async () => {
       if (!confirm(`Close ticket #${t.id}?`)) return;
       closeTicketBtn.disabled = true; closeTicketBtn.textContent = '⏳';
-      const { ok } = await gmPost(`${BACKEND_URL}/close-ticket`, { ticketId: String(t.id) });
+      const { ok } = await api.closeTicket(String(t.id) );
       if (ok) { showToast('✅ Ticket closed.', 'success', 2000); idx++; setTimeout(() => renderTicket(), 1000); }
       else { showToast('❌ Could not close ticket.', 'error'); closeTicketBtn.disabled = false; closeTicketBtn.textContent = '✖ Close'; }
     };
@@ -598,7 +628,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
         const newSubject = subjectInput.value.trim();
         if (!newSubject) { showToast('Subject cannot be empty.', 'warning'); return; }
         saveBtn.disabled = true; saveBtn.textContent = '⏳';
-        const { ok } = await gmPost(`${BACKEND_URL}/update-ticket`, { ticketId: String(t.id), fields: { subject: newSubject } });
+        const { ok } = await api.updateTicket(String(t.id), { subject: newSubject });
         if (ok) {
           t.subject = newSubject;
           cardTitleSpan.textContent = `#${t.id} — ${newSubject}`;
@@ -675,7 +705,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       descEl.innerHTML = '<div style="color:#999;font-size:11px;">⏳ Loading thread...</div>';
       const _pc = !_threadCacheUsed && prefetchCache.get(String(t.id));
       _threadCacheUsed = true;
-      const _ticketReq = _pc ? _pc.ticketPromise : gmGet(`${BACKEND_URL}/guided-prewarm/ticket/${t.id}`);
+      const _ticketReq = _pc ? _pc.ticketPromise : api.guided.ticket(t.id);
       _ticketReq.then(({ ok, data: td }) => {
         if (!ok || !td.ticket) { descEl.innerHTML = '<span style="color:#999;">(could not load)</span>'; return; }
 
@@ -690,7 +720,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
           btn.onclick = async () => {
             btn.disabled = true; btn.textContent = '⏳';
             const text = getText();
-            const { ok, data } = await gmPost(BACKEND_URL + '/translate', { text, target: 'en' });
+            const { ok, data } = await api.translate(text, 'en');
             const parent = btn.parentElement;
             btn.remove();
             const resultEl = document.createElement('div');
@@ -872,7 +902,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
           const allText = [...descEl.querySelectorAll('div > div:last-of-type')].map(el => el.innerText || el.textContent).join('\n\n').trim()
             || strip(descEl.innerHTML);
           summarizeBtn.disabled = true; summarizeBtn.textContent = '⏳ Summarising...';
-          const { ok: aok, data: aiData } = await gmPost(BACKEND_URL + '/ai-assist', {
+          const { ok: aok, data: aiData } = await api.aiAssist({
             booking: {}, details: {}, user: null, supplier: null,
             freshdeskTicketId: String(t.id),
             prompt: 'Summarise this support ticket thread in 3-5 sentences. Focus on the customer issue, what has been done so far, and what still needs to be resolved.\n\n' + allText,
@@ -938,7 +968,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       postBtn.onclick = () => withButtonLoading(postBtn, '⏳ Posting...', async () => {
         const html = editor.innerHTML.trim();
         if (!html) { showToast('Note is empty.', 'warning'); return; }
-        const { ok } = await gmPost(`${BACKEND_URL}/post-note`, { freshdeskTicketId: String(t.id), noteHtml: html });
+        const { ok } = await api.postNote(String(t.id), html);
         if (ok) { editor.innerHTML = ''; showToast('✅ Note posted!', 'success', 2000); refreshThread(); }
         else showToast('❌ Failed to post note.', 'error');
       });
@@ -1037,7 +1067,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
         if (newPriority  !== ticket.priority)             fields.priority      = newPriority;
         if (newResponder !== (ticket.responder_id||null)) fields.responder_id  = newResponder;
         if (!Object.keys(fields).length) { showToast('No changes to save', 'info', 1500); return; }
-        const { ok } = await gmPost(`${BACKEND_URL}/update-ticket`, { ticketId: String(t.id), fields });
+        const { ok } = await api.updateTicket(t.id, fields);
         if (ok) { showToast('✅ Ticket updated', 'success', 2000); refreshThread(); }
         else showToast('❌ Update failed', 'error');
       });
@@ -1062,7 +1092,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       let currentTags = [...(ticket.tags || [])];
 
       const saveTags = async () => {
-        const { ok } = await gmPost(`${BACKEND_URL}/update-ticket`, { ticketId: String(t.id), fields: { tags: currentTags } });
+        const { ok } = await api.updateTicket(String(t.id), { tags: currentTags });
         if (ok) { showToast('✅ Tags saved', 'success', 2000); refreshThread(); }
         else showToast('❌ Failed to save tags', 'error');
       };
@@ -1204,7 +1234,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
               const loginLine   = user.loginLink   ? `<div><strong>Login:</strong> <a href="${user.loginLink}" target="_blank">Login as User</a></div>` : '';
               const profileLine = user.profileLink ? `<div><strong>Profile:</strong> <a href="${user.profileLink}" target="_blank">Open Full Profile</a></div>` : '';
               const noteHtml = `<div style="font-family:system-ui,sans-serif;font-size:13px;line-height:1.8;"><h4 style="margin:0 0 8px;font-size:14px;">👤 Member Details</h4>${lines}${loginLine}${profileLine}</div>`;
-              const { ok } = await gmPost(`${BACKEND_URL}/post-note`, { freshdeskTicketId: String(t.id), noteHtml });
+              const { ok } = await api.postNote(String(t.id), noteHtml);
               postNoteBtn2.disabled = false; postNoteBtn2.textContent = '📋 Post Member Note';
               if (ok) { showToast('✅ Member note posted!', 'success'); refreshThread(); }
               else showToast('❌ Failed to post note.', 'error');
@@ -1227,7 +1257,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
           if (!user.id) { tabContent.innerHTML = '<div style="color:#999;font-size:11px;">No user ID.</div>'; return; }
           if (!reservationsData) {
             tabContent.innerHTML = '<div style="color:#999;font-size:11px;">⏳ Loading...</div>';
-            const { ok: rok, data: rd } = await gmGet(`${BACKEND_URL}/user/${user.id}/reservations`);
+            const { ok: rok, data: rd } = await api.userReservations(user.id);
             if (!rok) { tabContent.innerHTML = '<div style="color:red;font-size:11px;">Failed to load.</div>'; return; }
             reservationsData = rd.reservations || [];
           }
@@ -1238,7 +1268,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
             el.onclick = () => {
               const bid = el.dataset.bookingid;
               state.bookingId = bid;
-              gmGet(`${BACKEND_URL}/guided-prewarm/booking/${encodeURIComponent(bid)}`).then(({ ok: fok, data: fd }) => {
+              api.guided.booking(bid).then(({ ok: fok, data: fd }) => {
                 if (fok && fd.bookingData) {
                   renderBookingSection(fd.bookingData, user);
                   state.dupCheck?.(fd.bookingData.booking, fd.bookingData.user);
@@ -1267,7 +1297,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       findMemberBtn.onclick = async () => {
         const q = findMemberInput.value.trim(); if (!q) return;
         findMemberBtn.disabled = true; findMemberBtn.textContent = '⏳';
-        const { ok: uok, data: udata } = await gmPost(`${BACKEND_URL}/find-user`, { query: q });
+        const { ok: uok, data: udata } = await api.findUser(q );
         findMemberBtn.disabled = false; findMemberBtn.textContent = '🔍 Search';
         findMemberResults.innerHTML = '';
         const results = (uok && udata.results) ? udata.results : [];
@@ -1346,7 +1376,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
         fetchManualBtn.onclick = async () => {
           const id = manualInput.value.trim(); if (!id) return;
           fetchManualBtn.disabled = true; fetchManualBtn.textContent = '⏳';
-          const { ok: fok, data: fd } = await gmGet(`${BACKEND_URL}/guided-prewarm/booking/${encodeURIComponent(id)}`);
+          const { ok: fok, data: fd } = await api.guided.booking(id);
           fetchManualBtn.disabled = false; fetchManualBtn.textContent = '🔍 Fetch';
           if (fok && fd.bookingData) {
             state.bookingId = id;
@@ -1445,7 +1475,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       changeBookingBtn.onclick = async () => {
         const id = changeBookingInput.value.trim(); if (!id) return;
         changeBookingBtn.disabled = true; changeBookingBtn.textContent = '⏳';
-        const { ok: fok, data: fd } = await gmGet(`${BACKEND_URL}/guided-prewarm/booking/${encodeURIComponent(id)}`);
+        const { ok: fok, data: fd } = await api.guided.booking(id);
         changeBookingBtn.disabled = false; changeBookingBtn.textContent = '🔍 Fetch';
         if (fok && fd.bookingData) {
           state.bookingId = id;
@@ -1473,7 +1503,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       postNoteBtn.textContent = '📋 Post Note';
       postNoteBtn.style.cssText = 'padding:7px 10px;border:1px solid #6f42c1;border-radius:5px;background:#fff;color:#6f42c1;font-size:12px;font-weight:600;cursor:pointer;';
       postNoteBtn.onclick = () => withButtonLoading(postNoteBtn, '⏳ Posting...', async () => {
-        const { ok, data: cr } = await gmPost(`${BACKEND_URL}/guided-prewarm/confirm`, { ticketId: String(t.id), bookingId: state.bookingId, action: 'note_only', noteHtml: bd.noteHtml || null });
+        const { ok, data: cr } = await api.guided.confirm({ ticketId: String(t.id), bookingId: state.bookingId, action: 'note_only', noteHtml: bd.noteHtml || null });
         if (ok) { showToast('✅ Note posted!', 'success', 2000); refreshFreshdeskTicket(); refreshThread(); }
         else showToast('❌ ' + (cr?.error || 'Error'), 'error');
       });
@@ -1491,7 +1521,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
         hotelEmailBtn.textContent = '📧 Hotel Email';
         hotelEmailBtn.style.cssText = 'padding:7px 10px;border:1px solid #28a745;border-radius:5px;background:#fff;color:#28a745;font-size:12px;font-weight:600;cursor:pointer;';
         hotelEmailBtn.onclick = () => withButtonLoading(hotelEmailBtn, '⏳ Sending...', async () => {
-          const { ok: cok, data: cr } = await gmPost(`${BACKEND_URL}/guided-prewarm/confirm`, { ticketId: String(t.id), bookingId: state.bookingId, action: 'hotel_email' });
+          const { ok: cok, data: cr } = await api.guided.confirm({ ticketId: String(t.id), bookingId: state.bookingId, action: 'hotel_email' });
           if (!cok) { showToast('❌ Error: ' + (cr?.error || 'Server error'), 'error'); return; }
           const r = cr.results; const msgs = [];
           if (r.emailSent) msgs.push(`email → ${r.hotelEmail}`);
@@ -1615,9 +1645,9 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
               fd.append('toEmail', toEmail);
               fd.append('bodyHtml', noteHtml);
               attachedFiles.forEach(function(f) { fd.append('files', f, f.name); });
-              ok = (await gmPostForm(BACKEND_URL + '/send-reply', fd)).ok;
+              ok = (await api.sendReplyForm(fd)).ok;
             } else {
-              ok = (await gmPost(BACKEND_URL + '/send-reply', { freshdeskTicketId: String(t.id), toEmail, bodyHtml: noteHtml })).ok;
+              ok = (await api.sendReply({ freshdeskTicketId: String(t.id), toEmail, bodyHtml: noteHtml })).ok;
             }
             if (ok) { suppSendBtn.textContent = '✅ Sent!'; showToast('Reply sent to supplier.'); refreshFreshdeskTicket(); refreshThread(); }
             else { suppSendBtn.textContent = '❌ Failed'; suppSendBtn.disabled = false; }
@@ -1644,7 +1674,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
 
       confirmBtn.onclick = async () => {
         confirmBtn.disabled = true; confirmBtn.textContent = '⏳ Processing...';
-        const { ok: cok, data: cr } = await gmPost(`${BACKEND_URL}/guided-prewarm/confirm`, { ticketId: String(t.id), bookingId: state.bookingId, action: state.action, noteHtml: bd.noteHtml || null });
+        const { ok: cok, data: cr } = await api.guided.confirm({ ticketId: String(t.id), bookingId: state.bookingId, action: state.action, noteHtml: bd.noteHtml || null });
         if (!cok) { showToast('❌ Error: ' + (cr?.error || 'Server error'), 'error'); confirmBtn.disabled = false; confirmBtn.textContent = actionLabel; return; }
         const r = cr.results; const msgs = [];
         if (r.notePosted) msgs.push('note posted');
@@ -1660,7 +1690,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
 
     // Analyse async — Groq + booking (use prefetch cache if available)
     const _pcA = prefetchCache.get(String(t.id));
-    const _analyseReq = _pcA ? _pcA.analysePromise : gmGet(`${BACKEND_URL}/guided-prewarm/analyse/${t.id}`);
+    const _analyseReq = _pcA ? _pcA.analysePromise : api.guided.analyse(t.id);
     _analyseReq.then(({ ok: aok, data: analysis }) => {
       if (!aok) { bookingSection.innerHTML = '<div style="color:red;font-size:12px;">❌ Analysis failed.</div>'; return; }
       if (analysis.skip) { prog.textContent += ` — skipped (${analysis.reason})`; idx++; renderTicket(); return; }
@@ -1709,7 +1739,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
             previewBtn.style.cssText = 'padding:3px 8px;border:1px solid #fd7e14;border-radius:4px;background:#fff;color:#fd7e14;font-size:11px;cursor:pointer;flex-shrink:0;font-weight:500;';
             previewBtn.onclick = async () => {
               previewBtn.disabled = true; previewBtn.textContent = '⏳';
-              const { ok: tok, data: td } = await gmGet(`${BACKEND_URL}/guided-prewarm/ticket/${dup.id}`);
+              const { ok: tok, data: td } = await api.guided.ticket(dup.id);
               previewBtn.disabled = false; previewBtn.textContent = 'Preview / Merge';
               if (!tok || !td.ticket) { showToast('Could not load ticket.', 'error'); return; }
 
@@ -1781,7 +1811,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
                 mergeThisBtn.onclick = async () => {
                   if (!confirm(`Post this message as a note on #${t.id} and close #${dup.id}?`)) return;
                   mergeThisBtn.disabled = true; mergeThisBtn.textContent = '⏳ Merging...';
-                  const { ok: mok, data: mr } = await gmPost(`${BACKEND_URL}/merge-ticket`, {
+                  const { ok: mok, data: mr } = await api.mergeTicket({
                     sourceTicketId: String(dup.id),
                     targetTicketId: String(t.id),
                     description: bodyHtml,
@@ -1837,7 +1867,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
             mergeOutBtn.style.cssText = 'padding:3px 8px;border:1px solid #6c757d;border-radius:4px;background:#fff;color:#6c757d;font-size:11px;cursor:pointer;flex-shrink:0;font-weight:500;';
             mergeOutBtn.onclick = async () => {
               mergeOutBtn.disabled = true; mergeOutBtn.textContent = '⏳';
-              const { ok: tok, data: td } = await gmGet(`${BACKEND_URL}/guided-prewarm/ticket/${t.id}`);
+              const { ok: tok, data: td } = await api.guided.ticket(t.id);
               mergeOutBtn.disabled = false; mergeOutBtn.textContent = '📤 Merge out';
               if (!tok || !td.ticket) { showToast('Could not load ticket.', 'error'); return; }
 
@@ -1883,7 +1913,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
                 if (!bodyToPost || bodyToPost.includes('Select a message above')) { showToast('Select a message first.', 'error'); return; }
                 if (!confirm(`Merge #${t.id} into #${dup.id}? This will post a note on #${dup.id} and close #${t.id}.`)) return;
                 confirmMergeBtn.disabled = true; confirmMergeBtn.textContent = '⏳ Merging...';
-                const { ok: mok, data: mr } = await gmPost(`${BACKEND_URL}/merge-ticket`, {
+                const { ok: mok, data: mr } = await api.mergeTicket({
                   sourceTicketId: String(t.id), targetTicketId: String(dup.id), description: bodyToPost,
                 });
                 if (mok) {
@@ -2014,7 +2044,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
         const doSearch = async () => {
           const q = searchInput.value.trim(); if (!q) return;
           searchBtn.disabled = true; searchBtn.textContent = '⏳';
-          const { ok: sok, data: sd } = await gmPost(`${BACKEND_URL}/search-tickets`, {
+          const { ok: sok, data: sd } = await api.searchTickets({
             query: q, includeClosed: closedChk.checked, freshdeskTicketId: String(t.id),
           });
           searchBtn.disabled = false; searchBtn.textContent = '🔍 Search';
@@ -2035,7 +2065,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
         const hasRefs = bookingObj && (bookingObj.supplierId || bookingObj.internalBookingId);
         if (hasRefs) {
           dupSection.innerHTML = '<div style="color:#999;font-size:11px;">Checking for open threads...</div>';
-          gmPost(`${BACKEND_URL}/check-duplicates`, {
+          api.checkDuplicates({
             vendorConf: bookingObj.supplierId,
             internalId: bookingObj.internalBookingId,
             memberEmail: userObj?.email || null,
@@ -2043,7 +2073,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
           }).then(({ ok, data: dd }) => renderDupResults((ok && dd.duplicates) ? dd.duplicates : []));
         } else if (userObj?.email) {
           dupSection.innerHTML = '<div style="color:#999;font-size:11px;">Checking for open threads by member email...</div>';
-          gmPost(`${BACKEND_URL}/check-duplicates`, {
+          api.checkDuplicates({
             memberEmail: userObj.email, freshdeskTicketId: String(t.id),
           }).then(({ ok, data: dd }) => renderDupResults((ok && dd.duplicates) ? dd.duplicates : []));
         } else {
@@ -2107,7 +2137,7 @@ function showBulkConfirmModal() {
     if (!tag) { showToast('Enter a tag first.', 'warning'); return; }
     outputArea.innerHTML = '<div style="color:#999;font-size:13px;">Loading...</div>';
 
-    const { ok, data } = await gmPost(`${BACKEND_URL}/bulk-confirm`, { tag });
+    const { ok, data } = await api.bulkConfirm(tag);
 
     if (!ok) { outputArea.innerHTML = `<div style="color:red;">❌ Error: ${data?.error || 'Server error'}</div>`; return; }
 
@@ -2529,7 +2559,7 @@ function showReplyComposer(opts) {
       if (!textToTranslate) { showToast('Nothing to translate after stripping sign-off.', 'warning'); return; }
 
       const lang = langInput.value.trim() || detectedLang || 'en';
-      const { ok, data } = await gmPost(BACKEND_URL + '/translate', { text: textToTranslate, target: lang });
+      const { ok, data } = await api.translate(textToTranslate, lang );
       if (!ok || !data?.text) { showToast('Translation failed.', 'error'); return; }
 
       const translatedHtml = data.text.replace(/\n/g, '<br>');
@@ -2571,9 +2601,9 @@ function showReplyComposer(opts) {
       fd.append('toEmail', toEmail);
       fd.append('bodyHtml', noteHtml);
       attachedFiles.forEach(function(f) { fd.append('files', f, f.name); });
-      ok = (await gmPostForm(BACKEND_URL + '/send-reply', fd)).ok;
+      ok = (await api.sendReplyForm(fd)).ok;
     } else {
-      ok = (await gmPost(BACKEND_URL + '/send-reply', { freshdeskTicketId: tid, toEmail, bodyHtml: noteHtml })).ok;
+      ok = (await api.sendReply({ freshdeskTicketId: tid, toEmail, bodyHtml: noteHtml })).ok;
     }
     if (ok) { sendBtn.textContent = '✅ Sent!'; showToast('Reply sent to ' + label + '.'); refreshFreshdeskTicket(); if (onSent) onSent(); }
     else    { sendBtn.textContent = '❌ Failed'; sendBtn.disabled = false; }
@@ -2675,7 +2705,7 @@ function attachMacroTrigger(el, booking, details, user) {
     if (!match) { dismissDropdown(); return; }
     macroQuery = match[1].toLowerCase();
 
-    const { ok, data } = await gmGet(BACKEND_URL + '/settings/macros');
+    const { ok, data } = await api.macros();
     const macros = (ok && Array.isArray(data)) ? data : [];
     const filtered = macros.filter(m => m.name.toLowerCase().includes(macroQuery));
 
@@ -2787,7 +2817,7 @@ function autoTagTicket(freshdeskTicketId, booking) {
   const tags    = [monthYr, country].filter(Boolean);
   if (!tags.length) return;
 
-  gmPost(`${BACKEND_URL}/tag-ticket`, { freshdeskTicketId, tags, type: 'Reservations' })
+  api.tagTicket({ freshdeskTicketId, tags, type: 'Reservations' })
     .then(({ ok }) => { if (ok) { console.log(`🏷️ Tagged ${freshdeskTicketId}:`, tags); refreshFreshdeskTicket(); } })
     .catch(e => console.warn('⚠️ Tag error:', e.message));
 }
@@ -2795,7 +2825,7 @@ function autoTagTicket(freshdeskTicketId, booking) {
 // ── Duplicate check ───────────────────────────────────────────────────────────
 async function checkDuplicates(booking, user, freshdeskTicketId) {
   try {
-    const { ok, data } = await gmPost(`${BACKEND_URL}/check-duplicates`, {
+    const { ok, data } = await api.checkDuplicates({
       vendorConf:  booking.supplierId,
       internalId:  booking.internalBookingId,
       memberEmail: user && user.email ? user.email : null,
