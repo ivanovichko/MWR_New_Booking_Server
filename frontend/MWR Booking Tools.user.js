@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.17
+// @version      6.18
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -17,6 +17,24 @@
 
   // ===== CONFIG =====
   const BACKEND_URL = 'https://mwr-new-booking-server.onrender.com';
+
+  // ===== THEME TOKENS =====
+  // Shared visual constants. createModal and modal-builder helpers read these
+  // so a single edit propagates across every floating panel.
+  const THEME = {
+    font:    'system-ui,sans-serif',
+    shadow:  '0 8px 30px rgba(0,0,0,0.25)',
+    radius:  '10px',
+    border:  '#eee',
+    text:    '#333',
+    muted:   '#888',
+    subtle:  '#999',
+    primary: '#6f42c1', // purple
+    success: '#28a745',
+    danger:  '#dc3545',
+    warn:    '#ffc107',
+    info:    '#17a2b8',
+  };
 
   // ===== API LAYER =====
   // Wraps gmGet / gmPost / gmPostForm in named methods so URLs and request
@@ -146,15 +164,16 @@ async function withButtonLoading(btn, loadingLabel, fn) {
 // Returns { modal, header, body, closeBtn }
 function createModal(id, title, opts = {}) {
   document.getElementById(id)?.remove();
+  const zIndex = opts.zIndex || 999999;
   const modal = document.createElement('div');
   modal.id = id;
-  modal.style.cssText = 'position:fixed;background:#fff;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,0.25);z-index:999999;font-family:system-ui,sans-serif;display:flex;flex-direction:column;' + (opts.style || '');
+  modal.style.cssText = `position:fixed;background:#fff;border-radius:${THEME.radius};box-shadow:${THEME.shadow};z-index:${zIndex};font-family:${THEME.font};display:flex;flex-direction:column;` + (opts.style || '');
 
   const header = document.createElement('div');
   header.id = id + 'Handle';
-  header.style.cssText = 'padding:12px 16px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;cursor:move;';
+  header.style.cssText = `padding:12px 16px;border-bottom:1px solid ${THEME.border};display:flex;justify-content:space-between;align-items:center;flex-shrink:0;cursor:move;`;
   const titleEl = document.createElement('span');
-  titleEl.style.cssText = 'font-weight:600;font-size:14px;color:#333;';
+  titleEl.style.cssText = `font-weight:600;font-size:14px;color:${THEME.text};`;
   titleEl.textContent = title;
   const closeBtn = document.createElement('button');
   closeBtn.textContent = '×';
@@ -174,29 +193,30 @@ function createModal(id, title, opts = {}) {
 }
 
 // ── Confirm modal (replaces confirm()) ────────────────────────────────────────
-function showConfirmModal(title, lines, confirmLabel, onConfirm, onCancel, confirmColor = '#6f42c1') {
-  document.getElementById('taConfirmModal')?.remove();
-  const modal = document.createElement('div');
-  modal.id = 'taConfirmModal';
-  modal.style.cssText = 'position:fixed;top:120px;left:50%;transform:translateX(-50%);width:420px;background:#fff;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,0.25);z-index:1000001;font-family:system-ui,sans-serif;';
-  modal.innerHTML = `
-    <div id="taConfirmHandle" style="padding:14px 18px 10px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;">
-      <span style="font-weight:600;font-size:14px;color:#333;">${title}</span>
-      <button id="taConfirmX" style="background:none;border:none;font-size:18px;color:#aaa;cursor:pointer;">×</button>
-    </div>
-    <div style="padding:14px 18px;font-size:13px;color:#444;line-height:1.8;">
-      ${lines.map(l => `<div>${l}</div>`).join('')}
-    </div>
-    <div style="padding:0 18px 16px;display:flex;gap:8px;justify-content:flex-end;">
-      <button id="taConfirmCancel" style="padding:8px 16px;border:1px solid #ddd;border-radius:6px;cursor:pointer;font-size:13px;background:#fff;color:#666;">Cancel</button>
-      <button id="taConfirmOk" style="padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;background:${confirmColor};color:#fff;">${confirmLabel}</button>
-    </div>`;
-  document.body.appendChild(modal);
-  makeDraggable(modal, document.getElementById('taConfirmHandle'));
+function showConfirmModal(title, lines, confirmLabel, onConfirm, onCancel, confirmColor = THEME.primary) {
+  const { modal, body, closeBtn } = createModal('taConfirmModal', title, {
+    style: 'top:120px;left:50%;transform:translateX(-50%);width:420px;',
+    bodyStyle: 'padding:14px 18px;font-size:13px;color:#444;line-height:1.8;',
+    zIndex: 1000001,
+  });
+  body.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
+
   const close = () => modal.remove();
-  document.getElementById('taConfirmX').onclick      = () => { close(); onCancel?.(); };
-  document.getElementById('taConfirmCancel').onclick = () => { close(); onCancel?.(); };
-  document.getElementById('taConfirmOk').onclick     = () => { close(); onConfirm(); };
+  closeBtn.onclick = () => { close(); onCancel?.(); };
+
+  const btnRow = document.createElement('div');
+  btnRow.style.cssText = 'padding:0 18px 16px;display:flex;gap:8px;justify-content:flex-end;';
+  const cancelBtn = document.createElement('button');
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.style.cssText = 'padding:8px 16px;border:1px solid #ddd;border-radius:6px;cursor:pointer;font-size:13px;background:#fff;color:#666;';
+  cancelBtn.onclick = () => { close(); onCancel?.(); };
+  const okBtn = document.createElement('button');
+  okBtn.textContent = confirmLabel;
+  okBtn.style.cssText = `padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;background:${confirmColor};color:#fff;`;
+  okBtn.onclick = () => { close(); onConfirm(); };
+  btnRow.appendChild(cancelBtn);
+  btnRow.appendChild(okBtn);
+  modal.appendChild(btnRow);
 }
 
 // ── Refresh Freshdesk ticket timeline without full page reload ────────────────
@@ -211,21 +231,12 @@ function refreshFreshdeskTicket() {
 
 
 function showNoteModal(noteHtml) {
-  document.getElementById('taNoteModal')?.remove();
-  const modal = document.createElement('div');
-  modal.id = 'taNoteModal';
-  modal.style.cssText = 'position:fixed;top:60px;left:24px;width:860px;max-width:95vw;background:#fff;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,0.25);z-index:1000000;font-family:system-ui,sans-serif;';
-  modal.innerHTML = `
-    <div id="taNoteHandle" style="padding:14px 18px 10px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;">
-      <span style="font-weight:600;font-size:14px;color:#333;">👁️ Note Preview</span>
-      <button id="taNoteClose" style="background:none;border:none;font-size:18px;color:#aaa;cursor:pointer;">×</button>
-    </div>
-    <div style="overflow-y:auto;max-height:80vh;padding:16px 18px;font-size:13px;line-height:1.6;">
-      ${noteHtml}
-    </div>`;
-  document.body.appendChild(modal);
-  makeDraggable(modal, document.getElementById('taNoteHandle'));
-  document.getElementById('taNoteClose').onclick = () => modal.remove();
+  const { body } = createModal('taNoteModal', '👁️ Note Preview', {
+    style: 'top:60px;left:24px;width:860px;max-width:95vw;',
+    bodyStyle: 'max-height:80vh;font-size:13px;line-height:1.6;',
+    zIndex: 1000000,
+  });
+  body.innerHTML = noteHtml;
 }
 
 
@@ -234,24 +245,10 @@ async function showChatModal(ticketId, onNotePosted) {
   const freshdeskTicketId = ticketId || getFreshdeskTicketId();
   if (!freshdeskTicketId) { showToast('No ticket detected.', 'error'); return; }
 
-  document.getElementById('taChatModal')?.remove();
-
-  const modal = document.createElement('div');
-  modal.id = 'taChatModal';
-  modal.style.cssText = 'position:fixed;top:60px;right:24px;width:700px;max-width:calc(100vw - 48px);max-height:92vh;display:flex;flex-direction:column;background:#fff;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,0.3);z-index:999999;font-family:system-ui,sans-serif;resize:both;overflow:auto;min-width:400px;';
-
-  const header = document.createElement('div');
-  header.id = 'taChatHandle';
-  header.style.cssText = 'padding:12px 16px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;cursor:move;';
-  header.innerHTML = `<span style="font-weight:600;font-size:14px;color:#333;">💬 Chat — #${freshdeskTicketId}</span>`;
-  const closeBtn = document.createElement('button');
-  closeBtn.textContent = '×';
-  closeBtn.style.cssText = 'background:none;border:none;font-size:18px;color:#aaa;cursor:pointer;';
-  closeBtn.onclick = () => modal.remove();
-  header.appendChild(closeBtn);
-
-  const body = document.createElement('div');
-  body.style.cssText = 'flex:1;overflow-y:auto;padding:14px 16px;display:flex;flex-direction:column;gap:12px;';
+  const { body } = createModal('taChatModal', `💬 Chat — #${freshdeskTicketId}`, {
+    style: 'top:60px;right:24px;width:700px;max-width:calc(100vw - 48px);max-height:92vh;resize:both;overflow:auto;min-width:400px;',
+    bodyStyle: 'padding:14px 16px;display:flex;flex-direction:column;gap:12px;',
+  });
 
   // Chat translation section
   const chatSection = document.createElement('div');
@@ -284,11 +281,6 @@ async function showChatModal(ticketId, onNotePosted) {
   chatSection.appendChild(chatTextarea);
   chatSection.appendChild(chatBtnRow);
   body.appendChild(chatSection);
-
-  modal.appendChild(header);
-  modal.appendChild(body);
-  document.body.appendChild(modal);
-  makeDraggable(modal, header);
 
   // Translate Chat — fetch prompt from DB then send with ticket context
   api.prompts().then(async ({ ok: pok, data: pdata }) => {
@@ -2099,25 +2091,14 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
 
 // ── Prewarm progress modal ────────────────────────────────────────────────────
 function showBulkConfirmModal() {
-  document.getElementById('taBulkModal')?.remove();
+  const { modal, body: outputArea } = createModal('taBulkModal', '🏨 Bulk Confirm', {
+    style: 'top:60px;left:50%;transform:translateX(-50%);width:1100px;max-width:calc(100vw - 48px);max-height:92vh;resize:both;overflow:auto;min-width:500px;',
+    bodyStyle: 'padding:14px 16px;display:flex;flex-direction:column;gap:16px;',
+  });
 
-  const modal = document.createElement('div');
-  modal.id = 'taBulkModal';
-  modal.style.cssText = 'position:fixed;top:60px;left:50%;transform:translateX(-50%);width:1100px;max-width:calc(100vw - 48px);max-height:92vh;display:flex;flex-direction:column;background:#fff;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,0.25);z-index:999999;font-family:system-ui,sans-serif;resize:both;overflow:auto;min-width:500px;';
-
-  const header = document.createElement('div');
-  header.id = 'taBulkHandle';
-  header.style.cssText = 'padding:12px 16px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;cursor:move;';
-  header.innerHTML = '<span style="font-weight:600;font-size:14px;color:#333;">🏨 Bulk Confirm</span>';
-  const closeBtn = document.createElement('button');
-  closeBtn.textContent = '×';
-  closeBtn.style.cssText = 'background:none;border:none;font-size:18px;color:#aaa;cursor:pointer;';
-  closeBtn.onclick = () => modal.remove();
-  header.appendChild(closeBtn);
-
-  // Tag input row
+  // Tag input row — inserted between header and the body created above
   const inputRow = document.createElement('div');
-  inputRow.style.cssText = 'padding:12px 16px;border-bottom:1px solid #eee;display:flex;gap:8px;align-items:center;flex-shrink:0;';
+  inputRow.style.cssText = `padding:12px 16px;border-bottom:1px solid ${THEME.border};display:flex;gap:8px;align-items:center;flex-shrink:0;`;
   const tagInput = document.createElement('input');
   tagInput.type = 'text';
   tagInput.placeholder = 'Enter Freshdesk tag (e.g. belenli)';
@@ -2127,10 +2108,6 @@ function showBulkConfirmModal() {
   fetchBtn.style.cssText = 'padding:8px 16px;border:none;border-radius:6px;background:#795548;color:#fff;font-size:13px;font-weight:600;cursor:pointer;';
   inputRow.appendChild(tagInput);
   inputRow.appendChild(fetchBtn);
-
-  // Output area
-  const outputArea = document.createElement('div');
-  outputArea.style.cssText = 'flex:1;overflow-y:auto;padding:14px 16px;display:flex;flex-direction:column;gap:16px;';
 
   fetchBtn.onclick = () => withButtonLoading(fetchBtn, '⏳ Fetching...', async () => {
     const tag = tagInput.value.trim();
@@ -2235,36 +2212,24 @@ function showBulkConfirmModal() {
 
   tagInput.addEventListener('keydown', e => { if (e.key === 'Enter') fetchBtn.click(); });
 
-  modal.appendChild(header);
-  modal.appendChild(inputRow);
-  modal.appendChild(outputArea);
-  document.body.appendChild(modal);
-  makeDraggable(modal, header);
+  modal.insertBefore(inputRow, outputArea);
   setTimeout(() => tagInput.focus(), 100);
 }
 
 // ── Check Pendings modal ──────────────────────────────────────────────────────
 function showCheckPendingsModal() {
-  document.getElementById('taPendingsModal')?.remove();
-  const modal = document.createElement('div');
-  modal.id = 'taPendingsModal';
-  modal.style.cssText = 'position:fixed;bottom:24px;right:24px;width:440px;background:#fff;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,0.25);z-index:999999;font-family:system-ui,sans-serif;';
-  modal.innerHTML = `
-    <div id="taPendingsHandle" style="padding:12px 16px 10px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;">
-      <span style="font-weight:600;font-size:13px;">📋 Checking pending tickets...</span>
-      <div style="display:flex;gap:8px;align-items:center;">
-        <button id="taPendingsStop" style="padding:3px 10px;border:1px solid #dc3545;border-radius:4px;background:#fff;color:#dc3545;font-size:12px;cursor:pointer;font-weight:500;">Stop</button>
-        <button id="taPendingsClose" style="background:none;border:none;font-size:18px;color:#aaa;cursor:pointer;" disabled>×</button>
-      </div>
-    </div>
-    <div id="taPendingsLog" style="max-height:280px;overflow-y:auto;font-size:12px;font-family:monospace;background:#f8f8f8;padding:10px 12px;line-height:1.8;border-radius:0 0 10px 10px;"></div>`;
-  document.body.appendChild(modal);
-  makeDraggable(modal, document.getElementById('taPendingsHandle'));
+  const { modal, header, body, closeBtn } = createModal('taPendingsModal', '📋 Checking pending tickets...', {
+    style: 'bottom:24px;right:24px;width:440px;',
+    bodyStyle: 'max-height:280px;font-size:12px;font-family:monospace;background:#f8f8f8;padding:10px 12px;line-height:1.8;',
+  });
+  closeBtn.disabled = true;
 
-  const log      = document.getElementById('taPendingsLog');
-  const closeBtn = document.getElementById('taPendingsClose');
-  const stopBtn  = document.getElementById('taPendingsStop');
-  closeBtn.onclick = () => modal.remove();
+  const stopBtn = document.createElement('button');
+  stopBtn.textContent = 'Stop';
+  stopBtn.style.cssText = `padding:3px 10px;border:1px solid ${THEME.danger};border-radius:4px;background:#fff;color:${THEME.danger};font-size:12px;cursor:pointer;font-weight:500;margin-right:8px;`;
+  header.insertBefore(stopBtn, closeBtn);
+
+  const log = body;
   stopBtn.onclick = () => {
     stopBtn.disabled = true; stopBtn.textContent = 'Stopping...';
     GM_xmlhttpRequest({ method: 'POST', url: `${BACKEND_URL}/check-pendings/stop`, headers: { 'Content-Type': 'application/json' }, data: '{}', onload: () => {} });
