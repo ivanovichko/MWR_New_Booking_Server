@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.18
+// @version      6.19
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -190,6 +190,53 @@ function createModal(id, title, opts = {}) {
   document.body.appendChild(modal);
   if (!opts.noDrag) makeDraggable(modal, header);
   return { modal, header, body, closeBtn };
+}
+
+// ── Rich editor — contentEditable div with optional image-paste support ─────
+// opts.style         — full style override for the editor element
+// opts.placeholder   — data-placeholder text shown when empty
+// opts.pasteImages   — when true (default), pasted images are inlined as base64
+// Returns the editor element. Caller is responsible for appending it.
+function createRichEditor(opts = {}) {
+  const editor = document.createElement('div');
+  editor.contentEditable = 'true';
+  editor.style.cssText = opts.style || `border:1px solid #ddd;border-radius:6px;padding:9px 12px;font-size:13px;font-family:${THEME.font};line-height:1.5;outline:none;min-height:120px;overflow-y:auto;`;
+  if (opts.placeholder) {
+    editor.setAttribute('data-placeholder', opts.placeholder);
+  }
+  if (opts.pasteImages !== false) {
+    editor.addEventListener('paste', (e) => {
+      const items = e.clipboardData && e.clipboardData.items;
+      if (!items) return;
+      for (const item of items) {
+        if (item.type.startsWith('image/')) {
+          e.preventDefault();
+          const file = item.getAsFile();
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            const img = document.createElement('img');
+            img.src = ev.target.result;
+            img.style.cssText = 'max-width:100%;height:auto;display:block;margin:4px 0;border-radius:3px;';
+            const sel = window.getSelection();
+            if (sel && sel.rangeCount) {
+              const range = sel.getRangeAt(0);
+              range.deleteContents();
+              range.insertNode(img);
+              range.setStartAfter(img);
+              range.collapse(true);
+              sel.removeAllRanges();
+              sel.addRange(range);
+            } else {
+              editor.appendChild(img);
+            }
+          };
+          reader.readAsDataURL(file);
+          return;
+        }
+      }
+    });
+  }
+  return editor;
 }
 
 // ── Confirm modal (replaces confirm()) ────────────────────────────────────────
@@ -914,42 +961,12 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
     // ── Note tab content — drops a paste-aware editor + post button into `body` ─
     const buildNoteTabContent = (body) => {
       body.innerHTML = '';
-      const editor = document.createElement('div');
-      editor.contentEditable = 'true';
-      editor.style.cssText = 'min-height:80px;max-height:220px;overflow-y:auto;border:1px solid #ddd;border-radius:5px;padding:8px 10px;font-size:13px;font-family:system-ui,sans-serif;line-height:1.5;color:#333;outline:none;';
-      editor.setAttribute('data-placeholder', 'Type note here… or paste an image (Ctrl+V)');
       const phStyle = document.createElement('style');
       phStyle.textContent = '[data-placeholder]:empty:before{content:attr(data-placeholder);color:#aaa;pointer-events:none;}';
       body.appendChild(phStyle);
-      editor.addEventListener('paste', (e) => {
-        const items = e.clipboardData && e.clipboardData.items;
-        if (!items) return;
-        for (const item of items) {
-          if (item.type.startsWith('image/')) {
-            e.preventDefault();
-            const file = item.getAsFile();
-            const reader = new FileReader();
-            reader.onload = (ev) => {
-              const img = document.createElement('img');
-              img.src = ev.target.result;
-              img.style.cssText = 'max-width:100%;height:auto;display:block;margin:4px 0;border-radius:3px;';
-              const sel = window.getSelection();
-              if (sel && sel.rangeCount) {
-                const range = sel.getRangeAt(0);
-                range.deleteContents();
-                range.insertNode(img);
-                range.setStartAfter(img);
-                range.collapse(true);
-                sel.removeAllRanges();
-                sel.addRange(range);
-              } else {
-                editor.appendChild(img);
-              }
-            };
-            reader.readAsDataURL(file);
-            return;
-          }
-        }
+      const editor = createRichEditor({
+        placeholder: 'Type note here… or paste an image (Ctrl+V)',
+        style: `min-height:80px;max-height:220px;overflow-y:auto;border:1px solid #ddd;border-radius:5px;padding:8px 10px;font-size:13px;font-family:${THEME.font};line-height:1.5;color:${THEME.text};outline:none;`,
       });
       body.appendChild(editor);
       const actionsRow = document.createElement('div');
@@ -1571,9 +1588,9 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
           toRow.appendChild(toLabel); toRow.appendChild(toInput);
           replyBody.appendChild(toRow);
 
-          const suppTA = document.createElement('div');
-          suppTA.contentEditable = 'true';
-          suppTA.style.cssText = 'width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid #ddd;border-radius:6px;font-size:13px;font-family:system-ui,sans-serif;min-height:200px;line-height:1.5;outline:none;margin-bottom:8px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;';
+          const suppTA = createRichEditor({
+            style: `width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid #ddd;border-radius:6px;font-size:13px;font-family:${THEME.font};min-height:200px;line-height:1.5;outline:none;margin-bottom:8px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;`,
+          });
           suppTA.textContent = buildReplySignature('supplier', booking, details, user);
           suppTA.innerHTML = suppTA.innerHTML.replace(/\n/g, '<br>');
           attachMacroTrigger(suppTA, booking, details, user);
@@ -1590,27 +1607,6 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
               }
             }
           }, 50);
-          suppTA.addEventListener('paste', (e) => {
-            const items = e.clipboardData && e.clipboardData.items;
-            if (!items) return;
-            for (const item of items) {
-              if (item.type.startsWith('image/')) {
-                e.preventDefault();
-                const reader = new FileReader();
-                reader.onload = (ev) => {
-                  const img = document.createElement('img');
-                  img.src = ev.target.result;
-                  img.style.cssText = 'max-width:100%;height:auto;display:block;margin:4px 0;border-radius:3px;';
-                  const sel = window.getSelection();
-                  if (sel && sel.rangeCount) {
-                    const range = sel.getRangeAt(0); range.deleteContents(); range.insertNode(img);
-                    range.setStartAfter(img); range.collapse(true); sel.removeAllRanges(); sel.addRange(range);
-                  } else { suppTA.appendChild(img); }
-                };
-                reader.readAsDataURL(item.getAsFile()); return;
-              }
-            }
-          });
           replyBody.appendChild(suppTA);
 
           const { el: suppAttachEl, getFiles: getSuppFiles } = buildAttachmentUI();
@@ -1891,9 +1887,10 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
               const editorLabel = document.createElement('div');
               editorLabel.style.cssText = 'font-size:11px;color:#888;margin-bottom:4px;font-weight:600;';
               editorLabel.textContent = `Note to post on #${dup.id}:`;
-              const editorEl = document.createElement('div');
-              editorEl.contentEditable = 'true';
-              editorEl.style.cssText = 'min-height:60px;max-height:150px;overflow-y:auto;border:1px solid #ddd;border-radius:4px;padding:6px 8px;font-size:12px;background:#fff;outline:none;';
+              const editorEl = createRichEditor({
+                pasteImages: false,
+                style: 'min-height:60px;max-height:150px;overflow-y:auto;border:1px solid #ddd;border-radius:4px;padding:6px 8px;font-size:12px;background:#fff;outline:none;',
+              });
               editorEl.innerHTML = '<span style="color:#aaa;font-style:italic;">Select a message above…</span>';
               const editorActions = document.createElement('div');
               editorActions.style.cssText = 'display:flex;justify-content:flex-end;gap:6px;margin-top:6px;';
@@ -2420,9 +2417,9 @@ function showReplyComposer(opts) {
   // Header info
 
   // Editable reply area (contenteditable — preserves pasted HTML, images, links)
-  const replyArea = document.createElement('div');
-  replyArea.contentEditable = 'true';
-  replyArea.style.cssText = 'width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid #ddd;border-radius:6px;font-size:13px;font-family:system-ui,sans-serif;min-height:200px;line-height:1.5;outline:none;overflow-y:auto;white-space:pre-wrap;word-break:break-word;';
+  const replyArea = createRichEditor({
+    style: `width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid #ddd;border-radius:6px;font-size:13px;font-family:${THEME.font};min-height:200px;line-height:1.5;outline:none;overflow-y:auto;white-space:pre-wrap;word-break:break-word;`,
+  });
   // Set initial signature as plain text, converting newlines to <br>
   replyArea.textContent = buildReplySignature(recipientType, booking, details, user);
   replyArea.innerHTML = replyArea.innerHTML.replace(/\n/g, '<br>');
@@ -2445,32 +2442,6 @@ function showReplyComposer(opts) {
       }
     }
   }, 50);
-
-  // Intercept image-file pastes — convert blob URL to base64 so images survive in email
-  replyArea.addEventListener('paste', (e) => {
-    const items = e.clipboardData && e.clipboardData.items;
-    if (!items) return;
-    for (const item of items) {
-      if (item.type.startsWith('image/')) {
-        e.preventDefault();
-        const reader = new FileReader();
-        reader.onload = (ev) => {
-          const img = document.createElement('img');
-          img.src = ev.target.result;
-          img.style.cssText = 'max-width:100%;height:auto;display:block;margin:4px 0;border-radius:3px;';
-          const sel = window.getSelection();
-          if (sel && sel.rangeCount) {
-            const range = sel.getRangeAt(0);
-            range.deleteContents(); range.insertNode(img);
-            range.setStartAfter(img); range.collapse(true);
-            sel.removeAllRanges(); sel.addRange(range);
-          } else { replyArea.appendChild(img); }
-        };
-        reader.readAsDataURL(item.getAsFile());
-        return;
-      }
-    }
-  });
 
   container.appendChild(replyArea);
 
