@@ -15,7 +15,7 @@ const { initDb, getCachedBooking, cacheBooking, storeSession, getPrompts, create
 const { prewarm, fetchAndCacheBooking, extractBookingId, checkPendings, checkInPriority, setTicketPriority, postNote } = require('./services/prewarmService');
 const { taGet, taPost }                  = require('./services/taAuthService');
 const { buildHotelEmailHtml }            = require('./services/hotelEmailBuilder');
-const { confirmTicket }                  = require('./services/ticketActionService');
+const { confirmTicket, lookupHotelEmail, sendHotelEmailConfirmed } = require('./services/ticketActionService');
 const { FD_STATUS, PREWARM_CONVERSATION_THRESHOLD } = require('./config');
 
 const app = express();
@@ -730,6 +730,26 @@ app.post('/guided-prewarm/confirm', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// Hotel email — phase 1: tag + Groq lookup, no send.
+app.post('/guided-prewarm/hotel-email/lookup', safeRoute(async (req, res) => {
+  const { ticketId, bookingId } = req.body;
+  if (!ticketId || !bookingId) throw new HttpError('ticketId and bookingId are required');
+  console.log(`[hotel-email] lookup — ticket=${ticketId} booking=${bookingId}`);
+  const data = await lookupHotelEmail(ticketId, bookingId);
+  console.log(`[hotel-email] groq → ${data.emailResult?.email || '(none)'} (${data.emailResult?.confidence || 'n/a'})`);
+  res.json({ success: true, ...data });
+}));
+
+// Hotel email — phase 2: agent confirmed/edited the address; send + post result note.
+app.post('/guided-prewarm/hotel-email/send', safeRoute(async (req, res) => {
+  const { ticketId, bookingId, hotelEmail } = req.body;
+  if (!ticketId || !bookingId || !hotelEmail) throw new HttpError('ticketId, bookingId, and hotelEmail are required');
+  console.log(`[hotel-email] send — ticket=${ticketId} to=${hotelEmail}`);
+  const results = await sendHotelEmailConfirmed(ticketId, bookingId, hotelEmail);
+  console.log(`[hotel-email] sent to ${hotelEmail}`);
+  res.json({ success: true, results });
+}));
 
 // ─── Bulk confirm ─────────────────────────────────────────────────────────────
 app.post('/bulk-confirm', async (req, res) => {

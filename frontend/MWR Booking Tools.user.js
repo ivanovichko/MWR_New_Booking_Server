@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.19
+// @version      6.20
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -46,6 +46,8 @@
       analyse: (id)            => gmGet(`${BACKEND_URL}/guided-prewarm/analyse/${id}`),
       booking: (id)            => gmGet(`${BACKEND_URL}/guided-prewarm/booking/${encodeURIComponent(id)}`),
       confirm: (body)          => gmPost(`${BACKEND_URL}/guided-prewarm/confirm`, body),
+      hotelEmailLookup: (body) => gmPost(`${BACKEND_URL}/guided-prewarm/hotel-email/lookup`, body),
+      hotelEmailSend:   (body) => gmPost(`${BACKEND_URL}/guided-prewarm/hotel-email/send`, body),
     },
     postNote:        (ticketId, noteHtml)         => gmPost(`${BACKEND_URL}/post-note`, { freshdeskTicketId: String(ticketId), noteHtml }),
     updateTicket:    (ticketId, fields)           => gmPost(`${BACKEND_URL}/update-ticket`, { ticketId: String(ticketId), fields }),
@@ -264,6 +266,122 @@ function showConfirmModal(title, lines, confirmLabel, onConfirm, onCancel, confi
   btnRow.appendChild(cancelBtn);
   btnRow.appendChild(okBtn);
   modal.appendChild(btnRow);
+}
+
+// ── Hotel email confirmation modal ───────────────────────────────────────────
+// Always opens after a Groq lookup. Lets the agent edit the address before
+// sending. opts: { hotelName, emailResult, emailHtmlPreview, onSend(addr, ctx) }
+function showHotelEmailConfirmModal(opts) {
+  const { hotelName, emailResult, emailHtmlPreview, onSend } = opts;
+  const e = emailResult || {};
+  const hasEmail = !!e.email;
+  const isLow   = e.confidence === 'low';
+  const chip = !hasEmail
+    ? { bg:'#f8d7da', fg:'#dc3545', text:'❌ Not found' }
+    : isLow
+    ? { bg:'#fff3cd', fg:'#fd7e14', text:'⚠️ Low confidence' }
+    : { bg:'#d4edda', fg:'#28a745', text:'✅ ' + (e.confidence || 'found') };
+
+  const { modal, body, closeBtn } = createModal('taHotelEmailModal', '📧 Send Hotel Email', {
+    style: 'top:80px;left:50%;transform:translateX(-50%);width:560px;max-width:95vw;max-height:85vh;',
+    bodyStyle: 'padding:14px 18px;font-size:13px;color:#333;line-height:1.5;',
+    zIndex: 1000001,
+  });
+
+  const hotelRow = document.createElement('div');
+  hotelRow.style.cssText = 'margin-bottom:10px;';
+  hotelRow.innerHTML = `<div style="color:${THEME.muted};font-size:11px;text-transform:uppercase;letter-spacing:0.4px;">Hotel</div>
+    <div style="font-weight:600;">${hotelName || '(unknown)'}</div>`;
+  body.appendChild(hotelRow);
+
+  const chipEl = document.createElement('div');
+  chipEl.style.cssText = `display:inline-block;background:${chip.bg};color:${chip.fg};padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600;margin-bottom:10px;`;
+  chipEl.textContent = chip.text;
+  body.appendChild(chipEl);
+
+  if (e.source) {
+    const src = document.createElement('div');
+    src.style.cssText = `font-size:11px;color:${THEME.muted};margin-bottom:6px;`;
+    src.innerHTML = `<strong>Source:</strong> ${e.source}`;
+    body.appendChild(src);
+  }
+  if (e.notes) {
+    const nt = document.createElement('div');
+    nt.style.cssText = `font-size:11px;color:${THEME.muted};margin-bottom:10px;`;
+    nt.innerHTML = `<strong>Notes:</strong> ${e.notes}`;
+    body.appendChild(nt);
+  }
+
+  const emailLabel = document.createElement('div');
+  emailLabel.style.cssText = `color:${THEME.muted};font-size:11px;text-transform:uppercase;letter-spacing:0.4px;margin-top:6px;`;
+  emailLabel.textContent = 'Send to';
+  body.appendChild(emailLabel);
+  const emailInput = document.createElement('input');
+  emailInput.type = 'email';
+  emailInput.value = e.email || '';
+  emailInput.placeholder = 'hotel@example.com';
+  emailInput.style.cssText = `width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid #ddd;border-radius:6px;font-size:13px;font-family:${THEME.font};margin-top:4px;margin-bottom:12px;`;
+  body.appendChild(emailInput);
+
+  if (emailHtmlPreview) {
+    const previewToggle = document.createElement('button');
+    previewToggle.textContent = '▸ Preview email body';
+    previewToggle.style.cssText = `background:none;border:none;color:${THEME.primary};font-size:12px;cursor:pointer;padding:0;margin-bottom:6px;`;
+    const previewBox = document.createElement('div');
+    previewBox.style.cssText = `display:none;border:1px solid ${THEME.border};border-radius:6px;padding:10px;background:#fafafa;max-height:240px;overflow-y:auto;font-size:12px;`;
+    previewBox.innerHTML = emailHtmlPreview;
+    previewToggle.onclick = () => {
+      const open = previewBox.style.display !== 'none';
+      previewBox.style.display = open ? 'none' : 'block';
+      previewToggle.textContent = (open ? '▸' : '▾') + ' Preview email body';
+    };
+    body.appendChild(previewToggle);
+    body.appendChild(previewBox);
+  }
+
+  const errLine = document.createElement('div');
+  errLine.style.cssText = `color:${THEME.danger};font-size:12px;margin-top:8px;display:none;`;
+  body.appendChild(errLine);
+
+  const close = () => modal.remove();
+  closeBtn.onclick = close;
+
+  const btnRow = document.createElement('div');
+  btnRow.style.cssText = 'padding:0 18px 16px;display:flex;gap:8px;justify-content:flex-end;';
+  const cancelBtn = document.createElement('button');
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.style.cssText = 'padding:8px 16px;border:1px solid #ddd;border-radius:6px;cursor:pointer;font-size:13px;background:#fff;color:#666;';
+  cancelBtn.onclick = close;
+  const sendBtn = document.createElement('button');
+  sendBtn.textContent = 'Send';
+  sendBtn.style.cssText = `padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;background:${THEME.success};color:#fff;`;
+  sendBtn.onclick = async () => {
+    const addr = (emailInput.value || '').trim();
+    if (!addr || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(addr)) {
+      errLine.textContent = 'Please enter a valid email address.';
+      errLine.style.display = 'block';
+      emailInput.focus();
+      return;
+    }
+    errLine.style.display = 'none';
+    sendBtn.disabled = true; cancelBtn.disabled = true;
+    const original = sendBtn.textContent;
+    sendBtn.textContent = '⏳ Sending...';
+    try {
+      await onSend(addr);
+      close();
+    } catch (err) {
+      errLine.textContent = err && err.message ? err.message : 'Send failed.';
+      errLine.style.display = 'block';
+      sendBtn.disabled = false; cancelBtn.disabled = false;
+      sendBtn.textContent = original;
+    }
+  };
+  btnRow.appendChild(cancelBtn);
+  btnRow.appendChild(sendBtn);
+  modal.appendChild(btnRow);
+
+  setTimeout(() => emailInput.focus(), 50);
 }
 
 // ── Refresh Freshdesk ticket timeline without full page reload ────────────────
@@ -1529,15 +1647,26 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
         const hotelEmailBtn = document.createElement('button');
         hotelEmailBtn.textContent = '📧 Hotel Email';
         hotelEmailBtn.style.cssText = 'padding:7px 10px;border:1px solid #28a745;border-radius:5px;background:#fff;color:#28a745;font-size:12px;font-weight:600;cursor:pointer;';
-        hotelEmailBtn.onclick = () => withButtonLoading(hotelEmailBtn, '⏳ Sending...', async () => {
-          const { ok: cok, data: cr } = await api.guided.confirm({ ticketId: String(t.id), bookingId: state.bookingId, action: 'hotel_email' });
-          if (!cok) { showToast('❌ Error: ' + (cr?.error || 'Server error'), 'error'); return; }
-          const r = cr.results; const msgs = [];
-          if (r.emailSent) msgs.push(`email → ${r.hotelEmail}`);
-          if (r.fallback) msgs.push('no email found — tagged call_hotel');
-          if (r.tagged?.length) msgs.push('tagged: ' + r.tagged.join(', '));
-          showToast('✅ ' + (msgs.join(' · ') || 'Done'), 'success', 3000);
-          refreshFreshdeskTicket(); refreshThread();
+        hotelEmailBtn.onclick = () => withButtonLoading(hotelEmailBtn, '⏳ Looking up...', async () => {
+          const { ok: lok, data: ld } = await api.guided.hotelEmailLookup({ ticketId: String(t.id), bookingId: state.bookingId });
+          if (!lok) { showToast('❌ Lookup failed: ' + (ld?.error || 'Server error'), 'error'); return; }
+          if (ld.tagged?.length) {
+            showToast('🏷️ Tagged: ' + ld.tagged.join(', '), 'success', 2000);
+            refreshFreshdeskTicket();
+          }
+          showHotelEmailConfirmModal({
+            hotelName:        ld.hotelName,
+            emailResult:      ld.emailResult,
+            emailHtmlPreview: ld.emailHtmlPreview,
+            onSend: async (addr) => {
+              const { ok: sok, data: sd } = await api.guided.hotelEmailSend({
+                ticketId: String(t.id), bookingId: state.bookingId, hotelEmail: addr,
+              });
+              if (!sok) throw new Error(sd?.error || 'Send failed');
+              showToast(`✅ Email sent → ${addr}`, 'success', 3000);
+              refreshFreshdeskTicket(); refreshThread();
+            },
+          });
         });
         confirmBtn.insertAdjacentElement('afterend', hotelEmailBtn);
       }

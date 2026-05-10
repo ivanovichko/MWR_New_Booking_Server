@@ -3,7 +3,7 @@ const { lookupSupplier } = require('./supplierService');
 const { buildNoteHtml } = require('./noteBuilder');
 const { parseBookingHtml } = require('./parserService');
 const { findHotelEmail } = require('./aiService');
-const { tagTicket, sendEmail, setTicketPending } = require('./freshdeskService');
+const { tagTicket, sendEmail } = require('./freshdeskService');
 const { postNote, setTicketPriority } = require('./prewarmService');
 const { buildHotelEmailHtml } = require('./hotelEmailBuilder');
 
@@ -33,8 +33,7 @@ function buildBookingTags(booking) {
 function buildEmailResultHtml(emailResult) {
   if (!emailResult || !emailResult.email) {
     return `<div style="padding:10px 14px;background:#f8d7da;border-left:4px solid #dc3545;border-radius:4px;font-size:13px;font-family:system-ui,sans-serif;">
-      <strong>❌ Hotel Email Not Found</strong><br>
-      <em style="color:#555;">Tagged call_hotel — please contact hotel by phone.</em>
+      <strong>❌ Hotel Email Not Found</strong>
     </div>`;
   }
   if (emailResult.confidence === 'low') {
@@ -42,7 +41,6 @@ function buildEmailResultHtml(emailResult) {
       <strong>⚠️ Hotel Email — Low Confidence</strong><br>
       <strong>Email:</strong> ${emailResult.email}<br>
       ${emailResult.notes ? `<strong>Notes:</strong> ${emailResult.notes}<br>` : ''}
-      <em style="color:#555;">Tagged call_hotel — verify and send manually if correct.</em>
     </div>`;
   }
   return `<div style="padding:10px 14px;background:#d4edda;border-left:4px solid #28a745;border-radius:4px;font-size:13px;font-family:system-ui,sans-serif;">
@@ -50,13 +48,13 @@ function buildEmailResultHtml(emailResult) {
     <strong>Email:</strong> ${emailResult.email}<br>
     <strong>Confidence:</strong> ${emailResult.confidence}<br>
     ${emailResult.source ? `<strong>Source:</strong> ${emailResult.source}<br>` : ''}
-    <em style="color:#555;">Email sent automatically — ticket set to Pending.</em>
   </div>`;
 }
 
 /**
  * Executes the guided-prewarm action for a confirmed ticket.
- * action: 'hotel_email' | 'call_hotel' | 'voucher' | 'note_only'
+ * action: 'call_hotel' | 'voucher' | 'note_only'
+ * (hotel_email moved to lookupHotelEmail + sendHotelEmailConfirmed)
  * prebuiltNoteHtml: optional — if supplied for note_only/call_hotel, skips
  *   the DB booking_html re-parse and note rebuild (already done during analyse).
  */
@@ -75,36 +73,7 @@ async function confirmTicket(ticketId, bookingId, action, prebuiltNoteHtml = nul
 
   const results = { notePosted: false, emailSent: false, tagged: [], prioritySet: null };
 
-  if (action === 'hotel_email') {
-    // 1. Tag ticket
-    const tags = buildBookingTags(booking);
-    await tagTicket(ticketId, tags, 'Reservations');
-    results.tagged.push(...tags);
-
-    // 2. Find hotel email
-    const emailResult = await findHotelEmail(
-      details.hotelName || booking.supplierName,
-      booking.locationTo,
-      booking.destinationCountry
-    );
-
-    // 3. Always post a separate note with the email search outcome
-    await postNote(ticketId, buildEmailResultHtml(emailResult));
-
-    // 4. Send email or fall back to call_hotel tag
-    if (emailResult && emailResult.email && emailResult.confidence !== 'low') {
-      const emailBody = buildHotelEmailHtml(booking, details || {});
-      await sendEmail(ticketId, emailResult.email, null, emailBody);
-      await setTicketPending(ticketId);
-      results.emailSent = true;
-      results.hotelEmail = emailResult.email;
-    } else {
-      await tagTicket(ticketId, [...buildBookingTags(booking), 'call_hotel'], 'Reservations');
-      results.tagged.push('call_hotel');
-      results.fallback = true;
-    }
-
-  } else if (action === 'call_hotel') {
+  if (action === 'call_hotel') {
     const noteHtml = prebuiltNoteHtml || buildNoteHtml(booking, cachedCleanHtml, details, user, supplier);
     await postNote(ticketId, noteHtml);
     results.notePosted = true;
@@ -131,4 +100,64 @@ async function confirmTicket(ticketId, bookingId, action, prebuiltNoteHtml = nul
   return results;
 }
 
-module.exports = { confirmTicket, buildBookingTags };
+/**
+ * Phase 1 of the hotel-email flow: tag the ticket with booking tags, run the
+ * Groq lookup, and return a preview package for the agent to confirm/edit.
+ * No email is sent and no result note is posted at this stage.
+ */
+async function lookupHotelEmail(ticketId, bookingId) {
+  const cached = await getCachedBooking(bookingId);
+  if (!cached || !cached.parsed) throw new Error('Booking not cached');
+
+  const { booking, details } = cached.parsed;
+
+  const tags = buildBookingTags(booking);
+  await tagTicket(ticketId, tags, 'Reservations');
+
+  const emailResult = await findHotelEmail(
+    details.hotelName || booking.supplierName,
+    booking.locationTo,
+    booking.destinationCountry
+  );
+
+  const emailHtmlPreview = buildHotelEmailHtml(booking, details || {});
+
+  return {
+    emailResult,
+    booking,
+    details,
+    hotelName: details.hotelName || booking.supplierName,
+    tagged: tags,
+    emailHtmlPreview,
+  };
+}
+
+/**
+ * Phase 2 of the hotel-email flow: agent has confirmed (and possibly edited)
+ * the address. Send the email; only on success post the result note.
+ * Status is NOT auto-set to Pending — that's now an explicit agent choice.
+ */
+async function sendHotelEmailConfirmed(ticketId, bookingId, hotelEmail) {
+  const cached = await getCachedBooking(bookingId);
+  if (!cached || !cached.parsed) throw new Error('Booking not cached');
+
+  const { booking, details } = cached.parsed;
+  const emailBody = buildHotelEmailHtml(booking, details || {});
+
+  await sendEmail(
+    ticketId,
+    hotelEmail,
+    `Prepaid Reservation Confirmation — ${booking.guestName} / ${booking.checkIn}`,
+    emailBody
+  );
+
+  await postNote(ticketId, buildEmailResultHtml({
+    email: hotelEmail,
+    confidence: 'confirmed',
+    source: 'agent confirmed',
+  }));
+
+  return { emailSent: true, hotelEmail, notePosted: true };
+}
+
+module.exports = { confirmTicket, buildBookingTags, lookupHotelEmail, sendHotelEmailConfirmed };
