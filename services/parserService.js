@@ -118,9 +118,14 @@ function parseBookingHtml(html) {
   };
 
   // ── Hotel name ────────────────────────────────────────────────────────────
-  // First <strong> inside the Hotel section (after <h5>Hotel</h5>)
+  // First <strong> inside the Hotel/Getaway section (after <h5>Hotel</h5>
+  // or <h5>Getaway</h5>). Getaway packages use the same property layout but
+  // a different section heading.
   const h5s = [...body.querySelectorAll('h5')];
-  const hotelH5 = h5s.find(h => h.textContent.trim() === 'Hotel');
+  const hotelH5 = h5s.find(h => {
+    const t = h.textContent.trim().toLowerCase();
+    return t === 'hotel' || t === 'getaway' || t.startsWith('getaway');
+  });
   let hotelName = null;
   let hotelAddress = null;
   let hotelPhone = null;
