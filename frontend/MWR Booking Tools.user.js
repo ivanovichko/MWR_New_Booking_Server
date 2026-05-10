@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.20
+// @version      6.21
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -1542,7 +1542,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
       const { booking, details, user } = bd;
       const cleanSupplierName = (name) => (name || '').replace(/\s*\(\d+\)\s*$/g, '').replace(/\bV\d+\b/gi, '').replace(/\bpackage\b/gi, '').trim();
       const productType = (booking.productType || '').toLowerCase();
-      const isHotel    = productType.includes('hotel');
+      const isHotel    = productType.includes('hotel') || productType.includes('getaway');
       const isFlight   = productType.includes('flight');
       const isTransfer = productType.includes('transfer') || productType.includes('ground');
 
