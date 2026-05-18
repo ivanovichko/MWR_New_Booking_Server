@@ -162,7 +162,9 @@ app.get('/booking/:id', async (req, res) => {
 
     if (!cached) return res.status(404).json({ error: `Booking ${bookingId} not found` });
 
-    const parsed  = cached.parsed;
+    // Always re-parse data_row so cached bookings pick up new parser fields
+    // (e.g. aiReconfirmation) without a DB migration.
+    const parsed  = { ...cached.parsed, booking: parseDataRow(cached.data_row) };
     const booking = parsed.booking;
     const details = parsed.details;
     const user    = parsed.user;
@@ -647,7 +649,9 @@ app.get('/guided-prewarm/analyse/:id', async (req, res) => {
         const cached = await (require('./services/dbService').getCachedBooking)(bookingId);
         if (cached && cached.parsed) {
           console.log(`[analyse] booking ${bookingId} from cache`);
-          bookingData = cached.parsed;
+          // Re-parse data_row so new parser fields (aiReconfirmation, etc.)
+          // flow through to cached bookings without a DB migration.
+          bookingData = { ...cached.parsed, booking: parseDataRow(cached.data_row) };
           if (!bookingData.supplier) bookingData.supplier = lookupSupplier(bookingData.booking.supplierName);
           if (cached.booking_html) cleanHtmlForNote = parseBookingHtml(cached.booking_html).cleanHtml;
         } else {
@@ -703,7 +707,9 @@ app.get('/guided-prewarm/booking/:id', async (req, res) => {
     let cleanHtmlForNote = null;
     const cached = await (require('./services/dbService').getCachedBooking)(bookingId);
     if (cached && cached.parsed) {
-      bookingData = cached.parsed;
+      // Re-parse data_row on read so new parser fields propagate to cached
+      // bookings without needing to drop the cache.
+      bookingData = { ...cached.parsed, booking: parseDataRow(cached.data_row) };
       if (!bookingData.supplier) bookingData.supplier = lookupSupplier(bookingData.booking.supplierName);
       if (cached.booking_html) cleanHtmlForNote = parseBookingHtml(cached.booking_html).cleanHtml;
     } else {

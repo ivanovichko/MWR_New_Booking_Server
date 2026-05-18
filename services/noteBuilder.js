@@ -87,6 +87,7 @@ function buildNoteHtml(booking, cleanHtml, details, user, supplier = null) {
     booking.destinationCountry && booking.destinationCountry !== '—' ? ['Country', v(booking.destinationCountry)] : null,
     booking.destinationCity    && booking.destinationCity    !== '—' ? ['City',    v(booking.destinationCity)]    : null,
     booking.voucherUrl ? ['Voucher', `<a href="${booking.voucherUrl}" target="_blank">View Voucher ↗</a>`] : null,
+    booking.aiReconfirmation ? ['AI Reconfirm', booking.aiReconfirmation] : null,
   ];
 
   // ── 2. Financial Details ───────────────────────────────────────────────────

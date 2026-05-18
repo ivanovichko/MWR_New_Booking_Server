@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.22
+// @version      6.31
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -109,6 +109,1161 @@ function hideLoader() {
 }
 
 // ===== BOOKING TOOLS =====
+
+// Filter view URL: /a/tickets/filters/{id}. Returns null when not on a filter view.
+function getFreshdeskFilterId() {
+  const m = window.location.pathname.match(/\/a\/tickets\/filters\/(\d+)/);
+  return m ? m[1] : null;
+}
+
+// Same-origin GET against Freshdesk's internal API. Browser sends the session
+// cookie automatically. Throws on non-2xx.
+async function fdGet(path) {
+  const url = path.startsWith('http') ? path : `https://${window.location.hostname}${path}`;
+  const res = await fetch(url, { credentials: 'same-origin' });
+  if (!res.ok) throw new Error(`fdGet ${path} → ${res.status}`);
+  return res.json();
+}
+
+// Prewarm caches — Map<filterId, ticketId[]> and Map<ticketId, analyseResult>.
+// In-memory only; survives SPA navigation but resets on full reload.
+const viewQueueCache = new Map();
+const ticketBookingCache = new Map();
+// Cached duplicate-search results, keyed by ticket ID. Value is the array
+// returned from /check-duplicates, or 'loading' while a request is in flight.
+const ticketDuplicatesCache = new Map();
+// Booking panel "picked member" overrides, keyed by ticket ID. Set when the
+// agent uses Find Member to swap the displayed customer; cleared on reload.
+const panelUserOverride = new Map();
+// Cached /user/{id}/reservations payloads, keyed by user ID, so re-opening
+// the Reservations tab doesn't refetch.
+const userReservationsCache = new Map();
+
+// Latest filter the agent visited. Captured on navigation (see checkTicketChange).
+let _lastFilterId = getFreshdeskFilterId();
+
+// Prewarm current ticket + next two from the agent's most-recently-visited
+// filter view. POC scope: results land in ticketBookingCache, logged to console.
+async function prewarmWindow() {
+  const ticketId = getFreshdeskTicketId();
+  if (!ticketId) { showToast('No ticket on this page.', 'warning'); return; }
+  const filterId = _lastFilterId;
+  console.log(`[prewarm] start — ticket=${ticketId} filter=${filterId || '(none)'}`);
+
+  // Resolve the prewarm window. Three cases:
+  //   1. No filter ID yet → just this ticket.
+  //   2. Filter ID but ticket not in queue (e.g. opened via search) → just this ticket.
+  //   3. Ticket found in queue → [i, i+1, i+2].
+  let windowIds;
+  if (!filterId) {
+    console.log(`[prewarm] no filter captured — single-ticket fallback`);
+    windowIds = [String(ticketId)];
+  } else {
+    let queue = viewQueueCache.get(filterId);
+    if (!queue) {
+      try {
+        const data = await fdGet(`/api/_/tickets?filter=${filterId}&per_page=30&include=requester,stats`);
+        queue = (data.tickets || []).map(t => String(t.id));
+        viewQueueCache.set(filterId, queue);
+        console.log(`[prewarm] queue fetched — ${queue.length} tickets`);
+      } catch (e) {
+        console.error(`[prewarm] queue fetch failed`, e);
+        showToast(`Queue fetch failed: ${e.message} — prewarming this ticket only.`, 'warning', 2500);
+        queue = null;
+      }
+    } else {
+      console.log(`[prewarm] queue cache hit — ${queue.length} tickets`);
+    }
+
+    if (queue) {
+      const idx = queue.indexOf(String(ticketId));
+      if (idx === -1) {
+        console.warn(`[prewarm] current ticket ${ticketId} not in queue — single-ticket fallback`);
+        showToast('Ticket not in queue — prewarming this one only.', 'info', 2000);
+        windowIds = [String(ticketId)];
+      } else {
+        windowIds = queue.slice(idx, idx + 3);
+      }
+    } else {
+      windowIds = [String(ticketId)];
+    }
+  }
+  console.log(`[prewarm] window: [${windowIds.join(', ')}]`);
+
+  showToast(`Prewarming ${windowIds.length} ticket(s)...`, 'info', 2000);
+  for (const tid of windowIds) {
+    if (ticketBookingCache.has(tid)) {
+      console.log(`[prewarm] ${tid} — cache hit, skip`);
+      continue;
+    }
+    console.log(`[prewarm] ${tid} — analysing`);
+    const { ok, data } = await api.guided.analyse(tid);
+    if (!ok) {
+      console.warn(`[prewarm] ${tid} — analyse failed`, data);
+      ticketBookingCache.set(tid, null);
+      continue;
+    }
+    ticketBookingCache.set(tid, data);
+    console.log(`[prewarm] ${tid} — cached`, {
+      bookingId: data?.bookingId || null,
+      hasBookingData: !!data?.bookingData,
+      hasUserData: !!data?.userData,
+    });
+  }
+  console.log(`[prewarm] done — cache size: ${ticketBookingCache.size}`);
+  showToast(`Prewarm done — ${windowIds.length} ticket(s) cached.`, 'success');
+  refreshNativeInjections();
+}
+
+// ── Native FD injections ──────────────────────────────────────────────────────
+// Three pieces inject into Freshdesk's own DOM (vs. floating modal):
+//   1. Booking panel — fixed right-rail panel showing the current ticket's
+//      prewarmed booking data from ticketBookingCache.
+//   2. Reply-bar buttons — "Reply Customer" / "Reply Supplier" appended to
+//      Freshdesk's reply/note/forward bar as new <li> items.
+//   3. Duplicate search strip — banner injected just above the reply bar.
+// FD re-renders its conversation tree on navigation, so #2 and #3 are mounted
+// by a polling loop that re-injects when missing. #1 lives on document.body
+// and only needs to be created once.
+
+const BOOKING_PANEL_ID = 'taBookingPanel';
+const REPLY_CUSTOMER_LI_ID = 'taReplyCustomerLi';
+const REPLY_SUPPLIER_LI_ID = 'taReplySupplierLi';
+const DUP_STRIP_ID = 'taDupStrip';
+
+function injectBookingPanel() {
+  if (document.getElementById(BOOKING_PANEL_ID)) return;
+  const panel = document.createElement('div');
+  panel.id = BOOKING_PANEL_ID;
+  panel.style.cssText =
+    'position:fixed;right:20px;top:120px;width:360px;max-height:75vh;' +
+    'background:#fff;border:1px solid #e3e3e3;border-radius:10px;' +
+    'box-shadow:0 8px 30px rgba(0,0,0,0.2);font-family:system-ui,sans-serif;' +
+    'font-size:12px;color:#333;z-index:9998;display:flex;flex-direction:column;overflow:hidden;';
+  panel.innerHTML =
+    '<div id="' + BOOKING_PANEL_ID + '_header" style="padding:8px 12px;background:#f7f7f7;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;cursor:move;user-select:none;">' +
+      '<span style="font-weight:600;display:flex;align-items:center;gap:6px;">📦 Booking' +
+        '<span id="' + BOOKING_PANEL_ID + '_spinner" style="display:none;width:10px;height:10px;border:2px solid #ccc;border-top-color:#6f42c1;border-radius:50%;animation:taSpin 0.8s linear infinite;"></span>' +
+      '</span>' +
+      '<span id="' + BOOKING_PANEL_ID + '_toggle" style="cursor:pointer;padding:0 6px;font-size:14px;line-height:1;">−</span>' +
+    '</div>' +
+    '<div id="' + BOOKING_PANEL_ID + '_body" style="padding:10px;overflow-y:auto;flex:1;"></div>';
+  if (!document.getElementById('taSpinKeyframes')) {
+    const sty = document.createElement('style');
+    sty.id = 'taSpinKeyframes';
+    sty.textContent = '@keyframes taSpin{to{transform:rotate(360deg);}}';
+    document.head.appendChild(sty);
+  }
+  document.body.appendChild(panel);
+
+  const body = panel.querySelector('#' + BOOKING_PANEL_ID + '_body');
+  const toggle = panel.querySelector('#' + BOOKING_PANEL_ID + '_toggle');
+  let collapsed = false;
+  toggle.onclick = () => {
+    collapsed = !collapsed;
+    body.style.display = collapsed ? 'none' : 'block';
+    toggle.textContent = collapsed ? '+' : '−';
+  };
+
+  // Reuse existing draggable helper, defined further down.
+  try { makeDraggable(panel, panel.querySelector('#' + BOOKING_PANEL_ID + '_header')); } catch (e) {}
+}
+
+// Header-level busy counter. Multiple concurrent async ops increment; spinner
+// stays visible until all complete. Avoids flicker when ops overlap.
+let _panelBusyCount = 0;
+function setPanelBusy(busy) {
+  _panelBusyCount = Math.max(0, _panelBusyCount + (busy ? 1 : -1));
+  const sp = document.getElementById(BOOKING_PANEL_ID + '_spinner');
+  if (sp) sp.style.display = _panelBusyCount > 0 ? 'inline-block' : 'none';
+}
+async function withPanelBusy(fn) {
+  setPanelBusy(true);
+  try { return await fn(); }
+  finally { setPanelBusy(false); }
+}
+
+// Renders the booking panel content. Mirrors the Guided modal's booking +
+// customer sections. Tag/Call-Hotel logic is intentionally absent — the panel
+// always exposes "📋 Post Note" and "📧 Hotel Email" as fixed actions.
+function renderBookingPanel() {
+  const body = document.getElementById(BOOKING_PANEL_ID + '_body');
+  if (!body) return;
+  const ticketId = getFreshdeskTicketId();
+  if (!ticketId) {
+    body.innerHTML = '<div style="color:#888;">No ticket on this page.</div>';
+    return;
+  }
+  const cached = ticketBookingCache.get(String(ticketId));
+  if (cached === undefined) {
+    body.innerHTML =
+      '<div style="color:#888;">Not prewarmed for ticket #' + ticketId + '.</div>' +
+      '<div style="color:#888;margin-top:4px;font-size:11px;">Press 🚀 Prewarm to load.</div>';
+    return;
+  }
+
+  body.innerHTML = '';
+
+  // ── No booking case ────────────────────────────────────────────────────────
+  if (cached === null || !cached.bookingData) {
+    const msg = document.createElement('div');
+    msg.style.cssText = 'color:#dc3545;font-size:12px;margin-bottom:8px;';
+    msg.textContent = '⚠️ No booking ID found in this ticket.';
+    body.appendChild(msg);
+
+    const manualRow = document.createElement('div');
+    manualRow.style.cssText = 'display:flex;gap:6px;';
+    const manualInput = document.createElement('input');
+    manualInput.type = 'text'; manualInput.placeholder = 'Enter booking ID manually...';
+    manualInput.style.cssText = 'flex:1;padding:6px 10px;border:1px solid #ddd;border-radius:5px;font-size:12px;';
+    const fetchManualBtn = document.createElement('button');
+    fetchManualBtn.textContent = '🔍 Fetch';
+    fetchManualBtn.style.cssText = 'padding:6px 12px;border:none;border-radius:5px;background:#6f42c1;color:#fff;font-size:12px;cursor:pointer;';
+    fetchManualBtn.onclick = () => withPanelBusy(async () => {
+      const id = manualInput.value.trim(); if (!id) return;
+      fetchManualBtn.disabled = true; fetchManualBtn.textContent = '⏳';
+      const { ok: fok, data: fd } = await api.guided.booking(id);
+      fetchManualBtn.disabled = false; fetchManualBtn.textContent = '🔍 Fetch';
+      if (fok && fd.bookingData) {
+        ticketBookingCache.set(String(ticketId), { ...cached, bookingId: id, bookingData: fd.bookingData });
+        ticketDuplicatesCache.delete(String(ticketId));
+        refreshNativeInjections();
+      } else showToast('Booking not found in TA.', 'error');
+    });
+    manualInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') fetchManualBtn.click(); });
+    manualRow.appendChild(manualInput); manualRow.appendChild(fetchManualBtn);
+    body.appendChild(manualRow);
+
+    // Customer section (fallback path)
+    appendCustomerSection(body, getDisplayUser(ticketId, cached), ticketId);
+    return;
+  }
+
+  // ── With booking ───────────────────────────────────────────────────────────
+  const { booking, details } = cached.bookingData;
+  const cleanSupplierName = (name) => (name || '').replace(/\s*\(\d+\)\s*$/g, '').replace(/\bV\d+\b/gi, '').replace(/\bpackage\b/gi, '').trim();
+  const productType = (booking.productType || '').toLowerCase();
+  const isHotel    = productType.includes('hotel') || productType.includes('getaway');
+  const isFlight   = productType.includes('flight');
+
+  let daysUntil = null;
+  if (booking.checkIn) {
+    const months = { january:0,february:1,march:2,april:3,may:4,june:5,july:6,august:7,september:8,october:9,november:10,december:11 };
+    const m = booking.checkIn.match(/([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})/);
+    if (m) {
+      const mi = months[m[1].toLowerCase()];
+      if (mi !== undefined) {
+        const now = new Date(); now.setHours(0,0,0,0);
+        const ci = new Date(parseInt(m[3]), mi, parseInt(m[2]));
+        daysUntil = Math.round((ci - now) / 86400000);
+      }
+    }
+  }
+
+  // Booking table
+  const rows = [
+    ['Booking ID', booking.internalBookingId || '—'],
+    ['Supplier Ref', booking.supplierId || '—'],
+    ['Type', booking.productType || '—'],
+    ['Supplier', cleanSupplierName(booking.supplierName) || '—'],
+    isHotel  ? ['Hotel',   (details && details.hotelName) || '—'] : null,
+    isFlight ? ['Airline', (details && details.departAirline) || '—'] : null,
+    ['Guest', booking.guestName || '—'],
+    ['Check-In', booking.checkIn || '—'],
+    ['Check-Out', booking.checkOut || '—'],
+    daysUntil !== null ? ['Days until', `${daysUntil} days`] : null,
+    booking.mwrRoomType ? ['Room Type', booking.mwrRoomType] : null,
+    booking.aiReconfirmation ? ['AI Reconfirm', booking.aiReconfirmation] : null,
+  ].filter(Boolean);
+  const table = document.createElement('table');
+  table.style.cssText = 'width:100%;border-collapse:collapse;';
+  rows.forEach(([label, val]) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<th style="padding:3px 8px;text-align:left;color:#888;font-weight:500;width:35%;white-space:nowrap;">${label}</th><td style="padding:3px 8px;color:#333;">${val}</td>`;
+    table.appendChild(tr);
+  });
+  body.appendChild(table);
+
+  // Change booking inline row (toggled)
+  const changeBookingRow = document.createElement('div');
+  changeBookingRow.style.cssText = 'display:none;gap:6px;margin-top:6px;';
+  const changeBookingInput = document.createElement('input');
+  changeBookingInput.type = 'text'; changeBookingInput.placeholder = 'Enter booking ID...';
+  changeBookingInput.value = cached.bookingId || '';
+  changeBookingInput.style.cssText = 'flex:1;padding:4px 8px;border:1px solid #ddd;border-radius:4px;font-size:11px;';
+  const changeBookingBtn = document.createElement('button');
+  changeBookingBtn.textContent = '🔍 Fetch';
+  changeBookingBtn.style.cssText = 'padding:4px 10px;border:none;border-radius:4px;background:#6f42c1;color:#fff;font-size:11px;cursor:pointer;';
+  changeBookingBtn.onclick = () => withPanelBusy(async () => {
+    const id = changeBookingInput.value.trim(); if (!id) return;
+    changeBookingBtn.disabled = true; changeBookingBtn.textContent = '⏳';
+    const { ok: fok, data: fd } = await api.guided.booking(id);
+    changeBookingBtn.disabled = false; changeBookingBtn.textContent = '🔍 Fetch';
+    if (fok && fd.bookingData) {
+      ticketBookingCache.set(String(ticketId), { ...cached, bookingId: id, bookingData: fd.bookingData });
+      ticketDuplicatesCache.delete(String(ticketId));
+      refreshNativeInjections();
+    } else showToast('Booking not found.', 'error');
+  });
+  changeBookingInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') changeBookingBtn.click(); });
+  changeBookingRow.appendChild(changeBookingInput); changeBookingRow.appendChild(changeBookingBtn);
+  const changeBookingToggle = document.createElement('button');
+  changeBookingToggle.textContent = '🔍 Change booking';
+  changeBookingToggle.style.cssText = 'margin-top:6px;padding:2px 8px;border:1px dashed #aaa;border-radius:4px;background:transparent;color:#888;font-size:10px;cursor:pointer;';
+  changeBookingToggle.onclick = () => {
+    const open = changeBookingRow.style.display !== 'none';
+    changeBookingRow.style.display = open ? 'none' : 'flex';
+    if (!open) changeBookingInput.focus();
+  };
+  body.appendChild(changeBookingToggle);
+  body.appendChild(changeBookingRow);
+
+  // Always-visible action row: Post Note + Hotel Email.
+  const actionRow = document.createElement('div');
+  actionRow.style.cssText = 'display:flex;gap:6px;margin-top:12px;';
+
+  const postNoteBtn = document.createElement('button');
+  postNoteBtn.textContent = '📋 Post Note';
+  postNoteBtn.style.cssText = 'flex:1;padding:8px 10px;border:none;border-radius:6px;background:#007bff;color:#fff;font-size:12px;font-weight:600;cursor:pointer;';
+  postNoteBtn.onclick = () => withPanelBusy(async () => {
+    postNoteBtn.disabled = true; postNoteBtn.textContent = '⏳';
+    const noteHtml = cached.bookingData.noteHtml || null;
+    const { ok, data } = await api.guided.confirm({
+      ticketId: String(ticketId),
+      bookingId: cached.bookingId || booking.internalBookingId,
+      action: 'note_only',
+      noteHtml,
+    });
+    if (ok) {
+      postNoteBtn.style.background = '#28a745';
+      postNoteBtn.textContent = '✅ Posted';
+      showToast('Note posted.', 'success');
+    } else {
+      postNoteBtn.disabled = false; postNoteBtn.textContent = '📋 Post Note';
+      showToast('Post failed: ' + (data?.error || 'unknown'), 'error');
+    }
+  });
+
+  const hotelEmailBtn = document.createElement('button');
+  hotelEmailBtn.textContent = '📧 Hotel Email';
+  hotelEmailBtn.style.cssText = 'flex:1;padding:8px 10px;border:1px solid #28a745;border-radius:6px;background:#fff;color:#28a745;font-size:12px;font-weight:600;cursor:pointer;';
+  hotelEmailBtn.onclick = () => withPanelBusy(async () => {
+    const bid = cached.bookingId || booking.internalBookingId;
+    if (!bid) { showToast('No booking ID.', 'error'); return; }
+    hotelEmailBtn.disabled = true; hotelEmailBtn.textContent = '⏳ Looking up...';
+    const { ok: lok, data: ld } = await api.guided.hotelEmailLookup({ ticketId: String(ticketId), bookingId: bid });
+    hotelEmailBtn.disabled = false; hotelEmailBtn.textContent = '📧 Hotel Email';
+    if (!lok) { showToast('❌ Lookup failed: ' + (ld?.error || 'Server error'), 'error'); return; }
+    if (ld.tagged?.length) showToast('🏷️ Tagged: ' + ld.tagged.join(', '), 'success', 2000);
+    showHotelEmailConfirmModal({
+      hotelName:        ld.hotelName,
+      emailResult:      ld.emailResult,
+      emailHtmlPreview: ld.emailHtmlPreview,
+      onSend: async (addr) => withPanelBusy(async () => {
+        const { ok: sok, data: sd } = await api.guided.hotelEmailSend({
+          ticketId: String(ticketId), bookingId: bid, hotelEmail: addr,
+        });
+        if (!sok) throw new Error(sd?.error || 'Send failed');
+        showToast(`✅ Email sent → ${addr}`, 'success', 3000);
+      }),
+    });
+  });
+
+  // View Note — opens the prebuilt noteHtml in a read-only modal.
+  const viewNoteBtn = document.createElement('button');
+  viewNoteBtn.textContent = '👁️ View Note';
+  viewNoteBtn.style.cssText = 'flex:1;padding:8px 10px;border:1px solid #17a2b8;border-radius:6px;background:#fff;color:#17a2b8;font-size:12px;font-weight:600;cursor:pointer;';
+  viewNoteBtn.onclick = () => {
+    const noteHtml = cached.bookingData.noteHtml;
+    if (!noteHtml) { showToast('Note not built yet.', 'warning'); return; }
+    showNoteModal(noteHtml);
+  };
+
+  actionRow.appendChild(postNoteBtn);
+  actionRow.appendChild(viewNoteBtn);
+  actionRow.appendChild(hotelEmailBtn);
+  body.appendChild(actionRow);
+
+  // Customer section
+  appendCustomerSection(body, getDisplayUser(ticketId, cached), ticketId);
+}
+
+// Returns the user to display in the panel — picked override wins, then
+// bookingData.user, then userData fallback.
+function getDisplayUser(ticketId, cached) {
+  const override = panelUserOverride.get(String(ticketId));
+  if (override) return override;
+  return cached?.bookingData?.user || cached?.userData || null;
+}
+
+// Renders the member section: Profile / Reservations tabs + Find Member.
+// Mirrors the Guided modal's renderCustomerSection.
+function appendCustomerSection(body, user, ticketId) {
+  const TA_BASE = 'https://traveladvantage.com';
+
+  const sec = document.createElement('div');
+  sec.style.cssText = 'margin-top:14px;padding-top:12px;border-top:1px solid #eee;';
+
+  const hdr = document.createElement('div');
+  hdr.style.cssText = 'font-weight:600;font-size:11px;color:#888;margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em;';
+  hdr.textContent = 'Member';
+  sec.appendChild(hdr);
+
+  if (user) {
+    // Backfill login/profile links if the user came from bookingData (no links added there).
+    if (user.id && !user.loginLink)   user.loginLink   = `${TA_BASE}/admin/account/webadminCustomerLogin/${user.id}`;
+    if (user.id && !user.profileLink) user.profileLink = `${TA_BASE}/admin/account/viewCustomer/${user.id}`;
+
+    const tabBar = document.createElement('div');
+    tabBar.style.cssText = 'display:flex;border-bottom:1px solid #eee;margin-bottom:8px;';
+    const makeTabBtn = (label, active) => {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.style.cssText = `flex:1;padding:5px;border:none;border-bottom:2px solid ${active ? '#007bff' : 'transparent'};background:${active ? '#f8f8f8' : 'transparent'};font-size:11px;font-weight:${active ? '600' : '400'};cursor:pointer;`;
+      return b;
+    };
+    const profileTab = makeTabBtn('Profile', true);
+    const resTab     = makeTabBtn('Reservations', false);
+    tabBar.appendChild(profileTab); tabBar.appendChild(resTab);
+    sec.appendChild(tabBar);
+
+    const tabContent = document.createElement('div');
+    sec.appendChild(tabContent);
+
+    const setActive = (btn) => {
+      [profileTab, resTab].forEach((b) => {
+        const active = b === btn;
+        b.style.borderBottomColor = active ? '#007bff' : 'transparent';
+        b.style.background        = active ? '#f8f8f8' : 'transparent';
+        b.style.fontWeight        = active ? '600' : '400';
+      });
+    };
+
+    const showProfileTab = () => {
+      setActive(profileTab);
+      tabContent.innerHTML = '';
+      // Quick-action buttons
+      const actionRow = document.createElement('div');
+      actionRow.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin-bottom:8px;';
+      if (user.loginLink) {
+        const a = document.createElement('a'); a.href = user.loginLink; a.target = '_blank';
+        a.textContent = '🔑 Login as User';
+        a.style.cssText = 'display:block;background:#007bff;color:#fff;padding:4px 8px;border-radius:4px;text-decoration:none;font-size:11px;text-align:center;';
+        actionRow.appendChild(a);
+      }
+      if (user.profileLink) {
+        const a = document.createElement('a'); a.href = user.profileLink; a.target = '_blank';
+        a.textContent = '👤 Open Full Profile';
+        a.style.cssText = 'display:block;background:#0056d2;color:#fff;padding:4px 8px;border-radius:4px;text-decoration:none;font-size:11px;text-align:center;';
+        actionRow.appendChild(a);
+      }
+      const memberNoteBtn = document.createElement('button');
+      memberNoteBtn.textContent = '📋 Post Member Note';
+      memberNoteBtn.style.cssText = 'padding:4px 8px;border:1px solid #28a745;border-radius:4px;background:#fff;color:#28a745;font-size:11px;cursor:pointer;font-weight:500;';
+      memberNoteBtn.onclick = () => withPanelBusy(async () => {
+        memberNoteBtn.disabled = true; memberNoteBtn.textContent = '⏳';
+        const v = (val) => val || '';
+        const fields = [['Name', user.fullName || user.name], ['Email', user.email], ['Phone', user.phone], ['Instance', user.instance], ['Status', user.status], ['Country', user.country]].filter(([, val]) => val);
+        const lines = fields.map(([l, val]) => `<div><strong>${l}:</strong> ${v(val)}</div>`).join('');
+        const loginLine   = user.loginLink   ? `<div><strong>Login:</strong> <a href="${user.loginLink}" target="_blank">Login as User</a></div>` : '';
+        const profileLine = user.profileLink ? `<div><strong>Profile:</strong> <a href="${user.profileLink}" target="_blank">Open Full Profile</a></div>` : '';
+        const noteHtml = `<div style="font-family:system-ui,sans-serif;font-size:13px;line-height:1.8;"><h4 style="margin:0 0 8px;font-size:14px;">👤 Member Details</h4>${lines}${loginLine}${profileLine}</div>`;
+        const { ok } = await api.postNote(String(ticketId), noteHtml);
+        memberNoteBtn.disabled = false; memberNoteBtn.textContent = '📋 Post Member Note';
+        if (ok) showToast('✅ Member note posted!', 'success');
+        else showToast('❌ Failed to post note.', 'error');
+      });
+      actionRow.appendChild(memberNoteBtn);
+      tabContent.appendChild(actionRow);
+
+      const uRows = [['Name', user.fullName || user.name], ['Email', user.email], ['Phone', user.phone], ['Country', user.country], ['Status', user.status]].filter(([, val]) => val);
+      const uTable = document.createElement('table');
+      uTable.style.cssText = 'width:100%;border-collapse:collapse;';
+      uRows.forEach(([label, val]) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<th style="padding:3px 4px;text-align:left;color:#aaa;font-weight:500;font-size:11px;white-space:nowrap;">${label}</th><td style="padding:3px 4px;color:#333;font-size:11px;word-break:break-all;">${val}</td>`;
+        uTable.appendChild(tr);
+      });
+      tabContent.appendChild(uTable);
+    };
+
+    const renderReservationsList = (reservations) => {
+      if (!reservations || !reservations.length) return '<div style="color:#888;font-size:11px;">No reservations found.</div>';
+      let html = '';
+      reservations.forEach((r) => {
+        const sc = r.status && r.status.toLowerCase().includes('confirm') ? '#28a745'
+                 : r.status && r.status.toLowerCase().includes('cancel')  ? '#6c757d'
+                 : r.status && r.status.toLowerCase().includes('fail')    ? '#dc3545' : '#007bff';
+        html += `<div data-bookingid="${r.bookingId}" style="padding:5px 7px;border:1px solid #eee;border-radius:4px;margin-bottom:4px;cursor:pointer;font-size:11px;background:#fff;">`;
+        html += `<div style="display:flex;justify-content:space-between;align-items:center;">`;
+        html += `<span><strong>#${r.bookingId}</strong> <span style="color:#666;font-size:10px;">${r.type || ''}</span></span>`;
+        html += `<span style="color:${sc};font-size:10px;font-weight:600;">${r.status || ''}</span>`;
+        html += `</div><div style="font-size:10px;color:#666;margin-top:1px;">${r.guest || ''}`;
+        if (r.checkIn) html += ` · ${r.checkIn} → ${r.checkOut}`;
+        html += `</div></div>`;
+      });
+      return html;
+    };
+
+    const showReservationsTab = () => withPanelBusy(async () => {
+      setActive(resTab);
+      if (!user.id) { tabContent.innerHTML = '<div style="color:#999;font-size:11px;">No user ID.</div>'; return; }
+      let reservations = userReservationsCache.get(String(user.id));
+      if (!reservations) {
+        tabContent.innerHTML = '<div style="color:#999;font-size:11px;">⏳ Loading...</div>';
+        const { ok, data } = await api.userReservations(user.id);
+        if (!ok) { tabContent.innerHTML = '<div style="color:red;font-size:11px;">Failed to load.</div>'; return; }
+        reservations = data.reservations || [];
+        userReservationsCache.set(String(user.id), reservations);
+      }
+      tabContent.innerHTML = renderReservationsList(reservations);
+      tabContent.querySelectorAll('[data-bookingid]').forEach((el) => {
+        el.onmouseover = () => { el.style.background = '#f5f5f5'; };
+        el.onmouseout  = () => { el.style.background = '#fff'; };
+        el.onclick = () => withPanelBusy(async () => {
+          const bid = el.dataset.bookingid;
+          el.style.opacity = '0.5';
+          el.style.background = '#fffbe6';
+          const prevText = el.querySelector('strong')?.textContent;
+          if (prevText) el.querySelector('strong').textContent = prevText + ' ⏳';
+          const { ok, data } = await api.guided.booking(bid);
+          if (!ok || !data.bookingData) {
+            el.style.opacity = '1'; el.style.background = '#fff';
+            if (prevText) el.querySelector('strong').textContent = prevText;
+            showToast('Booking not found.', 'error');
+            return;
+          }
+          const prev = ticketBookingCache.get(String(ticketId)) || {};
+          ticketBookingCache.set(String(ticketId), { ...prev, bookingId: bid, bookingData: data.bookingData });
+          ticketDuplicatesCache.delete(String(ticketId));
+          refreshNativeInjections();
+        });
+      });
+    });
+
+    profileTab.onclick = showProfileTab;
+    resTab.onclick = showReservationsTab;
+    showProfileTab();
+  } else {
+    const emptyMsg = document.createElement('div');
+    emptyMsg.style.cssText = 'color:#999;font-size:11px;margin-bottom:6px;';
+    emptyMsg.textContent = 'No member data.';
+    sec.appendChild(emptyMsg);
+  }
+
+  // Find member toggle (always shown)
+  const findRow = document.createElement('div');
+  findRow.style.cssText = 'display:none;gap:6px;margin-top:6px;';
+  const findInput = document.createElement('input');
+  findInput.type = 'text'; findInput.placeholder = 'Email or name...';
+  findInput.style.cssText = 'flex:1;padding:4px 8px;border:1px solid #ddd;border-radius:4px;font-size:11px;';
+  const findBtn = document.createElement('button');
+  findBtn.textContent = '🔍 Search';
+  findBtn.style.cssText = 'padding:4px 10px;border:none;border-radius:4px;background:#6f42c1;color:#fff;font-size:11px;cursor:pointer;';
+  const findResults = document.createElement('div');
+  findResults.style.cssText = 'margin-top:4px;font-size:11px;';
+  findBtn.onclick = () => withPanelBusy(async () => {
+    const q = findInput.value.trim(); if (!q) return;
+    findBtn.disabled = true; findBtn.textContent = '⏳';
+    const { ok, data } = await api.findUser(q);
+    findBtn.disabled = false; findBtn.textContent = '🔍 Search';
+    findResults.innerHTML = '';
+    const results = (ok && data.results) ? data.results : [];
+    if (!results.length) { findResults.textContent = 'No results.'; return; }
+    results.slice(0, 5).forEach((u) => {
+      const item = document.createElement('div');
+      item.style.cssText = 'padding:3px 0;border-bottom:1px solid #f0f0f0;display:flex;align-items:center;justify-content:space-between;gap:8px;';
+      const lbl = document.createElement('span');
+      lbl.style.cssText = 'color:#333;font-size:11px;';
+      lbl.textContent = `${u.name || ''}${u.email ? ' — ' + u.email : ''}`;
+      const pickBtn = document.createElement('button');
+      pickBtn.textContent = 'Select';
+      pickBtn.style.cssText = 'padding:2px 7px;border:1px solid #6f42c1;border-radius:3px;background:#fff;color:#6f42c1;font-size:10px;cursor:pointer;flex-shrink:0;';
+      pickBtn.onclick = () => {
+        const picked = { ...u, loginLink: `${TA_BASE}/admin/account/webadminCustomerLogin/${u.id}`, profileLink: `${TA_BASE}/admin/account/viewCustomer/${u.id}` };
+        panelUserOverride.set(String(ticketId), picked);
+        refreshNativeInjections();
+      };
+      item.appendChild(lbl); item.appendChild(pickBtn);
+      findResults.appendChild(item);
+    });
+  });
+  findInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') findBtn.click(); });
+  findRow.appendChild(findInput); findRow.appendChild(findBtn);
+
+  const findToggle = document.createElement('button');
+  findToggle.textContent = '🔍 Find member';
+  findToggle.style.cssText = 'margin-top:8px;padding:2px 8px;border:1px dashed #aaa;border-radius:4px;background:transparent;color:#888;font-size:10px;cursor:pointer;';
+  findToggle.onclick = () => {
+    const open = findRow.style.display !== 'none';
+    findRow.style.display = open ? 'none' : 'flex';
+    if (!open) setTimeout(() => findInput.focus(), 10);
+  };
+  sec.appendChild(findToggle);
+  sec.appendChild(findRow);
+  sec.appendChild(findResults);
+
+  body.appendChild(sec);
+}
+
+function injectReplyBarButtons() {
+  const bar = document.querySelector('ul.reply-bar');
+  if (!bar) return;
+  if (document.getElementById(REPLY_CUSTOMER_LI_ID)) return;
+
+  const mkLi = (id, label, color, onClick) => {
+    const li = document.createElement('li');
+    li.id = id;
+    li.className = 'reply-bar__item';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'nucleus-button nucleus-button--secondary app-icon-btn--text';
+    btn.style.cssText = 'color:' + color + ';';
+    btn.textContent = label;
+    btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); onClick(); };
+    li.appendChild(btn);
+    return li;
+  };
+
+  bar.appendChild(mkLi(REPLY_CUSTOMER_LI_ID, '💬 Reply Customer', '#1976d2', () => openComposerAndInjectTemplate('customer')));
+  bar.appendChild(mkLi(REPLY_SUPPLIER_LI_ID, '🏨 Reply Supplier', '#6f42c1', () => openComposerAndInjectTemplate('supplier')));
+}
+
+// Inject "Reply Customer" / "Reply Supplier" tabs into FD's composer toolbar
+// (.ticket-actions-list — only present when the composer is open). Sibling to
+// FD's own Reply / Note / Forward buttons.
+function injectReplyComposerTabs() {
+  const list = document.querySelector('.ticket-actions-list');
+  if (!list) return;
+  if (list.querySelector('.ta-reply-customer-tab')) return;
+
+  const mkTab = (cls, label, color, onClick) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'ticket-action-button element-flex gap-4 justify-content--space-between ' + cls;
+    b.style.cssText = 'color:' + color + ';';
+    b.innerHTML = '<span style="font-size:14px;">✉️</span> ' + label;
+    b.onclick = (e) => { e.preventDefault(); e.stopPropagation(); onClick(); };
+    return b;
+  };
+
+  list.appendChild(mkTab('ta-reply-customer-tab', 'Reply Customer', '#1976d2', () => injectReplyTemplate('customer')));
+  list.appendChild(mkTab('ta-reply-supplier-tab', 'Reply Supplier', '#6f42c1', () => injectReplyTemplate('supplier')));
+}
+
+// Writes a templated reply into FD's contenteditable composer (Froala editor).
+function injectReplyTemplate(recipientType) {
+  const editor = document.querySelector('.fr-element.fr-view[contenteditable="true"]');
+  if (!editor) { showToast('Composer is not open. Click Reply first.', 'warning'); return; }
+
+  const tid = getFreshdeskTicketId();
+  const cached = ticketBookingCache.get(String(tid));
+  const booking = cached?.bookingData?.booking || {};
+  const details = cached?.bookingData?.details || {};
+  const user    = cached?.bookingData?.user || cached?.userData || {};
+
+  const text = buildReplySignature(recipientType, booking, details, user);
+
+  // Plaintext → paragraphed HTML, preserving blank lines.
+  const escape = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const html = text.split('\n').map((line) =>
+    line.trim() ? '<p>' + escape(line) + '</p>' : '<p><br></p>'
+  ).join('');
+
+  editor.innerHTML = html;
+  // Froala/Ember need a real input event to register the change.
+  editor.dispatchEvent(new Event('input', { bubbles: true }));
+  editor.dispatchEvent(new Event('change', { bubbles: true }));
+
+  showToast((recipientType === 'supplier' ? 'Supplier' : 'Customer') + ' template inserted.', 'success');
+}
+
+// Opens FD's composer (if closed), waits for the editor, then injects template.
+// Used by the older ul.reply-bar buttons where the composer may not yet be open.
+async function openComposerAndInjectTemplate(recipientType) {
+  let editor = document.querySelector('.fr-element.fr-view[contenteditable="true"]');
+  if (!editor) {
+    const trigger = document.querySelector('[data-test-id="ticket-action-reply"]');
+    if (!trigger) { showToast('Reply trigger not found.', 'error'); return; }
+    trigger.click();
+    const start = Date.now();
+    while (!editor && Date.now() - start < 3000) {
+      await new Promise((r) => setTimeout(r, 100));
+      editor = document.querySelector('.fr-element.fr-view[contenteditable="true"]');
+    }
+    if (!editor) { showToast('Composer did not open in time.', 'error'); return; }
+  }
+  injectReplyTemplate(recipientType);
+}
+
+function injectDuplicateStrip() {
+  const wrapper = document.querySelector('.reply-bar-wrapper');
+  if (!wrapper || !wrapper.parentElement) return;
+  if (document.getElementById(DUP_STRIP_ID)) return;
+
+  const strip = document.createElement('div');
+  strip.id = DUP_STRIP_ID;
+  strip.style.cssText =
+    'margin:12px 0;padding:12px 16px;background:#fff8e1;border:1px solid #ffe082;' +
+    'border-radius:8px;font-family:system-ui,sans-serif;font-size:12px;color:#5d4037;' +
+    'width:100%;box-sizing:border-box;';
+  strip.innerHTML = '<div id="' + DUP_STRIP_ID + '_content">—</div>';
+  wrapper.parentElement.insertBefore(strip, wrapper);
+  refreshDuplicateStrip();
+}
+
+function refreshDuplicateStrip() {
+  const content = document.getElementById(DUP_STRIP_ID + '_content');
+  if (!content) return;
+  const ticketId = getFreshdeskTicketId();
+  if (!ticketId) { content.textContent = '—'; return; }
+  const cached = ticketBookingCache.get(String(ticketId));
+  if (cached === undefined) { content.textContent = 'not prewarmed'; return; }
+  if (!cached || !cached.bookingData) {
+    // Member fallback (no booking ID) — try email-only duplicate search
+    if (cached?.userData?.email) {
+      kickDuplicateSearch(ticketId, null, null, cached.userData.email, content);
+      return;
+    }
+    content.textContent = 'no booking ID — nothing to compare';
+    return;
+  }
+  const b = cached.bookingData.booking;
+  const u = cached.bookingData.user;
+  kickDuplicateSearch(ticketId, b.supplierId, b.internalBookingId, u?.email, content);
+}
+
+// Fires /check-duplicates if not already cached; renders results into `content`.
+function kickDuplicateSearch(ticketId, vendorConf, internalId, memberEmail, content) {
+  const tid = String(ticketId);
+  const existing = ticketDuplicatesCache.get(tid);
+  if (existing === 'loading') {
+    content.textContent = 'searching...';
+    return;
+  }
+  if (Array.isArray(existing)) {
+    renderDuplicates(content, existing, ticketId);
+    return;
+  }
+  content.textContent = 'searching...';
+  ticketDuplicatesCache.set(tid, 'loading');
+  api.checkDuplicates({ vendorConf, internalId, memberEmail, freshdeskTicketId: ticketId }).then(({ ok, data }) => {
+    const dups = ok ? (data?.duplicates || []) : [];
+    ticketDuplicatesCache.set(tid, dups);
+    // Mark badges on the left rail list as well
+    dups.forEach((d) => { if (d.id) duplicateTicketIds.add(String(d.id)); });
+    if (dups.length) injectTicketListBadges();
+    // Only re-render if user is still on this ticket
+    if (String(getFreshdeskTicketId()) === tid) {
+      const live = document.getElementById(DUP_STRIP_ID + '_content');
+      if (live) renderDuplicates(live, dups, ticketId);
+    }
+  });
+}
+
+function renderDuplicates(content, dups, currentTicketId) {
+  content.innerHTML = '';
+  if (!dups.length) {
+    const noRes = document.createElement('span');
+    noRes.style.cssText = 'color:#28a745;font-weight:500;';
+    noRes.textContent = '✓ No open threads found.';
+    content.appendChild(noRes);
+    return;
+  }
+  const hdr = document.createElement('div');
+  hdr.style.cssText = 'font-weight:700;font-size:16px;color:#856404;margin-bottom:10px;letter-spacing:0.2px;';
+  hdr.textContent = `⚠️ ${dups.length} open thread${dups.length > 1 ? 's' : ''} found`;
+  content.appendChild(hdr);
+  dups.forEach((dup) => content.appendChild(buildStripDupRow(dup, currentTicketId)));
+}
+
+// Row factory mirroring the Guided modal's buildDupRow. Self-contained so the
+// strip can render without the Guided modal's enclosing state.
+function buildStripDupRow(dup, currentTicketId) {
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #f5f5f5;flex-wrap:wrap;';
+  const assigneeName = dup.responder_name || (dup.responder_id ? `#${dup.responder_id}` : '—');
+  const statusInfo = (() => {
+    switch (dup.status) {
+      case 2: return { label: 'Open',     bg: '#e8f4ff', fg: '#0056d2' };
+      case 3: return { label: 'Pending',  bg: '#fff3cd', fg: '#856404' };
+      case 4: return { label: 'Resolved', bg: '#e6f4ea', fg: '#1e7e34' };
+      case 5: return { label: 'Closed',   bg: '#f1f3f5', fg: '#6c757d' };
+      default: return dup.status != null ? { label: `Status ${dup.status}`, bg: '#f1f3f5', fg: '#6c757d' } : null;
+    }
+  })();
+  const statusBadge = statusInfo
+    ? `<span style="background:${statusInfo.bg};color:${statusInfo.fg};font-size:11px;font-weight:600;padding:2px 8px;border-radius:8px;white-space:nowrap;">${statusInfo.label}</span>`
+    : '';
+  const priorityInfo = (() => {
+    switch (dup.priority) {
+      case 1: return { label: 'Low',    bg: '#f1f3f5', fg: '#6c757d' };
+      case 2: return { label: 'Medium', bg: '#e8f4ff', fg: '#0056d2' };
+      case 3: return { label: 'High',   bg: '#ffe8d6', fg: '#b35200' };
+      case 4: return { label: 'Urgent', bg: '#fde2e2', fg: '#c82333' };
+      default: return null;
+    }
+  })();
+  const priorityBadge = priorityInfo
+    ? `<span style="background:${priorityInfo.bg};color:${priorityInfo.fg};font-size:11px;font-weight:600;padding:2px 8px;border-radius:8px;white-space:nowrap;" title="Priority">${priorityInfo.label}</span>`
+    : '';
+  row.innerHTML = `<a href="https://${window.location.hostname}/a/tickets/${dup.id}" target="_blank" style="color:#007bff;font-weight:600;font-size:14px;white-space:nowrap;">#${dup.id}</a><span style="flex:1;color:#444;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:120px;">${(dup.subject||'—').replace(/</g,'&lt;')}</span>${statusBadge}${priorityBadge}<span style="color:#6f42c1;font-size:12px;white-space:nowrap;font-weight:500;" title="Assigned to">${assigneeName}</span><span style="color:#aaa;font-size:11px;white-space:nowrap;">${(dup.matchedBy||[]).join(', ')}</span>`;
+
+  const previewBtn = document.createElement('button');
+  previewBtn.textContent = 'Preview / Merge';
+  previewBtn.style.cssText = 'padding:3px 8px;border:1px solid #fd7e14;border-radius:4px;background:#fff;color:#fd7e14;font-size:11px;cursor:pointer;flex-shrink:0;font-weight:500;';
+  previewBtn.onclick = () => showStripDupPreviewModal(dup, currentTicketId, previewBtn);
+  const mergeOutBtn = document.createElement('button');
+  mergeOutBtn.textContent = '📤 Merge out';
+  mergeOutBtn.style.cssText = 'padding:3px 8px;border:1px solid #6c757d;border-radius:4px;background:#fff;color:#6c757d;font-size:11px;cursor:pointer;flex-shrink:0;font-weight:500;';
+  mergeOutBtn.onclick = () => showStripDupMergeOutModal(dup, currentTicketId, mergeOutBtn);
+  row.appendChild(previewBtn);
+  row.appendChild(mergeOutBtn);
+  return row;
+}
+
+// Preview / Merge: shows the duplicate's messages, each with "Merge into #{current}".
+async function showStripDupPreviewModal(dup, currentTicketId, triggerBtn) {
+  triggerBtn.disabled = true; triggerBtn.textContent = '⏳';
+  const { ok, data: td } = await api.guided.ticket(dup.id);
+  triggerBtn.disabled = false; triggerBtn.textContent = 'Preview / Merge';
+  if (!ok || !td?.ticket) { showToast('Could not load ticket.', 'error'); return; }
+
+  const pop = document.createElement('div');
+  pop.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:660px;max-width:92vw;max-height:78vh;background:#fff;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,0.3);z-index:1000001;font-family:system-ui,sans-serif;display:flex;flex-direction:column;';
+  const popHeader = document.createElement('div');
+  popHeader.style.cssText = 'padding:10px 14px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;background:#fff8f0;border-radius:10px 10px 0 0;';
+  const popTitle = document.createElement('span');
+  popTitle.style.cssText = 'font-weight:600;font-size:13px;color:#333;';
+  popTitle.textContent = `#${dup.id} — ${td.ticket.subject || ''}`;
+  const popSubtitle = document.createElement('span');
+  popSubtitle.style.cssText = 'font-size:11px;color:#888;margin-left:8px;';
+  popSubtitle.textContent = '← click a message to merge it into #' + currentTicketId;
+  const popClose = document.createElement('button');
+  popClose.textContent = '×'; popClose.style.cssText = 'background:none;border:none;font-size:18px;color:#aaa;cursor:pointer;margin-left:8px;';
+  popClose.onclick = () => pop.remove();
+  const titleWrap = document.createElement('div');
+  titleWrap.style.cssText = 'display:flex;align-items:center;min-width:0;overflow:hidden;';
+  titleWrap.appendChild(popTitle); titleWrap.appendChild(popSubtitle);
+  popHeader.appendChild(titleWrap); popHeader.appendChild(popClose);
+
+  const popBody = document.createElement('div');
+  popBody.style.cssText = 'padding:12px 14px;overflow-y:auto;flex:1;font-size:12px;color:#555;line-height:1.6;';
+
+  const strip = (html) => (html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  const fmtDate = (iso) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    return d.toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'numeric' }) + ' ' + d.toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit' });
+  };
+  const popAgents = td.agents || {};
+
+  const addMsg = (label, bg, border, bodyHtml, meta) => {
+    const wrap = document.createElement('div');
+    wrap.style.cssText = `margin-bottom:10px;padding:8px 10px;background:${bg};border-left:3px solid ${border};border-radius:3px;font-size:12px;line-height:1.5;`;
+    const lbl = document.createElement('div');
+    lbl.style.cssText = 'display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;flex-wrap:wrap;gap:4px;';
+    const typeWrap = document.createElement('div');
+    const lblText = document.createElement('span');
+    lblText.style.cssText = 'font-size:10px;color:#999;font-weight:600;';
+    lblText.textContent = label;
+    typeWrap.appendChild(lblText);
+    if (meta) {
+      const metaParts = [meta.author, meta.date].filter(Boolean);
+      if (metaParts.length) {
+        const metaEl = document.createElement('div');
+        metaEl.style.cssText = 'font-size:10px;color:#aaa;margin-top:1px;';
+        metaEl.textContent = metaParts.join(' · ');
+        typeWrap.appendChild(metaEl);
+      }
+      if (meta.notified && meta.notified.length) {
+        const notifEl = document.createElement('div');
+        notifEl.style.cssText = 'font-size:10px;color:#aaa;margin-top:1px;';
+        notifEl.textContent = '→ ' + meta.notified.join(', ');
+        typeWrap.appendChild(notifEl);
+      }
+    }
+    const mergeBtn = document.createElement('button');
+    mergeBtn.textContent = '📥 Merge into #' + currentTicketId;
+    mergeBtn.style.cssText = 'padding:2px 8px;border:1px solid #fd7e14;border-radius:4px;background:#fff;color:#fd7e14;font-size:10px;cursor:pointer;font-weight:600;flex-shrink:0;';
+    mergeBtn.onclick = async () => {
+      if (!confirm(`Post this message as a note on #${currentTicketId} and close #${dup.id}?`)) return;
+      mergeBtn.disabled = true; mergeBtn.textContent = '⏳ Merging...';
+      const { ok: mok, data: mr } = await api.mergeTicket({
+        sourceTicketId: String(dup.id),
+        targetTicketId: String(currentTicketId),
+        description: bodyHtml,
+      });
+      if (mok) {
+        pop.remove();
+        showToast(`✅ Merged from #${dup.id} — it has been closed.`, 'success', 3000);
+        ticketDuplicatesCache.delete(String(currentTicketId));
+        refreshNativeInjections();
+      } else {
+        showToast('❌ Merge failed: ' + (mr?.error || 'Server error'), 'error');
+        mergeBtn.disabled = false; mergeBtn.textContent = '📥 Merge into #' + currentTicketId;
+      }
+    };
+    lbl.appendChild(typeWrap); lbl.appendChild(mergeBtn);
+    const content = document.createElement('div');
+    content.innerHTML = bodyHtml;
+    wrap.appendChild(lbl); wrap.appendChild(content);
+    popBody.appendChild(wrap);
+  };
+
+  const desc = td.ticket.description || td.ticket.description_text || '';
+  if (desc) {
+    addMsg('📩 Customer (opening)', '#f8f9fa', '#6c757d', td.ticket.description || strip(desc), {
+      author: td.ticket.requester?.name || td.ticket.requester?.email || null,
+      date: fmtDate(td.ticket.created_at),
+      notified: [],
+    });
+  }
+  (td.conversations || []).forEach((c) => {
+    const isNote = c.private;
+    const isIncoming = !isNote && c.incoming;
+    const label  = isNote ? '📌 Agent note' : isIncoming ? '📩 Customer' : '📤 Agent reply';
+    const bg     = isNote ? '#fffbf0' : isIncoming ? '#f8f9fa' : '#f0f4ff';
+    const border = isNote ? '#fd7e14' : isIncoming ? '#6c757d' : '#0056d2';
+    const author = isIncoming ? (c.from_email || null) : (popAgents[c.user_id] || c.from_email || null);
+    addMsg(label, bg, border, c.body || strip(c.body_text || ''), {
+      author, date: fmtDate(c.created_at), notified: c.to_emails || [],
+    });
+  });
+  if (!popBody.children.length) popBody.innerHTML = '<span style="color:#999;">(no content)</span>';
+  pop.appendChild(popHeader); pop.appendChild(popBody);
+  document.body.appendChild(pop);
+}
+
+// Merge out: select a message from the current ticket, edit, then post it on
+// the duplicate and close the current ticket.
+async function showStripDupMergeOutModal(dup, currentTicketId, triggerBtn) {
+  triggerBtn.disabled = true; triggerBtn.textContent = '⏳';
+  const { ok, data: td } = await api.guided.ticket(currentTicketId);
+  triggerBtn.disabled = false; triggerBtn.textContent = '📤 Merge out';
+  if (!ok || !td?.ticket) { showToast('Could not load current ticket.', 'error'); return; }
+
+  const pop = document.createElement('div');
+  pop.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:660px;max-width:92vw;max-height:82vh;background:#fff;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,0.3);z-index:1000001;font-family:system-ui,sans-serif;display:flex;flex-direction:column;';
+  const popHeader = document.createElement('div');
+  popHeader.style.cssText = 'padding:10px 14px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;background:#f8f9fa;border-radius:10px 10px 0 0;';
+  const popTitle = document.createElement('span');
+  popTitle.style.cssText = 'font-weight:600;font-size:13px;color:#333;';
+  popTitle.textContent = `Merge #${currentTicketId} → #${dup.id}`;
+  const popSubtitle = document.createElement('span');
+  popSubtitle.style.cssText = 'font-size:11px;color:#888;margin-left:8px;';
+  popSubtitle.textContent = '← select a message, edit if needed, then confirm';
+  const popClose = document.createElement('button');
+  popClose.textContent = '×'; popClose.style.cssText = 'background:none;border:none;font-size:18px;color:#aaa;cursor:pointer;margin-left:8px;';
+  popClose.onclick = () => pop.remove();
+  const titleWrap = document.createElement('div');
+  titleWrap.style.cssText = 'display:flex;align-items:center;min-width:0;overflow:hidden;';
+  titleWrap.appendChild(popTitle); titleWrap.appendChild(popSubtitle);
+  popHeader.appendChild(titleWrap); popHeader.appendChild(popClose);
+
+  const popBody = document.createElement('div');
+  popBody.style.cssText = 'padding:12px 14px;overflow-y:auto;flex:1;font-size:12px;color:#555;line-height:1.6;';
+
+  const editorArea = document.createElement('div');
+  editorArea.style.cssText = 'padding:10px 14px;border-top:2px solid #fd7e14;flex-shrink:0;background:#fffbf0;';
+  const editorLabel = document.createElement('div');
+  editorLabel.style.cssText = 'font-size:11px;color:#888;margin-bottom:4px;font-weight:600;';
+  editorLabel.textContent = `Note to post on #${dup.id}:`;
+  const editorEl = document.createElement('div');
+  editorEl.contentEditable = 'true';
+  editorEl.style.cssText = 'min-height:60px;max-height:150px;overflow-y:auto;border:1px solid #ddd;border-radius:4px;padding:6px 8px;font-size:12px;background:#fff;outline:none;';
+  editorEl.innerHTML = '<span style="color:#aaa;font-style:italic;">Select a message above…</span>';
+  const editorActions = document.createElement('div');
+  editorActions.style.cssText = 'display:flex;justify-content:flex-end;gap:6px;margin-top:6px;';
+  const confirmBtn = document.createElement('button');
+  confirmBtn.textContent = `📤 Merge out → #${dup.id}`;
+  confirmBtn.style.cssText = 'padding:4px 12px;border:none;border-radius:4px;background:#6c757d;color:#fff;font-size:11px;cursor:pointer;font-weight:600;';
+  confirmBtn.onclick = async () => {
+    const bodyToPost = editorEl.innerHTML;
+    if (!bodyToPost || bodyToPost.includes('Select a message above')) { showToast('Select a message first.', 'error'); return; }
+    if (!confirm(`Merge #${currentTicketId} into #${dup.id}? This will post a note on #${dup.id} and close #${currentTicketId}.`)) return;
+    confirmBtn.disabled = true; confirmBtn.textContent = '⏳ Merging...';
+    const { ok: mok, data: mr } = await api.mergeTicket({
+      sourceTicketId: String(currentTicketId), targetTicketId: String(dup.id), description: bodyToPost,
+    });
+    if (mok) {
+      pop.remove();
+      showToast(`✅ Merged #${currentTicketId} into #${dup.id} — ticket closed.`, 'success', 3000);
+      ticketDuplicatesCache.delete(String(currentTicketId));
+      refreshNativeInjections();
+    } else {
+      showToast('❌ Merge failed: ' + (mr?.error || 'Server error'), 'error');
+      confirmBtn.disabled = false; confirmBtn.textContent = `📤 Merge out → #${dup.id}`;
+    }
+  };
+  editorActions.appendChild(confirmBtn);
+  editorArea.appendChild(editorLabel); editorArea.appendChild(editorEl); editorArea.appendChild(editorActions);
+
+  const moStrip = (html) => (html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  const moAgents = td.agents || {};
+  const moFmt = (iso) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    return d.toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'numeric' }) + ' ' + d.toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit' });
+  };
+  const addSelect = (label, bg, border, bodyHtml, meta) => {
+    const wrap = document.createElement('div');
+    wrap.style.cssText = `margin-bottom:10px;padding:8px 10px;background:${bg};border-left:3px solid ${border};border-radius:3px;font-size:12px;line-height:1.5;cursor:pointer;transition:box-shadow 0.1s;`;
+    wrap.onmouseenter = () => { wrap.style.boxShadow = '0 0 0 2px #fd7e14'; };
+    wrap.onmouseleave = () => { wrap.style.boxShadow = ''; };
+    const lbl = document.createElement('div');
+    lbl.style.cssText = 'display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;flex-wrap:wrap;gap:4px;';
+    const typeWrap = document.createElement('div');
+    const lblText = document.createElement('span');
+    lblText.style.cssText = 'font-size:10px;color:#999;font-weight:600;';
+    lblText.textContent = label;
+    typeWrap.appendChild(lblText);
+    if (meta) {
+      const metaParts = [meta.author, meta.date].filter(Boolean);
+      if (metaParts.length) {
+        const metaEl = document.createElement('div');
+        metaEl.style.cssText = 'font-size:10px;color:#aaa;margin-top:1px;';
+        metaEl.textContent = metaParts.join(' · ');
+        typeWrap.appendChild(metaEl);
+      }
+    }
+    const useBtn = document.createElement('button');
+    useBtn.textContent = '✏️ Use this';
+    useBtn.style.cssText = 'padding:2px 8px;border:1px solid #fd7e14;border-radius:4px;background:#fff;color:#fd7e14;font-size:10px;cursor:pointer;font-weight:600;flex-shrink:0;';
+    useBtn.onclick = (e) => { e.stopPropagation(); editorEl.innerHTML = bodyHtml; editorEl.scrollIntoView({ behavior:'smooth', block:'nearest' }); };
+    lbl.appendChild(typeWrap); lbl.appendChild(useBtn);
+    const content = document.createElement('div');
+    content.innerHTML = bodyHtml;
+    wrap.appendChild(lbl); wrap.appendChild(content);
+    wrap.onclick = () => { editorEl.innerHTML = bodyHtml; editorEl.scrollIntoView({ behavior:'smooth', block:'nearest' }); };
+    popBody.appendChild(wrap);
+  };
+
+  const moDesc = td.ticket.description || td.ticket.description_text || '';
+  if (moDesc) {
+    addSelect('📩 Customer (opening)', '#f8f9fa', '#6c757d', td.ticket.description || moStrip(moDesc), {
+      author: td.ticket.requester?.name || td.ticket.requester?.email || null,
+      date: moFmt(td.ticket.created_at),
+    });
+  }
+  (td.conversations || []).forEach((c) => {
+    const isNote = c.private;
+    const isIncoming = !isNote && c.incoming;
+    const label  = isNote ? '📌 Agent note' : isIncoming ? '📩 Customer' : '📤 Agent reply';
+    const bg     = isNote ? '#fffbf0' : isIncoming ? '#f8f9fa' : '#f0f4ff';
+    const border = isNote ? '#fd7e14' : isIncoming ? '#6c757d' : '#0056d2';
+    const author = isIncoming ? (c.from_email || null) : (moAgents[c.user_id] || c.from_email || null);
+    addSelect(label, bg, border, c.body || moStrip(c.body_text || ''), {
+      author, date: moFmt(c.created_at),
+    });
+  });
+  if (!popBody.children.length) popBody.innerHTML = '<span style="color:#999;">(no content)</span>';
+  pop.appendChild(popHeader); pop.appendChild(popBody); pop.appendChild(editorArea);
+  document.body.appendChild(pop);
+}
+
+// Per-conversation controls: collapse toggle + Translate button injected into
+// each note/reply's action bar (sibling to Edit/Delete). Marker attribute
+// prevents double-injection; FD re-renders create fresh nodes without the
+// marker so the polling loop catches them.
+function injectConversationControls() {
+  const wrappers = document.querySelectorAll('[data-test-id="conversation-wrapper"]');
+  wrappers.forEach((wrapper) => {
+    if (wrapper.dataset.taControlsInjected) return;
+    const actions = wrapper.querySelector('.conversation-header .ticket-actions-container');
+    const content = wrapper.querySelector('[data-test-id="conversation-content-wrapper"]');
+    if (!actions || !content) return;
+
+    const mkBtn = (emoji, title, color, onClick) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'nucleus-button nucleus-button--small nucleus-button--text ticket-actions';
+      b.title = title;
+      b.style.cssText = 'padding:4px 8px;color:' + color + ';font-size:14px;cursor:pointer;background:transparent;border:none;';
+      b.textContent = emoji;
+      b.onclick = (e) => { e.preventDefault(); e.stopPropagation(); onClick(b); };
+      return b;
+    };
+
+    // Collapse toggle.
+    const collapseBtn = mkBtn('▼', 'Collapse', '#666', (btn) => {
+      const isHidden = content.style.display === 'none';
+      content.style.display = isHidden ? '' : 'none';
+      btn.textContent = isHidden ? '▼' : '▶';
+      btn.title = isHidden ? 'Collapse' : 'Expand';
+    });
+
+    // Translate toggle. Caches original + translated HTML to flip in-place.
+    const noteEl = wrapper.querySelector('[data-test-conversation="conversation-text"]')
+                || wrapper.querySelector('.ticket_note');
+    let originalHtml = null;
+    let translatedHtml = null;
+    let showingTranslated = false;
+    const translateBtn = mkBtn('🌐', 'Translate to English', '#1976d2', async (btn) => {
+      if (!noteEl) { showToast('Could not find note content.', 'error'); return; }
+      if (showingTranslated) {
+        noteEl.innerHTML = originalHtml;
+        showingTranslated = false;
+        btn.textContent = '🌐';
+        btn.title = 'Translate to English';
+        return;
+      }
+      if (translatedHtml) {
+        originalHtml = noteEl.innerHTML;
+        noteEl.innerHTML = translatedHtml;
+        showingTranslated = true;
+        btn.textContent = '↩';
+        btn.title = 'Show original';
+        return;
+      }
+      originalHtml = noteEl.innerHTML;
+      const text = (noteEl.innerText || '').trim();
+      if (!text) { showToast('No text to translate.', 'warning'); return; }
+      btn.textContent = '…';
+      btn.disabled = true;
+      const { ok, data } = await api.translate(text, 'en');
+      btn.disabled = false;
+      if (!ok) {
+        btn.textContent = '🌐';
+        showToast('Translation failed: ' + (data?.error || 'unknown'), 'error');
+        return;
+      }
+      const translatedText = data?.translation || data?.translated || data?.text || '';
+      translatedHtml = translatedText.replace(/\n/g, '<br>');
+      noteEl.innerHTML = translatedHtml;
+      showingTranslated = true;
+      btn.textContent = '↩';
+      btn.title = 'Show original';
+    });
+
+    actions.insertBefore(collapseBtn, actions.firstChild);
+    actions.insertBefore(translateBtn, actions.firstChild);
+    wrapper.dataset.taControlsInjected = '1';
+  });
+}
+
+function refreshNativeInjections() {
+  renderBookingPanel();
+  refreshDuplicateStrip();
+}
+
+// Polling mount loop — covers FD re-renders on SPA nav. Injection functions
+// short-circuit when their target already exists, so the loop is cheap.
+// Content refresh (renderBookingPanel / refreshDuplicateStrip) is NOT in the
+// loop to avoid flicker; it fires on ticket change and after prewarm.
+function mountNativeInjections() {
+  injectBookingPanel();
+  renderBookingPanel();
+  setInterval(() => {
+    injectBookingPanel();
+    injectReplyBarButtons();
+    injectReplyComposerTabs();
+    injectDuplicateStrip();
+    injectConversationControls();
+    // Each re-inject (after FD wipes the DOM) sets fresh content via
+    // refreshDuplicateStrip() called inside injectDuplicateStrip.
+  }, 1500);
+}
 
 function getFreshdeskTicketId() {
   const match = window.location.pathname.match(/\/(?:a\/)?tickets\/(\d+)/);
@@ -1579,6 +2734,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
         ['Guest', booking.guestName || '—'], ['Check-In', booking.checkIn || '—'], ['Check-Out', booking.checkOut || '—'],
         daysUntil !== null ? ['Days until', `${daysUntil} days`] : null,
         booking.mwrRoomType ? ['Room Type', booking.mwrRoomType] : null,
+        booking.aiReconfirmation ? ['AI Reconfirm', booking.aiReconfirmation] : null,
       ].filter(Boolean);
       const table = document.createElement('table');
       table.style.cssText = 'width:100%;border-collapse:collapse;';
@@ -2459,18 +3615,11 @@ function buildAttachmentUI() {
 
 function buildReplySignature(recipientType, booking, details, user) {
   const stripHtml = (s) => s ? s.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : '';
-  const rawName = user && (user.fullName || user.name) ? (user.fullName || user.name).split(' ')[0] : 'there';
-  const firstName = rawName.charAt(0).toUpperCase() + rawName.slice(1).toLowerCase();
-  const supplierName = booking && booking.supplierName ? stripHtml(booking.supplierName) : 'hotel';
-  const hotelName    = booking && booking.supplierName ? stripHtml(booking.supplierName) : null;
 
-  const greeting = recipientType === 'supplier'
-    ? 'Hi, dear ' + supplierName + ' team,'
-    : 'Hi, ' + firstName + ',';
+  const greeting = 'Hello,';
+  const opener   = 'I hope this email finds you well.';
 
   const sig = [
-    'If you have any questions, I\'m here for you.',
-    '',
     'Sincerely,',
     'Ivan K.',
     'Travel Advantage Support',
@@ -2489,7 +3638,6 @@ function buildReplySignature(recipientType, booking, details, user) {
   ].join('\n');
 
   let body = '[your message here]';
-
   if (recipientType === 'supplier' && booking) {
     const hotelDisplay = (details && details.hotelName) ? details.hotelName : (booking.supplierName ? stripHtml(booking.supplierName) : null);
     const ref = [
@@ -2502,7 +3650,19 @@ function buildReplySignature(recipientType, booking, details, user) {
     body = ref + '\n\n[your message here]';
   }
 
-  return greeting + '\nHope you\'re well.\n\n' + body + '\n\n' + sig;
+  // Customer-only language disclaimer block sandwiched between body and sign-off.
+  const disclaimer = recipientType === 'customer'
+    ? [
+        '',
+        '--',
+        'This email is written in English by default. Use your e-mail provider\'s or your browser\'s translation tool / extension to view the contents in your language.',
+        '',
+        'You can always reply to us in your own language.',
+        '--',
+      ].join('\n')
+    : '';
+
+  return greeting + '\n\n' + opener + '\n\n' + body + disclaimer + '\n\n' + sig;
 }
 
 function countryToLanguage(countryCode) {
@@ -2681,7 +3841,75 @@ function showReplyComposer(opts) {
     navigator.clipboard.writeText(replyArea.innerText).then(() => { copyBtn.textContent = '✅ Copied!'; setTimeout(() => { copyBtn.textContent = '📋 Copy'; }, 2000); });
   };
 
+  // Insert into FD's native composer — lets the agent finish the send via
+  // Freshdesk's own flow (attachments, CC, etc) instead of api.sendReply.
+  const insertBtn = document.createElement('button');
+  insertBtn.textContent = '↘️ Insert into FD';
+  insertBtn.style.cssText = 'padding:7px 14px;border:1px solid #fd7e14;border-radius:6px;cursor:pointer;font-size:13px;background:#fff;color:#fd7e14;font-weight:500;';
+  insertBtn.onclick = async () => {
+    const draftHtml = replyArea.innerHTML;
+    if (!draftHtml || !replyArea.innerText.trim()) { showToast('Nothing to insert.', 'warning'); return; }
+    let editor = document.querySelector('.fr-element.fr-view[contenteditable="true"]');
+    if (!editor) {
+      const trigger = document.querySelector('[data-test-id="ticket-action-reply"]');
+      if (!trigger) { showToast('Could not find FD composer trigger.', 'error'); return; }
+      trigger.click();
+      const start = Date.now();
+      while (!editor && Date.now() - start < 3000) {
+        await new Promise((r) => setTimeout(r, 100));
+        editor = document.querySelector('.fr-element.fr-view[contenteditable="true"]');
+      }
+      if (!editor) { showToast('FD composer did not open.', 'error'); return; }
+    }
+    editor.innerHTML = draftHtml;
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+    editor.dispatchEvent(new Event('change', { bubbles: true }));
+    insertBtn.textContent = '✅ Inserted';
+    setTimeout(() => { insertBtn.textContent = '↘️ Insert into FD'; }, 1500);
+    showToast('Inserted into FD composer.', 'success');
+  };
+
+  // Quick Translate — always-available alternative to the customer-only
+  // translate row above. Defaults to customer's detected language if known,
+  // otherwise prompts.
+  const quickTranslateBtn = document.createElement('button');
+  quickTranslateBtn.textContent = '🌐 Translate';
+  quickTranslateBtn.style.cssText = 'padding:7px 14px;border:1px solid #17a2b8;border-radius:6px;cursor:pointer;font-size:13px;background:#fff;color:#17a2b8;font-weight:500;';
+  quickTranslateBtn.onclick = async () => {
+    const draftText = (replyArea.innerText || '').trim();
+    if (!draftText) { showToast('Nothing to translate.', 'warning'); return; }
+    const detected = (user && user.country) ? countryToLanguage(user.country) : null;
+    let target = detected;
+    if (!target || recipientType === 'supplier') {
+      target = prompt('Target language (ISO code or name, e.g. "fr", "es", "ru"):', target || 'en');
+      if (!target) return;
+    }
+    // Strip sign-off and below before sending (same heuristic as the customer row).
+    const signOffRe = /^\s*(sincerely|best\s+regards?|kind\s+regards?|regards|best|thanks|thank\s+you|warm\s+regards?|yours\s+sincerely|with\s+(?:best\s+)?regards?|cheers|yours\s+truly|faithfully)[,.]?\s*$/i;
+    const lines = draftText.split('\n');
+    let cutIdx = lines.length;
+    for (let i = lines.length - 1; i >= 0; i--) { if (signOffRe.test(lines[i])) { cutIdx = i; break; } }
+    const textToTranslate = lines.slice(0, cutIdx).join('\n').trim() || draftText;
+
+    quickTranslateBtn.disabled = true; quickTranslateBtn.textContent = '⏳';
+    const { ok, data } = await api.translate(textToTranslate, target);
+    quickTranslateBtn.disabled = false; quickTranslateBtn.textContent = '🌐 Translate';
+    if (!ok || !data?.text) { showToast('Translation failed.', 'error'); return; }
+
+    const originalHtml = replyArea.innerHTML;
+    const translatedHtml = data.text.replace(/\n/g, '<br>');
+    replyArea.innerHTML =
+      '<div><span style="font-size:10px;color:#00897b;font-weight:600;">🌐 ' + target + '</span></div>' +
+      translatedHtml +
+      '<br><hr style="border:none;border-top:1px solid #ddd;margin:8px 0;">' +
+      '<div><span style="font-size:10px;color:#aaa;font-weight:600;">📄 Original</span></div>' +
+      originalHtml;
+    showToast('Translated to ' + target + '.', 'success');
+  };
+
   actionsArea.appendChild(sendBtn);
+  actionsArea.appendChild(insertBtn);
+  actionsArea.appendChild(quickTranslateBtn);
   actionsArea.appendChild(copyBtn);
 }
 
@@ -2823,6 +4051,7 @@ function addToolbarButtons() {
     };
 
     container.appendChild(mkBtn('taGuidedBtn',     '🎯 Guided',    '#6f42c1', () => showGuidedPrewarmModal()));
+    container.appendChild(mkBtn('taPrewarmBtn',    '🚀 Prewarm',   '#16a085', () => prewarmWindow()));
     container.appendChild(mkBtn('taGuidedHereBtn', '🎯 Open Here', '#9b59b6', () => {
       const tid = getFreshdeskTicketId();
       if (!tid) { showToast('No ticket detected on this page.', 'warning'); return; }
@@ -2931,7 +4160,10 @@ function checkTicketChange() {
   if (currentTicketId && currentTicketId !== _lastTicketId) {
     _lastTicketId = currentTicketId;
   }
+  const currentFilterId = getFreshdeskFilterId();
+  if (currentFilterId) _lastFilterId = currentFilterId;
   setTimeout(injectTicketListBadges, 1500);
+  setTimeout(refreshNativeInjections, 200);
 }
 const _origPushState = history.pushState;
 history.pushState = function(...args) {
@@ -3075,4 +4307,5 @@ async function gmFreshdeskNote(ticketId, noteHtml) {
 
 
 addToolbarButtons();
+mountNativeInjections();
 })();

@@ -21,6 +21,13 @@ function formatGateway(str) {
   return clean || '—';
 }
 
+// ─── Pull the Zeal AI reconfirmation anchor out of the actions cell ─────────
+function extractAiReconfirmation(actionsCell) {
+  if (!actionsCell || typeof actionsCell !== 'string') return null;
+  const m = actionsCell.match(/<a[^>]*zealAiBookingPopupBtn\d+[^>]*>[\s\S]*?<\/a>/);
+  return m ? m[0] : null;
+}
+
 // ─── Parse DataTables row into structured booking object ─────────────────────
 function parseDataRow(row) {
   const v = (i) => {
@@ -33,6 +40,7 @@ function parseDataRow(row) {
   return {
     // Identifiers
     detailUrl:              extractHref(row[0]),
+    aiReconfirmation:       extractAiReconfirmation(row[0]),
     bookingDate:            v(1),
     internalBookingId:      v(2),
     supplierId:             v(3),
