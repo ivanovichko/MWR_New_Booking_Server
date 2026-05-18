@@ -21,11 +21,27 @@ function formatGateway(str) {
   return clean || '—';
 }
 
-// ─── Pull the Zeal AI reconfirmation anchor out of the actions cell ─────────
+// ─── Parse the Zeal AI reconfirmation anchor from the actions cell ─────────
+// TA renders the anchor with a status-specific icon: icon-clock text-warning =
+// initiated, fa-check text-success = confirmed, text-danger = failed.
+// Returns a structured { status, title, date } so the UI can render its own
+// glyph (TA's icon-clock font isn't loaded in Freshdesk).
 function extractAiReconfirmation(actionsCell) {
   if (!actionsCell || typeof actionsCell !== 'string') return null;
-  const m = actionsCell.match(/<a[^>]*zealAiBookingPopupBtn\d+[^>]*>[\s\S]*?<\/a>/);
-  return m ? m[0] : null;
+  const anchorMatch = actionsCell.match(/<a[^>]*zealAiBookingPopupBtn\d+[^>]*>[\s\S]*?<\/a>/);
+  if (!anchorMatch) return null;
+  const html = anchorMatch[0];
+  const titleMatch = html.match(/title=["']([^"']+)["']/);
+  const dateMatch  = html.match(/getAizealBookingDetail\(\s*\d+\s*,\s*['"]([^'"]+)['"]/);
+  let status = 'initiated';
+  if (/text-success/.test(html))      status = 'confirmed';
+  else if (/text-danger/.test(html))  status = 'failed';
+  else if (/text-warning/.test(html)) status = 'initiated';
+  return {
+    status,
+    title: titleMatch ? titleMatch[1] : 'AI Reconfirmation',
+    date:  dateMatch  ? dateMatch[1]  : null,
+  };
 }
 
 // ─── Parse DataTables row into structured booking object ─────────────────────

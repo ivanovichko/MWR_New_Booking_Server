@@ -1,3 +1,21 @@
+// Render TA's AI reconfirmation badge as a styled chip. TA's icon-clock font
+// isn't loaded inside Freshdesk's note iframe so we build our own glyph.
+function renderAiReconfirmBadge(r) {
+  if (!r) return '';
+  if (typeof r === 'string') return r; // backward compat
+  const palette = {
+    confirmed: { bg: '#d4edda', fg: '#155724', icon: '✓' },
+    failed:    { bg: '#f8d7da', fg: '#721c24', icon: '✗' },
+    initiated: { bg: '#fff3cd', fg: '#856404', icon: '🕐' },
+  };
+  const c = palette[r.status] || palette.initiated;
+  const dateSuffix = r.date ? ' · ' + r.date : '';
+  const title = (r.title || 'AI Reconfirmation').replace(/"/g, '&quot;');
+  return '<span style="display:inline-block;padding:2px 8px;border-radius:10px;' +
+         'background:' + c.bg + ';color:' + c.fg + ';font-size:12px;font-weight:600;" ' +
+         'title="' + title + '">' + c.icon + ' ' + (r.title || 'AI Reconfirmation') + dateSuffix + '</span>';
+}
+
 /**
  * Builds the HTML for the Freshdesk internal note.
  * Sections:
@@ -87,7 +105,7 @@ function buildNoteHtml(booking, cleanHtml, details, user, supplier = null) {
     booking.destinationCountry && booking.destinationCountry !== '—' ? ['Country', v(booking.destinationCountry)] : null,
     booking.destinationCity    && booking.destinationCity    !== '—' ? ['City',    v(booking.destinationCity)]    : null,
     booking.voucherUrl ? ['Voucher', `<a href="${booking.voucherUrl}" target="_blank">View Voucher ↗</a>`] : null,
-    booking.aiReconfirmation ? ['AI Reconfirm', booking.aiReconfirmation] : null,
+    booking.aiReconfirmation ? ['AI Reconfirm', renderAiReconfirmBadge(booking.aiReconfirmation)] : null,
   ];
 
   // ── 2. Financial Details ───────────────────────────────────────────────────

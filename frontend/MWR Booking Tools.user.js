@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.31
+// @version      6.32
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -123,6 +123,26 @@ async function fdGet(path) {
   const res = await fetch(url, { credentials: 'same-origin' });
   if (!res.ok) throw new Error(`fdGet ${path} → ${res.status}`);
   return res.json();
+}
+
+// Render TA's AI reconfirmation badge as a self-contained styled chip.
+// Accepts the structured { status, title, date } parsed server-side, or
+// (for backward-compat with anything still passing raw HTML) returns the
+// input unchanged.
+function renderAiReconfirmBadge(r) {
+  if (!r) return '';
+  if (typeof r === 'string') return r; // legacy pass-through
+  const palette = {
+    confirmed: { bg: '#d4edda', fg: '#155724', icon: '✓' },
+    failed:    { bg: '#f8d7da', fg: '#721c24', icon: '✗' },
+    initiated: { bg: '#fff3cd', fg: '#856404', icon: '🕐' },
+  };
+  const c = palette[r.status] || palette.initiated;
+  const dateSuffix = r.date ? ' · ' + r.date : '';
+  const titleAttr = (r.title || 'AI Reconfirmation').replace(/"/g, '&quot;');
+  return '<span style="display:inline-block;padding:2px 8px;border-radius:10px;' +
+         'background:' + c.bg + ';color:' + c.fg + ';font-size:11px;font-weight:600;" ' +
+         'title="' + titleAttr + '">' + c.icon + ' ' + (r.title || 'AI Reconfirmation') + dateSuffix + '</span>';
 }
 
 // Prewarm caches — Map<filterId, ticketId[]> and Map<ticketId, analyseResult>.
@@ -373,7 +393,7 @@ function renderBookingPanel() {
     ['Check-Out', booking.checkOut || '—'],
     daysUntil !== null ? ['Days until', `${daysUntil} days`] : null,
     booking.mwrRoomType ? ['Room Type', booking.mwrRoomType] : null,
-    booking.aiReconfirmation ? ['AI Reconfirm', booking.aiReconfirmation] : null,
+    booking.aiReconfirmation ? ['AI Reconfirm', renderAiReconfirmBadge(booking.aiReconfirmation)] : null,
   ].filter(Boolean);
   const table = document.createElement('table');
   table.style.cssText = 'width:100%;border-collapse:collapse;';
@@ -2734,7 +2754,7 @@ async function showGuidedPrewarmModal(singleTicketId = null) {
         ['Guest', booking.guestName || '—'], ['Check-In', booking.checkIn || '—'], ['Check-Out', booking.checkOut || '—'],
         daysUntil !== null ? ['Days until', `${daysUntil} days`] : null,
         booking.mwrRoomType ? ['Room Type', booking.mwrRoomType] : null,
-        booking.aiReconfirmation ? ['AI Reconfirm', booking.aiReconfirmation] : null,
+        booking.aiReconfirmation ? ['AI Reconfirm', renderAiReconfirmBadge(booking.aiReconfirmation)] : null,
       ].filter(Boolean);
       const table = document.createElement('table');
       table.style.cssText = 'width:100%;border-collapse:collapse;';
