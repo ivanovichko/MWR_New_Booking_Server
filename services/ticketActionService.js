@@ -151,13 +151,9 @@ async function sendHotelEmailConfirmed(ticketId, bookingId, hotelEmail) {
     emailBody
   );
 
-  await postNote(ticketId, buildEmailResultHtml({
-    email: hotelEmail,
-    confidence: 'confirmed',
-    source: 'agent confirmed',
-  }));
-
-  return { emailSent: true, hotelEmail, notePosted: true };
+  // Result note intentionally not posted — Freshdesk already records the sent
+  // email in the conversation thread, so the synthetic note was duplicative.
+  return { emailSent: true, hotelEmail, notePosted: false };
 }
 
 module.exports = { confirmTicket, buildBookingTags, lookupHotelEmail, sendHotelEmailConfirmed };

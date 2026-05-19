@@ -1,3 +1,130 @@
+# Mimicked composer + Translate near Send + RTF toolbar (session 17)
+
+## Architectural shift
+Replied tab buttons no longer drive FD's contenteditable. Instead they open **our own composer** in a floating modal — same flow Guided's reply pane already used, just hosted standalone. To: is set explicitly per recipient type, send goes through `/send-reply` → `freshdeskService.sendEmail` → FD's `/api/_/tickets/{id}/reply`. No Ember pill-input fight needed.
+
+## Changes
+- **`openMimickedComposer(recipientType)`** — creates a draggable floating modal (`createModal`, width 680px), reads `cached.bookingData.{booking, details, user, supplier}`, picks `toEmail` (`user.email` for customer, `supplier.email` for supplier), and mounts `showReplyComposer` into the modal body. `onSent` closes the modal.
+- **Reply Customer / Reply Supplier tabs** in `.ticket-actions-list` now call `openMimickedComposer(...)`. Translate tab removed.
+- **`ul.reply-bar` Reply Customer / Reply Supplier buttons** also call `openMimickedComposer(...)` (was `openComposerAndInjectTemplate`, now deleted).
+- **`injectTranslateNearSend()`** — new helper that inserts `🌐 Translate` into FD's `.reply-btn-wrapper` immediately before `.reply-btn`. Click → existing `translateFdComposer()`. Wired into the 1.5s polling loop.
+- **RTF toolbar in `showReplyComposer`** — new `buildRtfToolbar(editor)` returns a strip with B / I / U / • / 1. / 🔗 / ✕ buttons driven by `document.execCommand`. Appended just before the editor; the editor's top border-radius is now `0 0 6px 6px` and top border removed so the two flush.
+- **Dead code removal**: `injectReplyTemplate` and `openComposerAndInjectTemplate` deleted — the FD-contenteditable injection path is gone.
+
+Bumped `@version` 6.39 → 6.40.
+
+## Deferred
+- Agent signature pulled from FD's `/api/_/me` (or `/api/_/agents/me`) — still using hardcoded signature inside `buildReplySignature`. Endpoint discovery is a DevTools task before code.
+
+---
+
+# Reply wiring fixes (session 16)
+
+## Problems addressed
+1. **Customer template had no name** — `buildReplySignature` was greeting with a bare "Hello,". Now uses first name from `user.firstName || user.fullName || user.name`, capitalized: `Hello {FirstName},`. Supplier greeting restored to `Hello dear {SupplierName} team,` (supplierName stripped of trailing `(id)`).
+2. **Supplier email never went anywhere** — clicking Reply Supplier opened FD's Reply composer (which auto-fills To: with the customer), and we never touched the supplier address. Now:
+   - **Reply Supplier** (`ul.reply-bar` button) → clicks `[data-test-id="ticket-action-forward"]` instead of Reply, giving a clean To: input.
+   - `injectReplyTemplate('supplier')` copies `cached.bookingData.supplier.email` to clipboard + toasts the address so the agent pastes with one keystroke. (FD's To: input is Ember-managed — programmatic DOM writes don't reliably trigger its internal state, so we don't try.)
+   - If no supplier email is cached, the toast warns to fill To: manually.
+3. **Translate not available in FD's composer** — added a third tab `Translate` to `.ticket-actions-list`, sibling to Reply Customer / Reply Supplier. Click → auto-detects target from booking cache (customer country → language), prompts to confirm, strips sign-off before sending, translates draft in-place with original preserved below a divider.
+
+Bumped `@version` 6.38 → 6.39.
+
+## Test
+1. Reload, confirm @version 6.39.
+2. On a prewarmed ticket with a booking — click 💬 **Reply Customer** in the reply bar → FD's Reply composer opens, body fills with `Hello {Name}, / I hope this email finds you well. / [your message here] / disclaimer / signature`.
+3. Click 🏨 **Reply Supplier** → FD's Forward composer opens (To: empty), body fills with `Hello dear {Supplier} team,` and the booking-ref block. Toast shows the supplier email and copies it to clipboard. Cmd+V / Ctrl+V to paste into To:.
+4. With FD's composer already open, click the new **Translate** tab → prompt appears with detected language → confirm → draft replaces with translation, original preserved below.
+
+## Deferred
+- Programmatic To: setting for Forward composer — Ember internals make it fragile. Clipboard-paste is the safer UX for now.
+- Translate target picker UX could be a dropdown rather than `prompt()` later.
+
+---
+
+# Language + inline note collapse + default-collapse (session 15)
+
+## Changes
+- **`Language` field added to `parseUserHtml`** — pulled from TA's profile grid via `getValue('Language')`. Returned on the user object as `user.language`.
+- **Customer Profile tab** now shows the `Language` row (Name / Email / Phone / Country / Language / Status).
+- **Post Member Note** includes Language in the synthesized note.
+- **Conversation collapse rewritten** — click anywhere on the header to toggle. Small `▾`/`▸` chevron prepended to the sender block shows state. Interactive children (buttons, links, inputs, FD's Edit/Delete) are excluded from the click target so they keep working.
+- **Default-collapse** — all conversation wrappers are collapsed on inject *except the last two* (most recent). Computed once per inject pass via `wrappers.slice(-2)`.
+- The 🌐 Translate button stays in `.ticket-actions-container` (sibling to Edit/Delete) and is excluded from the header click target.
+
+Bumped `@version` 6.37 → 6.38.
+
+## Deferred
+- Reply wiring — flagged for next session. Topic kept open.
+
+---
+
+# Hotel email note off + ETA/Requests on panel + larger text (session 14)
+
+## Changes
+- **Disabled the hotel-email result note.** `sendHotelEmailConfirmed` no longer posts a synthetic note after sending — FD already records the outbound email in the conversation thread so the note was duplicative. Returns `notePosted: false`.
+- **Booking panel now shows `ETA` and `Requests`** rows when present, pulled from the existing `details.arrivalTime` and `details.requests` parsed by `parseBookingHtml`. Same fields hotel-email already uses.
+- **Larger panel text.** Base font 12 → 13px, table font 13px with 4/8 cell padding, action buttons 12 → 13px. Panel width 360 → 380px so the larger text breathes.
+
+Bumped `@version` 6.36 → 6.37.
+
+---
+
+# Prewarm: parallel + live update + spinner (session 13)
+
+## Problems
+1. The for-loop awaited each `analyse` call sequentially — the ticket the agent was on couldn't render until all three finished, even when its response was the first to land.
+2. `prewarmWindow` didn't wrap in `withPanelBusy`, so the header spinner stayed off during the whole batch.
+
+## Fix
+- Map `windowIds` to an array of async tasks, fire with `Promise.all`. Each task:
+  - Checks cache (skip if hit)
+  - Awaits its own `analyse` call
+  - Stores result in `ticketBookingCache`
+  - If the agent is currently on that ticket, calls `refreshNativeInjections()` *immediately* — the panel updates as soon as its response lands, not after the batch completes
+- Whole batch wrapped in `withPanelBusy(...)` so the header spinner spins until every task settles.
+
+Bumped `@version` 6.34 → 6.35.
+
+---
+
+# Open Threads: manual search bar migration (session 12)
+
+## Change
+`renderDuplicates` in the duplicate strip now appends the Guided modal's manual search bar after the auto-search results:
+- Text input (`flex:1`, search any term)
+- `incl. closed` checkbox (default unchecked)
+- 🔍 Search button (and Enter on the input)
+
+On search → `api.searchTickets({ query, includeClosed, freshdeskTicketId })` → results rendered via the same `buildStripDupRow` so Preview/Merge + Merge Out modals work identically to the auto-search rows.
+
+Bumped `@version` 6.33 → 6.34.
+
+---
+
+# Assisted mode toggle (session 11)
+
+## Changes
+- Renamed `🚀 Prewarm` to **Assisted** — a small toggle chip in the toolbar.
+  - OFF (default): white background, gray text, ⚪ icon.
+  - ON: green background, white text, 🟢 icon.
+- State persisted via `localStorage.ta_assisted_mode`.
+- When ON, prewarm auto-fires whenever the agent navigates to a new ticket (via `checkTicketChange` SPA hook, 400ms debounce). Also fires once on cold page load (1500ms after `mountNativeInjections`).
+- When OFF, no auto-fire — agent can still toggle on to prewarm on demand.
+- Click handler shows a toast confirming on/off state.
+
+## Bumped `@version` 6.32 → 6.33.
+
+## Test
+1. Reinstall, confirm @version 6.33.
+2. Toolbar shows `⚪ Assisted` (off).
+3. Click it → toast "Assisted mode ON", chip turns green, current ticket prewarms.
+4. Navigate to another ticket → prewarm fires automatically (header spinner spins briefly, panel populates).
+5. Reload the page → chip stays green, prewarms current ticket on load.
+6. Click chip again → toast "OFF", chip greys out, future navigations no longer auto-fire.
+
+---
+
 # View Note + Quick Translate + AI reconf surfacing (session 10)
 
 ## Changes

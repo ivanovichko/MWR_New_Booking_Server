@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.32
+// @version      6.47
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -162,6 +162,33 @@ const userReservationsCache = new Map();
 // Latest filter the agent visited. Captured on navigation (see checkTicketChange).
 let _lastFilterId = getFreshdeskFilterId();
 
+// Assisted mode — when ON, every ticket navigation auto-fires prewarmWindow.
+// Persisted via localStorage so the toggle survives reloads.
+let _assistedMode = (() => {
+  try { return localStorage.getItem('ta_assisted_mode') === '1'; } catch (e) { return false; }
+})();
+function setAssistedMode(on) {
+  _assistedMode = !!on;
+  try { localStorage.setItem('ta_assisted_mode', _assistedMode ? '1' : '0'); } catch (e) {}
+  const btn = document.getElementById('taAssistedToggle');
+  if (btn) styleAssistedToggle(btn);
+  if (_assistedMode) {
+    showToast('Assisted mode ON — auto-prewarming on navigation.', 'success', 2200);
+    prewarmWindow();
+  } else {
+    showToast('Assisted mode OFF.', 'info', 1500);
+  }
+}
+function styleAssistedToggle(btn) {
+  if (_assistedMode) {
+    btn.textContent = '🟢 Assisted';
+    btn.style.cssText = 'background:#16a085;color:#fff;border:none;padding:4px 10px;border-radius:14px;margin-left:6px;cursor:pointer;font-size:11px;font-weight:600;';
+  } else {
+    btn.textContent = '⚪ Assisted';
+    btn.style.cssText = 'background:#fff;color:#888;border:1px solid #ccc;padding:4px 10px;border-radius:14px;margin-left:6px;cursor:pointer;font-size:11px;font-weight:500;';
+  }
+}
+
 // Prewarm current ticket + next two from the agent's most-recently-visited
 // filter view. POC scope: results land in ticketBookingCache, logged to console.
 async function prewarmWindow() {
@@ -210,29 +237,39 @@ async function prewarmWindow() {
   }
   console.log(`[prewarm] window: [${windowIds.join(', ')}]`);
 
-  showToast(`Prewarming ${windowIds.length} ticket(s)...`, 'info', 2000);
-  for (const tid of windowIds) {
-    if (ticketBookingCache.has(tid)) {
-      console.log(`[prewarm] ${tid} — cache hit, skip`);
-      continue;
-    }
-    console.log(`[prewarm] ${tid} — analysing`);
-    const { ok, data } = await api.guided.analyse(tid);
-    if (!ok) {
-      console.warn(`[prewarm] ${tid} — analyse failed`, data);
-      ticketBookingCache.set(tid, null);
-      continue;
-    }
-    ticketBookingCache.set(tid, data);
-    console.log(`[prewarm] ${tid} — cached`, {
-      bookingId: data?.bookingId || null,
-      hasBookingData: !!data?.bookingData,
-      hasUserData: !!data?.userData,
+  // Fire all analyses in parallel. Each task refreshes the panel as soon as
+  // its result lands — so the ticket the agent is on updates the moment its
+  // response comes back, not when the slowest one in the batch finishes.
+  await withPanelBusy(async () => {
+    showToast(`Prewarming ${windowIds.length} ticket(s)...`, 'info', 1500);
+    const tasks = windowIds.map(async (tid) => {
+      if (ticketBookingCache.has(tid)) {
+        console.log(`[prewarm] ${tid} — cache hit, skip`);
+        return;
+      }
+      console.log(`[prewarm] ${tid} — analysing`);
+      const { ok, data } = await api.guided.analyse(tid);
+      if (!ok) {
+        console.warn(`[prewarm] ${tid} — analyse failed`, data);
+        ticketBookingCache.set(tid, null);
+      } else {
+        ticketBookingCache.set(tid, data);
+        console.log(`[prewarm] ${tid} — cached`, {
+          bookingId: data?.bookingId || null,
+          hasBookingData: !!data?.bookingData,
+          hasUserData: !!data?.userData,
+        });
+      }
+      // Live update: if the agent is on this ticket, refresh immediately
+      // so they see data the instant their ticket's response lands.
+      if (String(getFreshdeskTicketId()) === tid) {
+        refreshNativeInjections();
+      }
     });
-  }
-  console.log(`[prewarm] done — cache size: ${ticketBookingCache.size}`);
-  showToast(`Prewarm done — ${windowIds.length} ticket(s) cached.`, 'success');
-  refreshNativeInjections();
+    await Promise.all(tasks);
+    console.log(`[prewarm] done — cache size: ${ticketBookingCache.size}`);
+    refreshNativeInjections();
+  });
 }
 
 // ── Native FD injections ──────────────────────────────────────────────────────
@@ -256,15 +293,16 @@ function injectBookingPanel() {
   const panel = document.createElement('div');
   panel.id = BOOKING_PANEL_ID;
   panel.style.cssText =
-    'position:fixed;right:20px;top:120px;width:360px;max-height:75vh;' +
+    'position:fixed;right:20px;top:120px;width:380px;max-height:75vh;' +
     'background:#fff;border:1px solid #e3e3e3;border-radius:10px;' +
     'box-shadow:0 8px 30px rgba(0,0,0,0.2);font-family:system-ui,sans-serif;' +
-    'font-size:12px;color:#333;z-index:9998;display:flex;flex-direction:column;overflow:hidden;';
+    'font-size:13px;color:#333;z-index:9998;display:flex;flex-direction:column;overflow:hidden;';
   panel.innerHTML =
-    '<div id="' + BOOKING_PANEL_ID + '_header" style="padding:8px 12px;background:#f7f7f7;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;cursor:move;user-select:none;">' +
+    '<div id="' + BOOKING_PANEL_ID + '_header" style="padding:8px 12px;background:#f7f7f7;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;cursor:move;user-select:none;gap:8px;">' +
       '<span style="font-weight:600;display:flex;align-items:center;gap:6px;">📦 Booking' +
         '<span id="' + BOOKING_PANEL_ID + '_spinner" style="display:none;width:10px;height:10px;border:2px solid #ccc;border-top-color:#6f42c1;border-radius:50%;animation:taSpin 0.8s linear infinite;"></span>' +
       '</span>' +
+      '<span id="' + BOOKING_PANEL_ID + '_queueCount" style="flex:1;font-size:11px;color:#888;font-weight:400;text-align:right;"></span>' +
       '<span id="' + BOOKING_PANEL_ID + '_toggle" style="cursor:pointer;padding:0 6px;font-size:14px;line-height:1;">−</span>' +
     '</div>' +
     '<div id="' + BOOKING_PANEL_ID + '_body" style="padding:10px;overflow-y:auto;flex:1;"></div>';
@@ -316,9 +354,7 @@ function renderBookingPanel() {
   }
   const cached = ticketBookingCache.get(String(ticketId));
   if (cached === undefined) {
-    body.innerHTML =
-      '<div style="color:#888;">Not prewarmed for ticket #' + ticketId + '.</div>' +
-      '<div style="color:#888;margin-top:4px;font-size:11px;">Press 🚀 Prewarm to load.</div>';
+    body.innerHTML = '<div style="color:#888;">Loading details, please wait…</div>';
     return;
   }
 
@@ -393,13 +429,15 @@ function renderBookingPanel() {
     ['Check-Out', booking.checkOut || '—'],
     daysUntil !== null ? ['Days until', `${daysUntil} days`] : null,
     booking.mwrRoomType ? ['Room Type', booking.mwrRoomType] : null,
+    details && details.arrivalTime ? ['ETA', details.arrivalTime] : null,
+    details && details.requests ? ['Requests', '<span style="color:#5d4037;">' + details.requests + '</span>'] : null,
     booking.aiReconfirmation ? ['AI Reconfirm', renderAiReconfirmBadge(booking.aiReconfirmation)] : null,
   ].filter(Boolean);
   const table = document.createElement('table');
-  table.style.cssText = 'width:100%;border-collapse:collapse;';
+  table.style.cssText = 'width:100%;border-collapse:collapse;font-size:13px;';
   rows.forEach(([label, val]) => {
     const tr = document.createElement('tr');
-    tr.innerHTML = `<th style="padding:3px 8px;text-align:left;color:#888;font-weight:500;width:35%;white-space:nowrap;">${label}</th><td style="padding:3px 8px;color:#333;">${val}</td>`;
+    tr.innerHTML = `<th style="padding:4px 8px;text-align:left;color:#888;font-weight:500;width:35%;white-space:nowrap;vertical-align:top;">${label}</th><td style="padding:4px 8px;color:#333;">${val}</td>`;
     table.appendChild(tr);
   });
   body.appendChild(table);
@@ -438,13 +476,14 @@ function renderBookingPanel() {
   body.appendChild(changeBookingToggle);
   body.appendChild(changeBookingRow);
 
-  // Always-visible action row: Post Note + Hotel Email.
+  // Always-visible action row: Post Note · View Note · Hotel Email · Chat.
+  // 2×2 grid so four buttons fit comfortably in the 380px panel.
   const actionRow = document.createElement('div');
-  actionRow.style.cssText = 'display:flex;gap:6px;margin-top:12px;';
+  actionRow.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:12px;';
 
   const postNoteBtn = document.createElement('button');
   postNoteBtn.textContent = '📋 Post Note';
-  postNoteBtn.style.cssText = 'flex:1;padding:8px 10px;border:none;border-radius:6px;background:#007bff;color:#fff;font-size:12px;font-weight:600;cursor:pointer;';
+  postNoteBtn.style.cssText = 'padding:8px 10px;border:none;border-radius:6px;background:#007bff;color:#fff;font-size:13px;font-weight:600;cursor:pointer;';
   postNoteBtn.onclick = () => withPanelBusy(async () => {
     postNoteBtn.disabled = true; postNoteBtn.textContent = '⏳';
     const noteHtml = cached.bookingData.noteHtml || null;
@@ -458,6 +497,7 @@ function renderBookingPanel() {
       postNoteBtn.style.background = '#28a745';
       postNoteBtn.textContent = '✅ Posted';
       showToast('Note posted.', 'success');
+      refreshFreshdeskTicket();
     } else {
       postNoteBtn.disabled = false; postNoteBtn.textContent = '📋 Post Note';
       showToast('Post failed: ' + (data?.error || 'unknown'), 'error');
@@ -466,7 +506,7 @@ function renderBookingPanel() {
 
   const hotelEmailBtn = document.createElement('button');
   hotelEmailBtn.textContent = '📧 Hotel Email';
-  hotelEmailBtn.style.cssText = 'flex:1;padding:8px 10px;border:1px solid #28a745;border-radius:6px;background:#fff;color:#28a745;font-size:12px;font-weight:600;cursor:pointer;';
+  hotelEmailBtn.style.cssText = 'padding:8px 10px;border:1px solid #28a745;border-radius:6px;background:#fff;color:#28a745;font-size:13px;font-weight:600;cursor:pointer;';
   hotelEmailBtn.onclick = () => withPanelBusy(async () => {
     const bid = cached.bookingId || booking.internalBookingId;
     if (!bid) { showToast('No booking ID.', 'error'); return; }
@@ -485,6 +525,7 @@ function renderBookingPanel() {
         });
         if (!sok) throw new Error(sd?.error || 'Send failed');
         showToast(`✅ Email sent → ${addr}`, 'success', 3000);
+        refreshFreshdeskTicket();
       }),
     });
   });
@@ -492,16 +533,24 @@ function renderBookingPanel() {
   // View Note — opens the prebuilt noteHtml in a read-only modal.
   const viewNoteBtn = document.createElement('button');
   viewNoteBtn.textContent = '👁️ View Note';
-  viewNoteBtn.style.cssText = 'flex:1;padding:8px 10px;border:1px solid #17a2b8;border-radius:6px;background:#fff;color:#17a2b8;font-size:12px;font-weight:600;cursor:pointer;';
+  viewNoteBtn.style.cssText = 'padding:8px 10px;border:1px solid #17a2b8;border-radius:6px;background:#fff;color:#17a2b8;font-size:13px;font-weight:600;cursor:pointer;';
   viewNoteBtn.onclick = () => {
     const noteHtml = cached.bookingData.noteHtml;
     if (!noteHtml) { showToast('Note not built yet.', 'warning'); return; }
     showNoteModal(noteHtml);
   };
 
+  // 💬 Chat — opens the translated-chat modal (AI cleans + translates the
+  // conversation thread, optional post-as-note). Migrated from Guided toolbar.
+  const chatBtn = document.createElement('button');
+  chatBtn.textContent = '💬 Chat';
+  chatBtn.style.cssText = 'padding:8px 10px;border:1px solid #e83e8c;border-radius:6px;background:#fff;color:#e83e8c;font-size:13px;font-weight:600;cursor:pointer;';
+  chatBtn.onclick = () => showChatModal(String(ticketId), () => refreshFreshdeskTicket());
+
   actionRow.appendChild(postNoteBtn);
   actionRow.appendChild(viewNoteBtn);
   actionRow.appendChild(hotelEmailBtn);
+  actionRow.appendChild(chatBtn);
   body.appendChild(actionRow);
 
   // Customer section
@@ -583,20 +632,31 @@ function appendCustomerSection(body, user, ticketId) {
       memberNoteBtn.onclick = () => withPanelBusy(async () => {
         memberNoteBtn.disabled = true; memberNoteBtn.textContent = '⏳';
         const v = (val) => val || '';
-        const fields = [['Name', user.fullName || user.name], ['Email', user.email], ['Phone', user.phone], ['Instance', user.instance], ['Status', user.status], ['Country', user.country]].filter(([, val]) => val);
+        const fields = [['Name', user.fullName || user.name], ['Email', user.email], ['Phone', user.phone], ['Instance', user.instance], ['Status', user.status], ['Country', user.country], ['Language', user.language]].filter(([, val]) => val);
         const lines = fields.map(([l, val]) => `<div><strong>${l}:</strong> ${v(val)}</div>`).join('');
         const loginLine   = user.loginLink   ? `<div><strong>Login:</strong> <a href="${user.loginLink}" target="_blank">Login as User</a></div>` : '';
         const profileLine = user.profileLink ? `<div><strong>Profile:</strong> <a href="${user.profileLink}" target="_blank">Open Full Profile</a></div>` : '';
         const noteHtml = `<div style="font-family:system-ui,sans-serif;font-size:13px;line-height:1.8;"><h4 style="margin:0 0 8px;font-size:14px;">👤 Member Details</h4>${lines}${loginLine}${profileLine}</div>`;
         const { ok } = await api.postNote(String(ticketId), noteHtml);
         memberNoteBtn.disabled = false; memberNoteBtn.textContent = '📋 Post Member Note';
-        if (ok) showToast('✅ Member note posted!', 'success');
-        else showToast('❌ Failed to post note.', 'error');
+        if (ok) {
+          showToast('✅ Member note posted!', 'success');
+          refreshFreshdeskTicket();
+        } else {
+          showToast('❌ Failed to post note.', 'error');
+        }
       });
       actionRow.appendChild(memberNoteBtn);
       tabContent.appendChild(actionRow);
 
-      const uRows = [['Name', user.fullName || user.name], ['Email', user.email], ['Phone', user.phone], ['Country', user.country], ['Status', user.status]].filter(([, val]) => val);
+      const uRows = [
+        ['Name', user.fullName || user.name],
+        ['Email', user.email],
+        ['Phone', user.phone],
+        ['Country', user.country],
+        ['Language', user.language],
+        ['Status', user.status],
+      ].filter(([, val]) => val);
       const uTable = document.createElement('table');
       uTable.style.cssText = 'width:100%;border-collapse:collapse;';
       uRows.forEach(([label, val]) => {
@@ -745,13 +805,14 @@ function injectReplyBarButtons() {
     return li;
   };
 
-  bar.appendChild(mkLi(REPLY_CUSTOMER_LI_ID, '💬 Reply Customer', '#1976d2', () => openComposerAndInjectTemplate('customer')));
-  bar.appendChild(mkLi(REPLY_SUPPLIER_LI_ID, '🏨 Reply Supplier', '#6f42c1', () => openComposerAndInjectTemplate('supplier')));
+  bar.appendChild(mkLi(REPLY_CUSTOMER_LI_ID, '💬 Reply Customer', '#1976d2', () => openMimickedComposer('customer')));
+  bar.appendChild(mkLi(REPLY_SUPPLIER_LI_ID, '🏨 Reply Supplier', '#6f42c1', () => openMimickedComposer('supplier')));
 }
 
 // Inject "Reply Customer" / "Reply Supplier" tabs into FD's composer toolbar
-// (.ticket-actions-list — only present when the composer is open). Sibling to
-// FD's own Reply / Note / Forward buttons.
+// (.ticket-actions-list — only present when the composer is open). Clicking
+// a tab opens our mimicked composer (a floating modal) so we control To:,
+// template body, signature, and send via /api/_/tickets/{id}/reply.
 function injectReplyComposerTabs() {
   const list = document.querySelector('.ticket-actions-list');
   if (!list) return;
@@ -767,53 +828,134 @@ function injectReplyComposerTabs() {
     return b;
   };
 
-  list.appendChild(mkTab('ta-reply-customer-tab', 'Reply Customer', '#1976d2', () => injectReplyTemplate('customer')));
-  list.appendChild(mkTab('ta-reply-supplier-tab', 'Reply Supplier', '#6f42c1', () => injectReplyTemplate('supplier')));
+  list.appendChild(mkTab('ta-reply-customer-tab', 'Reply Customer', '#1976d2', () => openMimickedComposer('customer')));
+  list.appendChild(mkTab('ta-reply-supplier-tab', 'Reply Supplier', '#6f42c1', () => openMimickedComposer('supplier')));
 }
 
-// Writes a templated reply into FD's contenteditable composer (Froala editor).
-function injectReplyTemplate(recipientType) {
+// Insert a 🌐 Translate button into FD's composer footer, immediately before
+// the Send button. Click translates whatever the agent typed into FD's own
+// contenteditable in-place (preserves original below a divider).
+function injectTranslateNearSend() {
+  const wrapper = document.querySelector('.ticket-editor__footer .reply-btn-wrapper');
+  if (!wrapper) return;
+  if (wrapper.querySelector('.ta-translate-near-send')) return;
+  const replyBtn = wrapper.querySelector('.reply-btn');
+  if (!replyBtn) return;
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'ta-translate-near-send';
+  btn.title = 'Translate the current draft';
+  btn.textContent = '🌐 Translate';
+  btn.style.cssText = 'background:#fff;border:1px solid #17a2b8;color:#17a2b8;padding:6px 12px;border-radius:4px;font-size:13px;font-weight:500;cursor:pointer;margin-right:8px;';
+  btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); translateFdComposer(); };
+
+  wrapper.insertBefore(btn, replyBtn);
+}
+
+// Floating mimicked composer — opens via the reply-customer/supplier tabs.
+// Reuses showReplyComposer for the body, mounted into a draggable modal.
+// Customer replies work without a booking (member fallback via cached.userData);
+// supplier replies require booking data (supplier email comes from it).
+function openMimickedComposer(recipientType) {
+  const tid = getFreshdeskTicketId();
+  if (!tid) { showToast('No ticket on this page.', 'error'); return; }
+  const cached = ticketBookingCache.get(String(tid));
+  if (cached === undefined) {
+    showToast('Loading details — try again in a moment.', 'warning');
+    return;
+  }
+
+  const bookingData = cached?.bookingData || null;
+  const userFallback = cached?.userData || null;
+
+  let booking = {};
+  let details = {};
+  let user    = {};
+  let supplier = null;
+  if (bookingData) {
+    booking  = bookingData.booking  || {};
+    details  = bookingData.details  || {};
+    user     = bookingData.user     || userFallback || {};
+    supplier = bookingData.supplier || null;
+  } else if (userFallback) {
+    user = userFallback;
+  }
+
+  // Resolve To:
+  let toEmail = '';
+  if (recipientType === 'supplier') {
+    toEmail = supplier?.email || '';
+    if (!toEmail) {
+      showToast('No supplier email — needs booking data with a supplier match.', 'warning');
+      return;
+    }
+  } else {
+    toEmail = user?.email || '';
+    if (!toEmail) {
+      showToast('No customer email found for this ticket.', 'warning');
+      return;
+    }
+  }
+
+  const titleEmoji = recipientType === 'supplier' ? '🏨' : '💬';
+  const titleText  = recipientType === 'supplier' ? 'Reply to Supplier' : 'Reply to Customer';
+  const { modal, body } = createModal('taMimickedComposer', titleEmoji + ' ' + titleText, {
+    style: 'top:60px;left:50%;transform:translateX(-50%);width:680px;max-width:95vw;max-height:88vh;',
+    bodyStyle: 'padding:14px 18px;',
+  });
+  trapKeyEventsForModal(modal);
+
+  showReplyComposer({
+    recipientType,
+    toEmail,
+    booking,
+    details,
+    user,
+    supplier,
+    body,
+    ticketId: String(tid),
+    onSent: () => { modal.remove(); },
+  });
+}
+
+// Translate the current FD composer draft in-place. Target language defaults
+// to the customer's detected country language (if available), otherwise
+// prompts. Preserves the original below a divider.
+async function translateFdComposer() {
   const editor = document.querySelector('.fr-element.fr-view[contenteditable="true"]');
-  if (!editor) { showToast('Composer is not open. Click Reply first.', 'warning'); return; }
+  if (!editor) { showToast('Composer is not open.', 'warning'); return; }
+  const text = (editor.innerText || '').trim();
+  if (!text) { showToast('Nothing to translate.', 'warning'); return; }
 
   const tid = getFreshdeskTicketId();
   const cached = ticketBookingCache.get(String(tid));
-  const booking = cached?.bookingData?.booking || {};
-  const details = cached?.bookingData?.details || {};
-  const user    = cached?.bookingData?.user || cached?.userData || {};
+  const country = cached?.bookingData?.user?.country || cached?.userData?.country || null;
+  const detected = country ? countryToLanguage(country) : null;
+  const target = prompt('Target language (ISO code or name):', detected || 'en');
+  if (!target) return;
 
-  const text = buildReplySignature(recipientType, booking, details, user);
+  // Strip sign-off + signature before sending to the API to avoid translating
+  // boilerplate phone numbers and links.
+  const signOffRe = /^\s*(sincerely|best\s+regards?|kind\s+regards?|regards|best|thanks|thank\s+you|warm\s+regards?|yours\s+sincerely|with\s+(?:best\s+)?regards?|cheers|yours\s+truly|faithfully)[,.]?\s*$/i;
+  const lines = text.split('\n');
+  let cutIdx = lines.length;
+  for (let i = lines.length - 1; i >= 0; i--) { if (signOffRe.test(lines[i])) { cutIdx = i; break; } }
+  const textToTranslate = lines.slice(0, cutIdx).join('\n').trim() || text;
 
-  // Plaintext → paragraphed HTML, preserving blank lines.
-  const escape = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const html = text.split('\n').map((line) =>
-    line.trim() ? '<p>' + escape(line) + '</p>' : '<p><br></p>'
-  ).join('');
-
-  editor.innerHTML = html;
-  // Froala/Ember need a real input event to register the change.
+  const originalHtml = editor.innerHTML;
+  const { ok, data } = await api.translate(textToTranslate, target);
+  if (!ok || !data?.text) { showToast('Translation failed.', 'error'); return; }
+  const translatedHtml = data.text.replace(/\n/g, '<br>');
+  editor.innerHTML =
+    '<div><span style="font-size:10px;color:#00897b;font-weight:600;">🌐 ' + target + '</span></div>' +
+    translatedHtml +
+    '<br><hr style="border:none;border-top:1px solid #ddd;margin:8px 0;">' +
+    '<div><span style="font-size:10px;color:#aaa;font-weight:600;">📄 Original</span></div>' +
+    originalHtml;
   editor.dispatchEvent(new Event('input', { bubbles: true }));
   editor.dispatchEvent(new Event('change', { bubbles: true }));
-
-  showToast((recipientType === 'supplier' ? 'Supplier' : 'Customer') + ' template inserted.', 'success');
-}
-
-// Opens FD's composer (if closed), waits for the editor, then injects template.
-// Used by the older ul.reply-bar buttons where the composer may not yet be open.
-async function openComposerAndInjectTemplate(recipientType) {
-  let editor = document.querySelector('.fr-element.fr-view[contenteditable="true"]');
-  if (!editor) {
-    const trigger = document.querySelector('[data-test-id="ticket-action-reply"]');
-    if (!trigger) { showToast('Reply trigger not found.', 'error'); return; }
-    trigger.click();
-    const start = Date.now();
-    while (!editor && Date.now() - start < 3000) {
-      await new Promise((r) => setTimeout(r, 100));
-      editor = document.querySelector('.fr-element.fr-view[contenteditable="true"]');
-    }
-    if (!editor) { showToast('Composer did not open in time.', 'error'); return; }
-  }
-  injectReplyTemplate(recipientType);
+  showToast('Translated to ' + target + '.', 'success');
 }
 
 function injectDuplicateStrip() {
@@ -884,17 +1026,69 @@ function kickDuplicateSearch(ticketId, vendorConf, internalId, memberEmail, cont
 function renderDuplicates(content, dups, currentTicketId) {
   content.innerHTML = '';
   if (!dups.length) {
-    const noRes = document.createElement('span');
-    noRes.style.cssText = 'color:#28a745;font-weight:500;';
+    const noRes = document.createElement('div');
+    noRes.style.cssText = 'color:#28a745;font-weight:500;margin-bottom:6px;';
     noRes.textContent = '✓ No open threads found.';
     content.appendChild(noRes);
-    return;
+  } else {
+    const hdr = document.createElement('div');
+    hdr.style.cssText = 'font-weight:700;font-size:16px;color:#856404;margin-bottom:10px;letter-spacing:0.2px;';
+    hdr.textContent = `⚠️ ${dups.length} open thread${dups.length > 1 ? 's' : ''} found`;
+    content.appendChild(hdr);
+    dups.forEach((dup) => content.appendChild(buildStripDupRow(dup, currentTicketId)));
   }
-  const hdr = document.createElement('div');
-  hdr.style.cssText = 'font-weight:700;font-size:16px;color:#856404;margin-bottom:10px;letter-spacing:0.2px;';
-  hdr.textContent = `⚠️ ${dups.length} open thread${dups.length > 1 ? 's' : ''} found`;
-  content.appendChild(hdr);
-  dups.forEach((dup) => content.appendChild(buildStripDupRow(dup, currentTicketId)));
+
+  // ── Manual search bar (Guided parity) ────────────────────────────────────
+  const divider = document.createElement('div');
+  divider.style.cssText = 'border-top:1px solid #eee;margin:10px 0 8px;';
+  content.appendChild(divider);
+
+  const searchRow = document.createElement('div');
+  searchRow.style.cssText = 'display:flex;align-items:center;gap:6px;flex-wrap:wrap;';
+  const searchInput = document.createElement('input');
+  searchInput.type = 'text';
+  searchInput.placeholder = 'Search tickets to merge…';
+  searchInput.style.cssText = 'flex:1;min-width:140px;padding:3px 8px;border:1px solid #ddd;border-radius:4px;font-size:11px;';
+  const closedChk = document.createElement('input');
+  closedChk.type = 'checkbox';
+  closedChk.id = 'taStripDupClosed_' + currentTicketId;
+  const closedLbl = document.createElement('label');
+  closedLbl.htmlFor = closedChk.id;
+  closedLbl.textContent = 'incl. closed';
+  closedLbl.style.cssText = 'font-size:11px;color:#6c757d;white-space:nowrap;cursor:pointer;user-select:none;';
+  const searchBtn = document.createElement('button');
+  searchBtn.textContent = '🔍 Search';
+  searchBtn.style.cssText = 'padding:3px 10px;border:none;border-radius:4px;background:#6f42c1;color:#fff;font-size:11px;cursor:pointer;';
+  const manualResults = document.createElement('div');
+  manualResults.style.cssText = 'width:100%;margin-top:6px;';
+
+  const doSearch = async () => {
+    const q = searchInput.value.trim();
+    if (!q) return;
+    searchBtn.disabled = true; searchBtn.textContent = '⏳';
+    const { ok, data } = await api.searchTickets({
+      query: q,
+      includeClosed: closedChk.checked,
+      freshdeskTicketId: String(currentTicketId),
+    });
+    searchBtn.disabled = false; searchBtn.textContent = '🔍 Search';
+    manualResults.innerHTML = '';
+    const found = (ok && data?.duplicates) ? data.duplicates : [];
+    if (!found.length) {
+      manualResults.innerHTML = '<div style="color:#999;font-size:11px;padding:2px 0;">No results.</div>';
+      return;
+    }
+    found.forEach((dup) => manualResults.appendChild(buildStripDupRow(dup, currentTicketId)));
+  };
+  searchBtn.onclick = doSearch;
+  searchInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
+
+  searchRow.appendChild(searchInput);
+  searchRow.appendChild(closedChk);
+  searchRow.appendChild(closedLbl);
+  searchRow.appendChild(searchBtn);
+  content.appendChild(searchRow);
+  content.appendChild(manualResults);
 }
 
 // Row factory mirroring the Guided modal's buildDupRow. Self-contained so the
@@ -1182,89 +1376,143 @@ async function showStripDupMergeOutModal(dup, currentTicketId, triggerBtn) {
   document.body.appendChild(pop);
 }
 
-// Per-conversation controls: collapse toggle + Translate button injected into
-// each note/reply's action bar (sibling to Edit/Delete). Marker attribute
-// prevents double-injection; FD re-renders create fresh nodes without the
-// marker so the polling loop catches them.
+// Per-conversation controls: clicking the header collapses/expands the
+// content; a Translate button lives in the action container next to FD's
+// Edit/Delete. All notes except the last two are collapsed by default.
 function injectConversationControls() {
-  const wrappers = document.querySelectorAll('[data-test-id="conversation-wrapper"]');
+  const wrappers = Array.from(document.querySelectorAll('[data-test-id="conversation-wrapper"]'));
+  const keepExpanded = new Set(wrappers.slice(-2)); // last two stay open
   wrappers.forEach((wrapper) => {
     if (wrapper.dataset.taControlsInjected) return;
+    const header = wrapper.querySelector('.conversation-header');
     const actions = wrapper.querySelector('.conversation-header .ticket-actions-container');
     const content = wrapper.querySelector('[data-test-id="conversation-content-wrapper"]');
-    if (!actions || !content) return;
+    if (!header || !content) return;
 
-    const mkBtn = (emoji, title, color, onClick) => {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'nucleus-button nucleus-button--small nucleus-button--text ticket-actions';
-      b.title = title;
-      b.style.cssText = 'padding:4px 8px;color:' + color + ';font-size:14px;cursor:pointer;background:transparent;border:none;';
-      b.textContent = emoji;
-      b.onclick = (e) => { e.preventDefault(); e.stopPropagation(); onClick(b); };
-      return b;
+    // Click-anywhere-on-header toggle. Skips clicks on interactive children so
+    // Edit/Delete/Translate buttons keep working.
+    const setCollapsed = (collapsed) => {
+      content.style.display = collapsed ? 'none' : '';
+      wrapper.dataset.taCollapsed = collapsed ? '1' : '0';
+      const chev = header.querySelector('.ta-chev');
+      if (chev) chev.textContent = collapsed ? '▸' : '▾';
     };
+    const toggleFromHeader = (e) => {
+      if (e.target.closest('button, a, input, textarea, select, .nucleus-button')) return;
+      setCollapsed(wrapper.dataset.taCollapsed !== '1');
+    };
+    header.style.cursor = 'pointer';
+    header.addEventListener('click', toggleFromHeader);
 
-    // Collapse toggle.
-    const collapseBtn = mkBtn('▼', 'Collapse', '#666', (btn) => {
-      const isHidden = content.style.display === 'none';
-      content.style.display = isHidden ? '' : 'none';
-      btn.textContent = isHidden ? '▼' : '▶';
-      btn.title = isHidden ? 'Collapse' : 'Expand';
-    });
+    // Tiny chevron prepended to the sender-info span so the state is visible.
+    const sender = header.querySelector('.sender-info') || header.firstElementChild;
+    if (sender && !sender.querySelector('.ta-chev')) {
+      const chev = document.createElement('span');
+      chev.className = 'ta-chev';
+      chev.style.cssText = 'display:inline-block;width:14px;color:#888;font-size:11px;margin-right:4px;user-select:none;';
+      chev.textContent = '▾';
+      sender.insertBefore(chev, sender.firstChild);
+    }
 
-    // Translate toggle. Caches original + translated HTML to flip in-place.
-    const noteEl = wrapper.querySelector('[data-test-conversation="conversation-text"]')
-                || wrapper.querySelector('.ticket_note');
-    let originalHtml = null;
-    let translatedHtml = null;
-    let showingTranslated = false;
-    const translateBtn = mkBtn('🌐', 'Translate to English', '#1976d2', async (btn) => {
-      if (!noteEl) { showToast('Could not find note content.', 'error'); return; }
-      if (showingTranslated) {
-        noteEl.innerHTML = originalHtml;
-        showingTranslated = false;
-        btn.textContent = '🌐';
-        btn.title = 'Translate to English';
-        return;
-      }
-      if (translatedHtml) {
+    // Translate button — lives in the actions container so it doesn't conflict
+    // with the header click target.
+    if (actions) {
+      const noteEl = wrapper.querySelector('[data-test-conversation="conversation-text"]')
+                  || wrapper.querySelector('.ticket_note');
+      let originalHtml = null;
+      let translatedHtml = null;
+      let showingTranslated = false;
+      const translateBtn = document.createElement('button');
+      translateBtn.type = 'button';
+      translateBtn.className = 'nucleus-button nucleus-button--small nucleus-button--text ticket-actions';
+      translateBtn.title = 'Translate to English';
+      translateBtn.style.cssText = 'padding:4px 8px;color:#1976d2;font-size:14px;cursor:pointer;background:transparent;border:none;';
+      translateBtn.textContent = '🌐';
+      translateBtn.onclick = async (e) => {
+        e.preventDefault(); e.stopPropagation();
+        if (!noteEl) { showToast('Could not find note content.', 'error'); return; }
+        if (showingTranslated) {
+          noteEl.innerHTML = originalHtml;
+          showingTranslated = false;
+          translateBtn.textContent = '🌐'; translateBtn.title = 'Translate to English';
+          return;
+        }
+        if (translatedHtml) {
+          originalHtml = noteEl.innerHTML;
+          noteEl.innerHTML = translatedHtml;
+          showingTranslated = true;
+          translateBtn.textContent = '↩'; translateBtn.title = 'Show original';
+          return;
+        }
         originalHtml = noteEl.innerHTML;
+        const text = (noteEl.innerText || '').trim();
+        if (!text) { showToast('No text to translate.', 'warning'); return; }
+        translateBtn.textContent = '…'; translateBtn.disabled = true;
+        const { ok, data } = await api.translate(text, 'en');
+        translateBtn.disabled = false;
+        if (!ok) {
+          translateBtn.textContent = '🌐';
+          showToast('Translation failed: ' + (data?.error || 'unknown'), 'error');
+          return;
+        }
+        translatedHtml = (data?.text || '').replace(/\n/g, '<br>');
         noteEl.innerHTML = translatedHtml;
         showingTranslated = true;
-        btn.textContent = '↩';
-        btn.title = 'Show original';
-        return;
-      }
-      originalHtml = noteEl.innerHTML;
-      const text = (noteEl.innerText || '').trim();
-      if (!text) { showToast('No text to translate.', 'warning'); return; }
-      btn.textContent = '…';
-      btn.disabled = true;
-      const { ok, data } = await api.translate(text, 'en');
-      btn.disabled = false;
-      if (!ok) {
-        btn.textContent = '🌐';
-        showToast('Translation failed: ' + (data?.error || 'unknown'), 'error');
-        return;
-      }
-      const translatedText = data?.translation || data?.translated || data?.text || '';
-      translatedHtml = translatedText.replace(/\n/g, '<br>');
-      noteEl.innerHTML = translatedHtml;
-      showingTranslated = true;
-      btn.textContent = '↩';
-      btn.title = 'Show original';
-    });
+        translateBtn.textContent = '↩'; translateBtn.title = 'Show original';
+      };
+      actions.insertBefore(translateBtn, actions.firstChild);
 
-    actions.insertBefore(collapseBtn, actions.firstChild);
-    actions.insertBefore(translateBtn, actions.firstChild);
+      // AI Translate (Groq) — passes only this conversation's text to the
+      // "translate chat" prompt and opens the result in showChatModal.
+      const aiBtn = document.createElement('button');
+      aiBtn.type = 'button';
+      aiBtn.className = 'nucleus-button nucleus-button--small nucleus-button--text ticket-actions';
+      aiBtn.title = 'AI translate this chat';
+      aiBtn.style.cssText = 'padding:4px 8px;color:#e83e8c;font-size:14px;cursor:pointer;background:transparent;border:none;';
+      aiBtn.textContent = '🤖';
+      aiBtn.onclick = (e) => {
+        e.preventDefault(); e.stopPropagation();
+        if (!noteEl) { showToast('Could not find note content.', 'error'); return; }
+        const text = (noteEl.innerText || '').trim();
+        if (!text) { showToast('No text to translate.', 'warning'); return; }
+        const noteId = wrapper.dataset.album || wrapper.id || '';
+        const scopeLabel = noteId.replace(/^note_/, 'note ');
+        showChatModal(getFreshdeskTicketId(), () => refreshFreshdeskTicket(), {
+          content: text,
+          scopeLabel,
+        });
+      };
+      actions.insertBefore(aiBtn, actions.firstChild);
+    }
+
+    // Default state: collapsed unless this is one of the last two.
+    setCollapsed(!keepExpanded.has(wrapper));
     wrapper.dataset.taControlsInjected = '1';
   });
+}
+
+// Show "tickets left in this queue: X" in the booking panel header. Reads
+// from viewQueueCache + the agent's most-recently-visited filter. Hidden
+// when we have no queue context.
+function updateQueueCounter() {
+  const el = document.getElementById(BOOKING_PANEL_ID + '_queueCount');
+  if (!el) return;
+  const tid = getFreshdeskTicketId();
+  const fid = _lastFilterId;
+  if (!tid || !fid) { el.textContent = ''; return; }
+  const queue = viewQueueCache.get(fid);
+  if (!queue || !queue.length) { el.textContent = ''; return; }
+  const idx = queue.indexOf(String(tid));
+  if (idx === -1) { el.textContent = ''; return; }
+  const remaining = queue.length - idx - 1;
+  el.textContent = 'tickets left in this queue: ' + remaining;
+  el.title = remaining + ' more after this one (queue size ' + queue.length + ')';
 }
 
 function refreshNativeInjections() {
   renderBookingPanel();
   refreshDuplicateStrip();
+  updateQueueCounter();
 }
 
 // Polling mount loop — covers FD re-renders on SPA nav. Injection functions
@@ -1274,10 +1522,16 @@ function refreshNativeInjections() {
 function mountNativeInjections() {
   injectBookingPanel();
   renderBookingPanel();
+  // Initial assisted-mode fire on cold page load — pushState/popstate hooks
+  // miss the very first navigation.
+  if (_assistedMode) {
+    setTimeout(() => { if (getFreshdeskTicketId()) prewarmWindow(); }, 1500);
+  }
   setInterval(() => {
     injectBookingPanel();
     injectReplyBarButtons();
     injectReplyComposerTabs();
+    injectTranslateNearSend();
     injectDuplicateStrip();
     injectConversationControls();
     // Each re-inject (after FD wipes the DOM) sets fresh content via
@@ -1339,6 +1593,24 @@ async function withButtonLoading(btn, loadingLabel, fn) {
 // opts.style      — extra CSS appended to the modal container (position, width, etc.)
 // opts.bodyStyle  — extra CSS appended to the scrollable body div
 // Returns { modal, header, body, closeBtn }
+// Prevents FD's keyboard shortcuts from firing while the agent types inside
+// one of our modals. Attaches at window-capture (earliest possible) so we beat
+// any FD listener registered on document/window. Auto-cleans when the modal
+// element is detached.
+function trapKeyEventsForModal(modalElement) {
+  const types = ['keydown', 'keyup', 'keypress'];
+  const handler = (e) => {
+    if (!modalElement.isConnected) {
+      types.forEach((t) => window.removeEventListener(t, handler, true));
+      return;
+    }
+    if (modalElement.contains(e.target)) {
+      e.stopImmediatePropagation();
+    }
+  };
+  types.forEach((t) => window.addEventListener(t, handler, true));
+}
+
 function createModal(id, title, opts = {}) {
   document.getElementById(id)?.remove();
   const zIndex = opts.zIndex || 999999;
@@ -1414,6 +1686,50 @@ function createRichEditor(opts = {}) {
     });
   }
   return editor;
+}
+
+// ── RTF formatting toolbar for createRichEditor ──────────────────────────────
+// Returns a toolbar element to be appended just before the editor. Uses
+// document.execCommand — deprecated but still works in every current browser
+// for contenteditable. onmousedown preventDefault keeps focus inside the
+// editor while the button is clicked.
+function buildRtfToolbar(editor) {
+  const bar = document.createElement('div');
+  bar.style.cssText = 'display:flex;align-items:center;gap:2px;padding:4px 6px;border:1px solid #ddd;border-bottom:none;border-radius:6px 6px 0 0;background:#f8f9fa;';
+
+  const mkBtn = (label, title, fn) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.innerHTML = label;
+    b.title = title;
+    b.style.cssText = 'background:transparent;border:none;padding:4px 8px;cursor:pointer;font-size:13px;color:#444;border-radius:3px;line-height:1;';
+    b.onmouseenter = () => { b.style.background = '#e9ecef'; };
+    b.onmouseleave = () => { b.style.background = 'transparent'; };
+    b.onmousedown = (e) => e.preventDefault();
+    b.onclick = (e) => { e.preventDefault(); editor.focus(); fn(); };
+    return b;
+  };
+  const cmd = (name, arg) => () => document.execCommand(name, false, arg || null);
+  const divider = () => {
+    const d = document.createElement('span');
+    d.style.cssText = 'display:inline-block;width:1px;height:16px;background:#ddd;margin:0 4px;';
+    return d;
+  };
+
+  bar.appendChild(mkBtn('<b>B</b>',  'Bold',          cmd('bold')));
+  bar.appendChild(mkBtn('<i>I</i>',  'Italic',        cmd('italic')));
+  bar.appendChild(mkBtn('<u>U</u>',  'Underline',     cmd('underline')));
+  bar.appendChild(divider());
+  bar.appendChild(mkBtn('•',         'Bulleted list', cmd('insertUnorderedList')));
+  bar.appendChild(mkBtn('1.',        'Numbered list', cmd('insertOrderedList')));
+  bar.appendChild(divider());
+  bar.appendChild(mkBtn('🔗',        'Insert link',   () => {
+    const url = prompt('Link URL:');
+    if (url) document.execCommand('createLink', false, url);
+  }));
+  bar.appendChild(mkBtn('✕',         'Clear formatting', cmd('removeFormat')));
+
+  return bar;
 }
 
 // ── Confirm modal (replaces confirm()) ────────────────────────────────────────
@@ -1560,12 +1876,34 @@ function showHotelEmailConfirmModal(opts) {
 }
 
 // ── Refresh Freshdesk ticket timeline without full page reload ────────────────
+// Force Freshdesk to refetch the conversation thread by double-clicking the
+// activities toggle (collapse → expand triggers a refetch). FD has changed
+// the data-test-id over time, so we try multiple known selectors. Console
+// warns when none match so we know to grab the new attribute.
+// 800ms initial delay — gives FD's backend time to index the just-posted
+// note/reply before we ask the UI to refetch. Without it, the refresh races
+// the write and we see stale data.
 function refreshFreshdeskTicket() {
-  const btn = document.querySelector('[data-test-toggle-activity]');
-  if (!btn) { console.warn('⚠️ Activities toggle button not found'); return; }
+  const candidates = [
+    '[data-test-toggle-activity]',
+    '[data-test-id="toggle-activity"]',
+    '[data-test-id="conversation-refresh"]',
+    '[data-test-id="refresh-conversations"]',
+    '[aria-label="Refresh"]',
+    '[aria-label="Refresh conversations"]',
+    'button.refresh-conversation',
+  ];
+  let btn = null;
+  for (const sel of candidates) {
+    btn = document.querySelector(sel);
+    if (btn) break;
+  }
+  if (!btn) { console.warn('⚠️ FD refresh button not found — tried', candidates.join(', ')); return; }
   const click = () => btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-  click();
-  setTimeout(click, 350);
+  setTimeout(() => {
+    click();
+    setTimeout(click, 350);
+  }, 800);
 }
 
 
@@ -1581,14 +1919,21 @@ function showNoteModal(noteHtml) {
 
 
 // ── Chat modal ────────────────────────────────────────────────────────────────
-async function showChatModal(ticketId, onNotePosted) {
+// opts.content — when set, send this text to AI instead of pulling the whole
+// ticket thread. Used by the per-conversation 🤖 button to translate one chat.
+// opts.scopeLabel — subtitle shown in the modal title (e.g. "conversation #123").
+async function showChatModal(ticketId, onNotePosted, opts = {}) {
   const freshdeskTicketId = ticketId || getFreshdeskTicketId();
   if (!freshdeskTicketId) { showToast('No ticket detected.', 'error'); return; }
+  const title = opts.scopeLabel
+    ? `💬 Chat — #${freshdeskTicketId} · ${opts.scopeLabel}`
+    : `💬 Chat — #${freshdeskTicketId}`;
 
-  const { body } = createModal('taChatModal', `💬 Chat — #${freshdeskTicketId}`, {
+  const { modal, body } = createModal('taChatModal', title, {
     style: 'top:60px;right:24px;width:700px;max-width:calc(100vw - 48px);max-height:92vh;resize:both;overflow:auto;min-width:400px;',
     bodyStyle: 'padding:14px 16px;display:flex;flex-direction:column;gap:12px;',
   });
+  trapKeyEventsForModal(modal);
 
   // Chat translation section
   const chatSection = document.createElement('div');
@@ -1629,10 +1974,10 @@ async function showChatModal(ticketId, onNotePosted) {
       : null;
     const promptText = translatePrompt ? translatePrompt.text : 'Clean and translate this chat transcript to English. Format as BOT/CUSTOMER/AGENT. Add a 2-sentence summary at the end. Output only the formatted transcript and summary — no headers, no labels, no markdown, no reasoning, no extra commentary.';
 
-    const { ok: aiOk, data: aiData } = await api.aiAssist({
-      booking: {}, details: {}, user: null, supplier: null,
-      freshdeskTicketId, prompt: promptText,
-    });
+    const aiBody = opts.content
+      ? { booking: {}, details: {}, user: null, supplier: null, content: opts.content, prompt: promptText }
+      : { booking: {}, details: {}, user: null, supplier: null, freshdeskTicketId, prompt: promptText };
+    const { ok: aiOk, data: aiData } = await api.aiAssist(aiBody);
     if (aiOk && aiData.text) {
       chatTextarea.value = aiData.text;
       chatTextarea.readOnly = false;
@@ -3635,8 +3980,19 @@ function buildAttachmentUI() {
 
 function buildReplySignature(recipientType, booking, details, user) {
   const stripHtml = (s) => s ? s.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : '';
+  const rawFirst = user && (user.firstName || user.fullName || user.name)
+    ? String(user.firstName || user.fullName || user.name).split(' ')[0]
+    : '';
+  const firstName = rawFirst
+    ? rawFirst.charAt(0).toUpperCase() + rawFirst.slice(1).toLowerCase()
+    : '';
+  const supplierName = booking && booking.supplierName
+    ? stripHtml(booking.supplierName).replace(/\s*\(\d+\)\s*$/, '')
+    : 'team';
 
-  const greeting = 'Hello,';
+  const greeting = recipientType === 'supplier'
+    ? 'Hello dear ' + supplierName + ' team,'
+    : (firstName ? 'Hello ' + firstName + ',' : 'Hello,');
   const opener   = 'I hope this email finds you well.';
 
   const sig = [
@@ -3727,8 +4083,13 @@ function showReplyComposer(opts) {
 
   // Editable reply area (contenteditable — preserves pasted HTML, images, links)
   const replyArea = createRichEditor({
-    style: `width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid #ddd;border-radius:6px;font-size:13px;font-family:${THEME.font};min-height:200px;line-height:1.5;outline:none;overflow-y:auto;white-space:pre-wrap;word-break:break-word;`,
+    style: `width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid #ddd;border-top:none;border-radius:0 0 6px 6px;font-size:13px;font-family:${THEME.font};min-height:200px;line-height:1.5;outline:none;overflow-y:auto;white-space:pre-wrap;word-break:break-word;`,
   });
+
+  // RTF toolbar — basic execCommand-driven formatting. Sits flush above the
+  // editor so the two visually form one unit.
+  const toolbar = buildRtfToolbar(replyArea);
+  container.appendChild(toolbar);
   // Set initial signature as plain text, converting newlines to <br>
   replyArea.textContent = buildReplySignature(recipientType, booking, details, user);
   replyArea.innerHTML = replyArea.innerHTML.replace(/\n/g, '<br>');
@@ -4071,7 +4432,13 @@ function addToolbarButtons() {
     };
 
     container.appendChild(mkBtn('taGuidedBtn',     '🎯 Guided',    '#6f42c1', () => showGuidedPrewarmModal()));
-    container.appendChild(mkBtn('taPrewarmBtn',    '🚀 Prewarm',   '#16a085', () => prewarmWindow()));
+
+    const assistedToggle = document.createElement('button');
+    assistedToggle.id = 'taAssistedToggle';
+    assistedToggle.title = 'Assisted mode — auto-prewarm every ticket on navigation';
+    assistedToggle.onclick = () => setAssistedMode(!_assistedMode);
+    styleAssistedToggle(assistedToggle);
+    container.appendChild(assistedToggle);
     container.appendChild(mkBtn('taGuidedHereBtn', '🎯 Open Here', '#9b59b6', () => {
       const tid = getFreshdeskTicketId();
       if (!tid) { showToast('No ticket detected on this page.', 'warning'); return; }
@@ -4177,13 +4544,19 @@ let _lastTicketId = getFreshdeskTicketId();
 
 function checkTicketChange() {
   const currentTicketId = getFreshdeskTicketId();
-  if (currentTicketId && currentTicketId !== _lastTicketId) {
+  const ticketChanged = currentTicketId && currentTicketId !== _lastTicketId;
+  if (ticketChanged) {
     _lastTicketId = currentTicketId;
   }
   const currentFilterId = getFreshdeskFilterId();
   if (currentFilterId) _lastFilterId = currentFilterId;
   setTimeout(injectTicketListBadges, 1500);
   setTimeout(refreshNativeInjections, 200);
+  // Assisted mode: prewarm whenever we land on a new ticket. Small delay so
+  // FD's URL/state has settled before we read the current ticket ID.
+  if (ticketChanged && _assistedMode) {
+    setTimeout(() => prewarmWindow(), 400);
+  }
 }
 const _origPushState = history.pushState;
 history.pushState = function(...args) {

@@ -55,6 +55,7 @@ function parseUserHtml(html) {
   const zip        = getValue('ZIP / Postal Code');
   const turbo      = getValue('Turbo Access');
   const expiry     = getValue('Expiry Date');
+  const language   = getValue('Language');
 
   // Instance — has special styling, look for it specifically
   const instanceEl = doc.querySelector('[style*="B687D9"] strong') ||
@@ -108,6 +109,7 @@ function parseUserHtml(html) {
     instance,
     turbo,
     expiry,
+    language,
     loginLink,
     profileLink,
     secondaryMembers,

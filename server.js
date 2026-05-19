@@ -969,13 +969,17 @@ app.post('/translate', async (req, res) => {
 
 // ─── AI assist ────────────────────────────────────────────────────────────────
 app.post('/ai-assist', async (req, res) => {
-  const { booking, details, user, supplier, prompt, freshdeskTicketId } = req.body;
+  const { booking, details, user, supplier, prompt, freshdeskTicketId, content } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
-  console.log(`[ai-assist] prompt: "${prompt.slice(0, 60)}..."`);
+  console.log(`[ai-assist] prompt: "${prompt.slice(0, 60)}..." content=${content ? content.length + 'ch' : 'no'}`);
   try {
     let ticketContext = null;
-    if (freshdeskTicketId) {
+    if (content) {
+      // Caller supplied the text directly (e.g. translating a single
+      // conversation). Skip the full ticket-thread fetch.
+      ticketContext = { description: content, conversations: [] };
+    } else if (freshdeskTicketId) {
       try {
         ticketContext = await getTicketContext(freshdeskTicketId);
         console.log(`[ai-assist] ticket context: "${ticketContext.subject}"`);
