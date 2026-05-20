@@ -164,21 +164,4 @@ async function deletePrompt(id) {
   await pool.query(`DELETE FROM agent_prompts WHERE id=$1`, [id]);
 }
 
-// ─── Agent macros ─────────────────────────────────────────────────────────────
-async function getMacros() {
-  const res = await pool.query(`SELECT * FROM agent_macros ORDER BY created_at ASC`);
-  return res.rows;
-}
-async function createMacro({ name, text }) {
-  const res = await pool.query(`INSERT INTO agent_macros (name, text) VALUES ($1, $2) RETURNING *`, [name, text]);
-  return res.rows[0];
-}
-async function updateMacro(id, { name, text }) {
-  const res = await pool.query(`UPDATE agent_macros SET name=$1, text=$2 WHERE id=$3 RETURNING *`, [name, text, id]);
-  return res.rows[0];
-}
-async function deleteMacro(id) {
-  await pool.query(`DELETE FROM agent_macros WHERE id=$1`, [id]);
-}
-
-module.exports = { initDb, storeSession, getSession, cacheBooking, getCachedBooking, storeTicketSummary, getTicketSummaries, pool, getPrompts, createPrompt, updatePrompt, deletePrompt, getMacros, createMacro, updateMacro, deleteMacro, storeFreshdeskSession, getFreshdeskSession, getFreshdeskCsrfToken };
+module.exports = { initDb, storeSession, getSession, cacheBooking, getCachedBooking, storeTicketSummary, getTicketSummaries, pool, getPrompts, createPrompt, updatePrompt, deletePrompt, storeFreshdeskSession, getFreshdeskSession, getFreshdeskCsrfToken };

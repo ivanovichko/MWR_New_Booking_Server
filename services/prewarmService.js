@@ -2,50 +2,12 @@ const fetch = require('node-fetch');
 const { taPost, taGet } = require('./taAuthService');
 const { parseDataRow, parseBookingHtml } = require('./parserService');
 const { parseUserHtml } = require('./userService');
-const { buildNoteHtml } = require('./noteBuilder');
 const { lookupSupplier } = require('./supplierService');
-const { getAuthHeader, searchDuplicates } = require('./freshdeskService');
-const { FD_STATUS, PREWARM_CONVERSATION_THRESHOLD } = require('../config');
-const { cacheBooking, storeTicketSummary, getCachedBooking } = require('./dbService');
+const { getAuthHeader } = require('./freshdeskService');
+const { FD_STATUS } = require('../config');
+const { cacheBooking } = require('./dbService');
 
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
-
-// ─── Fetch LOW priority tickets assigned to agent ────────────────────────────
-async function fetchLowPriorityTickets() {
-  const domain  = process.env.FRESHDESK_DOMAIN;
-  const agentId = process.env.FRESHDESK_AGENT_ID;
-
-  if (!agentId) throw new Error('FRESHDESK_AGENT_ID not set in environment');
-
-  const headers = {
-    'Authorization': getAuthHeader(),
-  };
-
-  let allTickets = [];
-  let page = 1;
-
-  while (true) {
-    const url = `https://${domain}/api/v2/tickets?filter=new_and_my_open&per_page=100&page=${page}`;
-    const res = await fetch(url, { headers });
-
-    if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Freshdesk ticket fetch failed: ${res.status} — ${body}`);
-    }
-
-    const results = await res.json();
-    if (!results.length) break;
-
-    allTickets = allTickets.concat(results);
-    if (results.length < 100) break;
-    page++;
-  }
-
-  // Filter to LOW priority (1) in code
-  const filtered = allTickets.filter(t => t.priority === 1);
-  console.log(`📋 Total assigned tickets: ${allTickets.length}, LOW priority: ${filtered.length}`);
-  return filtered;
-}
 
 // ─── Extract booking ID from ticket using Groq ───────────────────────────────
 async function extractBookingId(ticket, conversationCount = null) {
@@ -104,7 +66,6 @@ Return ONLY a JSON object, no markdown:
   const raw  = data?.choices?.[0]?.message?.content || '{}';
   try {
     const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim());
-    // Apply conversation count override
     if (isDefinitelyOld) parsed.isNewBooking = false;
     return parsed;
   } catch {
@@ -150,7 +111,6 @@ async function fetchAndCacheBooking(bookingId) {
     if (data?.data?.length > 0) {
       const row = data.data[0];
       const parsed = parseDataRow(row);
-      // Validate: either internal ID or supplier ref must match
       const idMatch = parsed.internalBookingId === bookingId ||
                       parsed.supplierId === bookingId ||
                       (parsed.internalBookingId || '').includes(bookingId) ||
@@ -188,13 +148,11 @@ async function fetchAndCacheBooking(bookingId) {
   return { booking, details, user, supplier, cleanHtml };
 }
 
-// ─── Check-in date priority logic (reusable) ─────────────────────────────────
+// ─── Check-in date priority logic ────────────────────────────────────────────
 // Returns { priority: 1|2|3, label: 'low'|'medium'|'high', daysUntil: N }
-// Freshdesk priorities: 1=Low, 2=Medium, 3=High, 4=Urgent
 function checkInPriority(checkInStr) {
   if (!checkInStr) return null;
 
-  // Parse text date like "April 14, 2026" or "March 25, 2026"
   const months = { january:0,february:1,march:2,april:3,may:4,june:5,july:6,august:7,september:8,october:9,november:10,december:11 };
   const match = checkInStr.match(/([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})/);
   let checkIn;
@@ -215,26 +173,6 @@ function checkInPriority(checkInStr) {
   if (daysUntil < 3)  return { priority: 3, label: 'high',   daysUntil };
   if (daysUntil < 7)  return { priority: 2, label: 'medium', daysUntil };
   return                     { priority: 1, label: 'low',    daysUntil };
-}
-
-// ─── Set Freshdesk ticket priority ───────────────────────────────────────────
-async function setTicketPriority(ticketId, priority) {
-  const domain = process.env.FRESHDESK_DOMAIN;
-  await fetch(`https://${domain}/api/v2/tickets/${ticketId}`, {
-    method: 'PUT',
-    headers: { 'Authorization': getAuthHeader(), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ priority }),
-  });
-}
-
-// ─── Post Freshdesk note ──────────────────────────────────────────────────────
-async function postNote(ticketId, bodyHtml) {
-  const domain = process.env.FRESHDESK_DOMAIN;
-  await fetch(`https://${domain}/api/v2/tickets/${ticketId}/notes`, {
-    method: 'POST',
-    headers: { 'Authorization': getAuthHeader(), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ body: bodyHtml, private: true }),
-  });
 }
 
 // ─── Set Freshdesk ticket status ─────────────────────────────────────────────
@@ -262,7 +200,6 @@ function extractDateFromTags(tags) {
       const day = parseInt(m[2]);
       const now = new Date();
       let year = now.getFullYear();
-      // If this month/day already passed this year, use next year
       const candidate = new Date(year, monthIdx, day);
       if (candidate < now) year++;
       return new Date(year, monthIdx, day).toISOString().split('T')[0];
@@ -271,30 +208,8 @@ function extractDateFromTags(tags) {
   return null;
 }
 
-async function extractDateFromTagsWithGroq(tags) {
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey || !tags?.length) return null;
-  const prompt = `Extract a check-in date from these ticket tags: ${JSON.stringify(tags)}
-Return ONLY a JSON object, no markdown: { "date": "YYYY-MM-DD or null" }`;
-  try {
-    const res = await fetch(GROQ_API_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.1,
-        max_tokens: 50,
-      }),
-    });
-    const data = await res.json();
-    const raw = data?.choices?.[0]?.message?.content || '{}';
-    const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim());
-    return parsed.date || null;
-  } catch { return null; }
-}
-
 // ─── Check pending tickets ────────────────────────────────────────────────────
+// Reopens pending tickets whose tagged check-in date is within 7 days.
 async function checkPendings(onProgress, isStopped = () => false) {
   const progress = (msg) => { console.log(msg); onProgress?.(msg); };
   const domain  = process.env.FRESHDESK_DOMAIN;
@@ -317,7 +232,7 @@ async function checkPendings(onProgress, isStopped = () => false) {
     const data = await res.json();
     const batch = data.results || [];
     tickets.push(...batch);
-    if (batch.length < 30) break; // last page
+    if (batch.length < 30) break;
     page++;
   }
   progress(`📋 Found ${tickets.length} pending ticket(s)`);
@@ -328,8 +243,6 @@ async function checkPendings(onProgress, isStopped = () => false) {
     if (isStopped()) { progress('🛑 Stopped by user.'); break; }
     try {
       const tags = ticket.tags || [];
-
-      // Regex only: MMM-DD or MMM DD
       const dateStr = extractDateFromTags(tags);
 
       if (!dateStr) {
@@ -367,170 +280,4 @@ async function checkPendings(onProgress, isStopped = () => false) {
   return results;
 }
 
-// ─── Main prewarm function ────────────────────────────────────────────────────
-async function prewarm(onProgress, isStopped = () => false) {
-  const progress = (msg) => { console.log(msg); onProgress?.(msg); };
-
-  progress('📋 Fetching LOW priority tickets...');
-  const tickets = await fetchLowPriorityTickets();
-  progress(`📋 Found ${tickets.length} tickets`);
-
-  const results = [];
-
-  for (const ticket of tickets) {
-    if (isStopped()) { progress('🛑 Stopped by user.'); break; }
-    try {
-      // Fetch full ticket if description missing
-      let fullTicket = ticket;
-      if (!ticket.description_text && !ticket.description) {
-        const domain = process.env.FRESHDESK_DOMAIN;
-        const res = await fetch(`https://${domain}/api/v2/tickets/${ticket.id}`, {
-          headers: { 'Authorization': getAuthHeader() },
-        });
-        if (res.ok) fullTicket = await res.json();
-      }
-
-      progress(`🔍 Reading ticket #${ticket.id}: ${ticket.subject?.slice(0, 50)}`);
-
-      // Fetch conversation count — 1 = possible new booking, >1 = skip detection
-      let conversationCount = null;
-      try {
-        const domain = process.env.FRESHDESK_DOMAIN;
-        const convRes = await fetch(`https://${domain}/api/v2/tickets/${ticket.id}/conversations`, {
-          headers: { 'Authorization': getAuthHeader() },
-        });
-        if (convRes.ok) {
-          const convData = await convRes.json();
-          conversationCount = Array.isArray(convData) ? convData.length : null;
-        }
-      } catch (e) { /* non-fatal */ }
-
-      const { bookingId, summary, isNewBooking } = await extractBookingId(fullTicket, conversationCount);
-
-      if (isNewBooking) {
-        progress(`🆕 #${ticket.id} — detected as new booking`);
-        // Tag the ticket with new_booking
-        try {
-          const domain = process.env.FRESHDESK_DOMAIN;
-          // First get existing tags to avoid overwriting
-          const tRes = await fetch(`https://${domain}/api/v2/tickets/${ticket.id}`, {
-            headers: { 'Authorization': getAuthHeader() },
-          });
-          if (tRes.ok) {
-            const tData = await tRes.json();
-            const existingTags = tData.tags || [];
-            if (!existingTags.includes('new_booking')) {
-              await fetch(`https://${domain}/api/v2/tickets/${ticket.id}`, {
-                method: 'PUT',
-                headers: { 'Authorization': getAuthHeader(), 'Content-Type': 'application/json' },
-                body: JSON.stringify({ tags: [...existingTags, 'new_booking'] }),
-              });
-            }
-          }
-        } catch (e) { progress(`⚠️ Could not tag #${ticket.id}: ${e.message}`); }
-      }
-
-      if (!bookingId) {
-        progress(`⚠️  #${ticket.id} — no booking ID found`);
-        await storeTicketSummary({ ticketId: String(ticket.id), bookingId: null, summary });
-        results.push({ ticketId: ticket.id, status: 'no_booking_id', summary });
-        continue;
-      }
-
-      progress(`📦 Fetching booking ${bookingId} for ticket #${ticket.id}...`);
-
-      // Check if already cached — skip TA fetch if so
-      const existing = await getCachedBooking(bookingId);
-      if (existing) {
-        progress(`⚡ #${ticket.id} → ${bookingId} already cached, skipping TA fetch`);
-        await storeTicketSummary({ ticketId: String(ticket.id), bookingId, summary });
-        results.push({ ticketId: ticket.id, bookingId, status: 'already_cached', summary, isNewBooking });
-        continue;
-      }
-
-      const { booking, cleanHtml, details, user, supplier } = await fetchAndCacheBooking(bookingId);
-      await storeTicketSummary({ ticketId: String(ticket.id), bookingId, summary });
-
-      if (!isNewBooking) {
-        progress(`📦 #${ticket.id} → ${bookingId} cached (not a new booking, skipping actions)`);
-        results.push({ ticketId: ticket.id, bookingId, status: 'cached', summary, isNewBooking, daysUntil: null });
-        continue;
-      }
-
-      // New booking — check-in date priority
-      const dateInfo = checkInPriority(booking.checkIn);
-      const actions = ['note_posted'];
-
-      if (dateInfo) {
-        progress(`📅 #${ticket.id} — check-in in ${dateInfo.daysUntil} days (${dateInfo.label} priority)`);
-        if (dateInfo.priority > 1) {
-          await setTicketPriority(ticket.id, dateInfo.priority);
-          actions.push(`priority_${dateInfo.label}`);
-          progress(`🔺 #${ticket.id} — priority set to ${dateInfo.label.toUpperCase()}`);
-        }
-      }
-
-      // Post the standard booking note
-      const noteHtml = buildNoteHtml(booking, cleanHtml, details, user, supplier);
-      await postNote(ticket.id, noteHtml);
-
-      // Duplicate check — run three parallel searches
-      let dupCount = 0;
-      try {
-        const [byVendor, byInternal, byEmail] = await Promise.all([
-          booking.supplierId        ? searchDuplicates(booking.supplierId,        ticket.id)        : [],
-          booking.internalBookingId ? searchDuplicates(booking.internalBookingId, ticket.id)        : [],
-          user?.email               ? searchDuplicates(user.email,                ticket.id, true)  : [],
-        ]);
-
-        const seen = new Map();
-        for (const t of byVendor)   { if (!seen.has(t.id)) seen.set(t.id, { ...t, matchedBy: ['supplier ref'] }); else seen.get(t.id).matchedBy.push('supplier ref'); }
-        for (const t of byInternal) { if (!seen.has(t.id)) seen.set(t.id, { ...t, matchedBy: ['booking ID'] });   else seen.get(t.id).matchedBy.push('booking ID'); }
-        for (const t of byEmail)    { if (!seen.has(t.id)) seen.set(t.id, { ...t, matchedBy: ['member email'] }); else seen.get(t.id).matchedBy.push('member email'); }
-
-        const duplicates = [...seen.values()];
-        dupCount = duplicates.length;
-
-        if (duplicates.length > 0) {
-          actions.push(`duplicates_${duplicates.length}`);
-          progress(`⚠️ #${ticket.id} — ${duplicates.length} open thread(s) found`);
-          const rows = duplicates.map(t =>
-            `<tr><td style="padding:4px 8px;"><a href="https://mwrlife.freshdesk.com/a/tickets/${t.id}" target="_blank">#${t.id}</a></td>` +
-            `<td style="padding:4px 8px;">${t.subject || '—'}</td>` +
-            `<td style="padding:4px 8px;color:#856404;">matched by: ${(t.matchedBy || []).join(', ')}</td></tr>`
-          ).join('');
-          const dupNoteHtml =
-            `<p><strong>⚠️ Open Threads Found</strong></p>` +
-            `<table style="width:100%;border-collapse:collapse;font-size:13px;"><tbody>${rows}</tbody></table>`;
-          await postNote(ticket.id, dupNoteHtml);
-        }
-      } catch (e) {
-        progress(`⚠️ #${ticket.id} — duplicate check failed: ${e.message}`);
-      }
-
-      progress(`✅ #${ticket.id} → ${bookingId} cached + processed as new booking`);
-      results.push({ ticketId: ticket.id, bookingId, status: 'cached', summary, isNewBooking, daysUntil: dateInfo?.daysUntil ?? null, actions, dupCount });
-
-    } catch (err) {
-      progress(`❌ #${ticket.id} — ${err.message}`);
-      results.push({ ticketId: ticket.id, status: 'error', error: err.message });
-    }
-
-    await new Promise(r => setTimeout(r, 500));
-  }
-
-  const cached   = results.filter(r => r.status === 'cached').length;
-  const skipped  = results.filter(r => r.status === 'already_cached').length;
-  const newBooks = results.filter(r => r.isNewBooking).length;
-  const prioBumped = results.filter(r => r.actions?.some(a => a.startsWith('priority_'))).length;
-  const withDups   = results.filter(r => r.dupCount > 0).length;
-  const errors     = results.filter(r => r.status === 'error').length;
-
-  progress(`🎉 Prewarm complete — ${cached} new cached, ${skipped} already cached, ${errors} errors (${tickets.length} total)`);
-  if (newBooks)    progress(`🆕 New bookings detected: ${newBooks}`);
-  if (prioBumped)  progress(`🔺 Priority bumped: ${prioBumped}`);
-  if (withDups)    progress(`⚠️ Open threads found: ${withDups} tickets`);
-  return results;
-}
-
-module.exports = { prewarm, fetchAndCacheBooking, extractBookingId, checkInPriority, checkPendings, postNote, setTicketPriority };
+module.exports = { fetchAndCacheBooking, extractBookingId, checkInPriority, checkPendings };

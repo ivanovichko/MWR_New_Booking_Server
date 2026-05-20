@@ -8,15 +8,15 @@ const { parseUserHtml, findUser }        = require('./services/userService');
 const { buildNoteHtml }                  = require('./services/noteBuilder');
 const { lookupSupplier }                 = require('./services/supplierService');
 const { aiAssist, findHotelEmail }       = require('./services/aiService');
-const { getAuthHeader, fdGet, addNote, addNoteWithImages, sendEmail, sendEmailWithAttachments, setTicketPending, tagTicket, updateTicket, searchDuplicates, getTicketContext } = require('./services/freshdeskService');
+const { getAuthHeader, fdGet, addNote, addNoteWithImages, sendEmail, sendEmailWithAttachments, setTicketPending, searchDuplicates, getTicketContext } = require('./services/freshdeskService');
 const { fetchAgentMap, fetchAllAgents, fillMissingAgentNames } = require('./services/agentService');
 const { fetchTicket } = require('./services/ticketService');
-const { initDb, getCachedBooking, cacheBooking, storeSession, getPrompts, createPrompt, updatePrompt, deletePrompt, getMacros, createMacro, updateMacro, deleteMacro, storeFreshdeskSession } = require('./services/dbService');
-const { prewarm, fetchAndCacheBooking, extractBookingId, checkPendings, checkInPriority, setTicketPriority, postNote } = require('./services/prewarmService');
+const { initDb, getCachedBooking, cacheBooking, storeSession, getPrompts, createPrompt, updatePrompt, deletePrompt, storeFreshdeskSession } = require('./services/dbService');
+const { fetchAndCacheBooking, extractBookingId, checkPendings } = require('./services/prewarmService');
 const { taGet, taPost }                  = require('./services/taAuthService');
 const { buildHotelEmailHtml }            = require('./services/hotelEmailBuilder');
 const { confirmTicket, lookupHotelEmail, sendHotelEmailConfirmed } = require('./services/ticketActionService');
-const { FD_STATUS, PREWARM_CONVERSATION_THRESHOLD } = require('./config');
+const { FD_STATUS } = require('./config');
 
 const app = express();
 app.use(express.json({ limit: '20mb' }));
@@ -68,55 +68,6 @@ app.post('/ta-session', safeRoute(async (req, res) => {
   console.log(`[ta-session] stored (length: ${cookie.length})`);
   res.json({ success: true });
 }));
-
-// ─── Prewarm: polling-based progress ─────────────────────────────────────────
-// In-memory job store (single job at a time is fine)
-const prewarmJob = { running: false, log: [], done: false, error: null, results: null, stopped: false };
-
-app.post('/prewarm/start', async (req, res) => {
-  if (prewarmJob.running) {
-    return res.json({ success: true, message: 'Already running' });
-  }
-
-  // Reset
-  prewarmJob.running = true;
-  prewarmJob.done    = false;
-  prewarmJob.error   = null;
-  prewarmJob.results = null;
-  prewarmJob.log     = [];
-  prewarmJob.stopped = false;
-
-  res.json({ success: true, message: 'Prewarm started' });
-
-  // Run async in background
-  prewarm((msg) => prewarmJob.log.push(msg), () => prewarmJob.stopped)
-    .then(results => {
-      prewarmJob.results = results;
-      prewarmJob.done    = true;
-      prewarmJob.running = false;
-    })
-    .catch(err => {
-      prewarmJob.error   = err.message;
-      prewarmJob.done    = true;
-      prewarmJob.running = false;
-    });
-});
-
-app.post('/prewarm/stop', (req, res) => {
-  prewarmJob.stopped = true;
-  res.json({ success: true });
-});
-
-app.get('/prewarm/status', (req, res) => {
-  res.json({
-    running: prewarmJob.running,
-    done:    prewarmJob.done,
-    error:   prewarmJob.error,
-    log:     prewarmJob.log,
-    results: prewarmJob.results,
-    stopped: prewarmJob.stopped,
-  });
-});
 
 
 const pendingsJob = { running: false, log: [], done: false, error: null, results: null, stopped: false };
@@ -275,15 +226,6 @@ app.post('/send-hotel-email', safeRoute(async (req, res) => {
   res.json({ success: true, emailSent: true, hotelEmail });
 }));
 
-// ─── Tag ticket + set type ────────────────────────────────────────────────────
-app.post('/tag-ticket', safeRoute(async (req, res) => {
-  const { freshdeskTicketId, tags, type } = req.body;
-  if (!freshdeskTicketId || !tags) throw new HttpError('freshdeskTicketId and tags are required');
-  await tagTicket(freshdeskTicketId, tags, type);
-  console.log(`[tag-ticket] ticket ${freshdeskTicketId}: ${tags.join(', ')}`);
-  res.json({ success: true });
-}));
-
 // ─── Merge ticket ─────────────────────────────────────────────────────────────
 app.post('/merge-ticket', async (req, res) => {
   const { sourceTicketId, targetTicketId, description } = req.body;
@@ -335,38 +277,6 @@ app.post('/merge-ticket', async (req, res) => {
 });
 
 // ─── Close ticket ─────────────────────────────────────────────────────────────
-app.post('/close-ticket', async (req, res) => {
-  const { ticketId } = req.body;
-  if (!ticketId) return res.status(400).json({ error: 'ticketId is required' });
-  try {
-    const domain = process.env.FRESHDESK_DOMAIN;
-    const closeBody2 = JSON.stringify({ status: FD_STATUS.CLOSED, type: 'Reservations' });
-    console.log(`[close] ticket ${ticketId}`);
-    const r = await fetch(`https://${domain}/api/v2/tickets/${ticketId}`, {
-      method: 'PUT',
-      headers: {
-        'Authorization': getAuthHeader(),
-        'Content-Type': 'application/json',
-      },
-      body: closeBody2,
-    });
-    if (!r.ok) { const b = await r.text(); console.error(`[close] failed ${r.status}: ${b}`); throw new Error(`${r.status}: ${b.slice(0,200)}`); }
-    console.log(`[close] ticket ${ticketId} closed`);
-    res.json({ success: true });
-  } catch (err) {
-    console.error(`[close] error: ${err.message}`);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── Update ticket fields (tags, status, priority, etc.) ─────────────────────
-app.post('/update-ticket', safeRoute(async (req, res) => {
-  const { ticketId, fields } = req.body;
-  if (!ticketId || !fields) throw new HttpError('ticketId and fields required');
-  await updateTicket(String(ticketId), fields);
-  res.json({ success: true });
-}));
-
 // Agent name resolution lives in services/agentService.js.
 
 // ─── Check for duplicate tickets ─────────────────────────────────────────────
@@ -571,54 +481,6 @@ app.get('/guided-prewarm/ticket/:id', safeRoute(async (req, res) => {
 }));
 
 
-// filter → { priority, status } mapping — Freshdesk priority: 1=Low, 2=Medium, 3=High, 4=Urgent
-const GUIDED_FILTERS = {
-  low:     { priorities: [1],    status: FD_STATUS.OPEN },
-  medium:  { priorities: [2],    status: FD_STATUS.OPEN },
-  high:    { priorities: [3, 4], status: FD_STATUS.OPEN },
-  pending: { priorities: [],     status: FD_STATUS.PENDING },
-};
-
-app.get('/guided-prewarm/tickets', async (req, res) => {
-  const domain  = process.env.FRESHDESK_DOMAIN;
-  const agentId = process.env.FRESHDESK_AGENT_ID;
-  if (!agentId) return res.status(500).json({ error: 'FRESHDESK_AGENT_ID not set' });
-  const auth = getAuthHeader();
-
-  const filterKey = (req.query.filter || 'low').toLowerCase();
-  const filter = GUIDED_FILTERS[filterKey] || GUIDED_FILTERS.low;
-  console.log(`[guided-prewarm] fetching ${filterKey} tickets for agent ${agentId}`);
-
-  // Fetch each priority bucket separately (Freshdesk search has no OR operator)
-  const priorityBuckets = filter.priorities.length ? filter.priorities : [null];
-  let tickets = [];
-  const seenIds = new Set();
-
-  for (const priority of priorityBuckets) {
-    for (let page = 1; page <= 10; page++) {
-      const parts = [`agent_id:${agentId}`, `status:${filter.status}`];
-      if (priority) parts.push(`priority:${priority}`);
-      const q = parts.join(' AND ');
-      const url = `https://${domain}/api/v2/search/tickets?query="${q.replace(/ /g, '%20')}"&page=${page}`;
-      console.log(`[guided-prewarm] fetching ${url}`);
-      const r = await fetch(url, { headers: { Authorization: auth } });
-      if (!r.ok) {
-        const b = await r.text();
-        console.error(`[guided-prewarm] freshdesk error ${r.status}: ${b.slice(0,200)}`);
-        return res.status(500).json({ error: `Freshdesk error: ${b.slice(0,200)}` });
-      }
-      const data = await r.json();
-      const batch = data.results || [];
-      console.log(`[guided-prewarm] priority ${priority ?? 'any'} page ${page}: ${batch.length} tickets`);
-      for (const t of batch) {
-        if (!seenIds.has(t.id)) { seenIds.add(t.id); tickets.push(t); }
-      }
-      if (batch.length < 30) break;
-    }
-  }
-  console.log(`[guided-prewarm] total: ${tickets.length} tickets`);
-  res.json({ success: true, tickets });
-});
 
 // Analyse a single ticket — conversation check + Groq booking ID extraction
 app.get('/guided-prewarm/analyse/:id', async (req, res) => {
@@ -890,28 +752,6 @@ app.put('/settings/prompts/:id', async (req, res) => {
 });
 app.delete('/settings/prompts/:id', async (req, res) => {
   try { await deletePrompt(req.params.id); res.json({ success: true }); }
-  catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ─── Settings: Macros ─────────────────────────────────────────────────────────
-app.get('/settings/macros', async (req, res) => {
-  try { res.json(await getMacros()); }
-  catch (err) { res.status(500).json({ error: err.message }); }
-});
-app.post('/settings/macros', async (req, res) => {
-  const { name, text } = req.body;
-  if (!name || !text) return res.status(400).json({ error: 'name and text required' });
-  try { res.json(await createMacro({ name, text })); }
-  catch (err) { res.status(500).json({ error: err.message }); }
-});
-app.put('/settings/macros/:id', async (req, res) => {
-  const { name, text } = req.body;
-  if (!name || !text) return res.status(400).json({ error: 'name and text required' });
-  try { res.json(await updateMacro(req.params.id, { name, text })); }
-  catch (err) { res.status(500).json({ error: err.message }); }
-});
-app.delete('/settings/macros/:id', async (req, res) => {
-  try { await deleteMacro(req.params.id); res.json({ success: true }); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
