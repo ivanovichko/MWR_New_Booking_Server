@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.57
+// @version      6.60
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -1651,8 +1651,13 @@ function makeDraggable(modal, handle) {
   });
   document.addEventListener('mousemove', (e) => {
     if (!dragging) return;
-    modal.style.left = (e.clientX - ox) + 'px';
-    modal.style.top  = (e.clientY - oy) + 'px';
+    const rect = modal.getBoundingClientRect();
+    const margin = 40; // keep at least this much of the modal on-screen
+    // top:0 floor keeps the drag handle reachable so it can always be pulled back.
+    const nx = Math.max(margin - rect.width, Math.min(window.innerWidth - margin, e.clientX - ox));
+    const ny = Math.max(0, Math.min(window.innerHeight - margin, e.clientY - oy));
+    modal.style.left = nx + 'px';
+    modal.style.top  = ny + 'px';
   });
   document.addEventListener('mouseup', () => { dragging = false; });
 }
@@ -1850,6 +1855,13 @@ function showHotelEmailConfirmModal(opts) {
   chipEl.textContent = chip.text;
   body.appendChild(chipEl);
 
+  if (e.website) {
+    const w = document.createElement('div');
+    w.style.cssText = `font-size:11px;color:${THEME.muted};margin-bottom:6px;`;
+    const safeUrl = String(e.website).replace(/"/g, '&quot;');
+    w.innerHTML = `<strong>Website:</strong> <a href="${safeUrl}" target="_blank" rel="noopener" style="color:${THEME.primary};">${e.website}</a>`;
+    body.appendChild(w);
+  }
   if (e.source) {
     const src = document.createElement('div');
     src.style.cssText = `font-size:11px;color:${THEME.muted};margin-bottom:6px;`;
@@ -2456,6 +2468,69 @@ function showReplyComposer(opts) {
   }, 50);
 
   container.appendChild(replyArea);
+
+  // Translation row — customer replies only. Country/language info, a manual
+  // language field, and a Translate button that translates the draft in-place
+  // (original kept below a divider).
+  if (recipientType === 'customer') {
+    const detectedLang = countryToLanguage(user && user.country);
+    const userCountry = (user && user.country) || null;
+
+    const translateRow = document.createElement('div');
+    translateRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap;';
+
+    if (userCountry || detectedLang) {
+      const infoSpan = document.createElement('span');
+      infoSpan.style.cssText = 'font-size:11px;color:#888;';
+      const parts = [];
+      if (userCountry) parts.push('🌍 ' + userCountry);
+      if (detectedLang) parts.push('🗣 ' + detectedLang);
+      infoSpan.textContent = parts.join('  ·  ');
+      translateRow.appendChild(infoSpan);
+    }
+
+    const langInput = document.createElement('input');
+    langInput.type = 'text';
+    langInput.placeholder = detectedLang ? detectedLang : 'Language…';
+    langInput.value = detectedLang || '';
+    langInput.style.cssText = 'padding:3px 8px;border:1px solid #ccc;border-radius:6px;font-size:12px;width:120px;color:#333;';
+
+    const translateBtn = document.createElement('button');
+    translateBtn.textContent = '🌐 Translate';
+    translateBtn.style.cssText = 'padding:5px 12px;border:1px solid #17a2b8;border-radius:6px;background:#fff;color:#17a2b8;font-size:12px;cursor:pointer;font-weight:500;';
+
+    translateRow.appendChild(langInput);
+    translateRow.appendChild(translateBtn);
+    container.appendChild(translateRow);
+
+    translateBtn.onclick = () => withButtonLoading(translateBtn, '⏳ Translating...', async () => {
+      const originalHtml = replyArea.innerHTML;
+      const originalText = replyArea.innerText.trim();
+      if (!originalText) { showToast('Nothing to translate.', 'warning'); return; }
+
+      // Strip sign-off and everything below it before sending to translate.
+      const signOffRe = /^\s*(sincerely|best\s+regards?|kind\s+regards?|regards|best|thanks|thank\s+you|warm\s+regards?|yours\s+sincerely|with\s+(?:best\s+)?regards?|cheers|yours\s+truly|faithfully)[,.]?\s*$/i;
+      const lines = originalText.split('\n');
+      let cutIdx = lines.length;
+      for (let i = lines.length - 1; i >= 0; i--) {
+        if (signOffRe.test(lines[i])) { cutIdx = i; break; }
+      }
+      const textToTranslate = lines.slice(0, cutIdx).join('\n').trim();
+      if (!textToTranslate) { showToast('Nothing to translate after stripping sign-off.', 'warning'); return; }
+
+      const lang = langInput.value.trim() || detectedLang || 'en';
+      const { ok, data } = await api.translate(textToTranslate, lang);
+      if (!ok || !data?.text) { showToast('Translation failed.', 'error'); return; }
+
+      const translatedHtml = data.text.replace(/\n/g, '<br>');
+      replyArea.innerHTML =
+        `<div><span style="font-size:10px;color:#00897b;font-weight:600;">🌐 ${lang}</span></div>` +
+        translatedHtml +
+        `<br><hr style="border:none;border-top:1px solid #ddd;margin:8px 0;">` +
+        `<div><span style="font-size:10px;color:#aaa;font-weight:600;">📄 Original</span></div>` +
+        originalHtml;
+    });
+  }
 
   // Attachment picker
   const { el: attachEl, getFiles } = buildAttachmentUI();

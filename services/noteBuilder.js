@@ -33,6 +33,13 @@ function buildNoteHtml(booking, cleanHtml, details, user, supplier = null) {
     return `${val} ${currency}`;
   };
 
+  // NET Price is an internal cost figure in a different currency from the
+  // member-facing prices, and TA doesn't label it — so show the bare amount.
+  const priceBare = (val) => {
+    if (!val || val === '—' || val === '0' || val === 0 || val === '-') return null;
+    return `${val}`;
+  };
+
   const tableStyle = 'width:100%;border-collapse:collapse;margin-bottom:12px;font-size:13px;';
   const thStyle    = 'padding:6px 10px;background:#f5f5f5;border:1px solid #ddd;text-align:left;font-weight:600;white-space:nowrap;width:38%;color:#444;';
   const tdStyle    = 'padding:6px 10px;border:1px solid #ddd;color:#222;';
@@ -116,7 +123,7 @@ function buildNoteHtml(booking, cleanHtml, details, user, supplier = null) {
     booking.redeemedTCs && booking.redeemedTCs !== '0' ? ['Travel Credits Used', booking.redeemedTCs] : null,
     booking.redeemedLPs && booking.redeemedLPs !== '0' ? ['Loyalty Points Used', booking.redeemedLPs] : null,
     booking.earnedTC    && booking.earnedTC    !== '0' ? ['Earned TCs',          booking.earnedTC]    : null,
-    price(booking.netPrice)               ? ['NET Price',        price(booking.netPrice)]             : null,
+    priceBare(booking.netPrice)           ? ['NET Price',        priceBare(booking.netPrice)]         : null,
     price(booking.membershipPrice)        ? ['Membership Price', price(booking.membershipPrice)]      : null,
     price(booking.tripProtectionPrice)    ? ['Trip Protection',  price(booking.tripProtectionPrice)]  : null,
     price(booking.healthInsurancePrice)   ? ['Health Insurance', price(booking.healthInsurancePrice)] : null,

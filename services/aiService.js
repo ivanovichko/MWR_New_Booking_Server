@@ -126,11 +126,13 @@ ${hotelCountry ? `Country: ${hotelCountry}` : ''}
 
 Search for this hotel's official contact email. Prefer reservations@ or info@ addresses from the hotel's own website.
 Only return a real verified email — do NOT guess or invent one.
+Always return the most official website you checked (the hotel's own site if you found it, otherwise the best source URL), even when no email was found.
 
 Return ONLY a JSON object, no markdown:
 {
   "email": "the email address or null",
-  "source": "URL or description of where found, or null",
+  "website": "the most official URL you checked (always set if you checked anything)",
+  "source": "URL or description of where the email was found, or null",
   "confidence": "high or medium or low",
   "notes": "anything relevant"
 }`;

@@ -113,9 +113,10 @@ app.get('/booking/:id', async (req, res) => {
 
     if (!cached) return res.status(404).json({ error: `Booking ${bookingId} not found` });
 
-    // Always re-parse data_row so cached bookings pick up new parser fields
-    // (e.g. aiReconfirmation) without a DB migration.
+    // Always re-parse data_row + user_html so cached bookings pick up new
+    // parser fields (e.g. aiReconfirmation, user.language) without a DB migration.
     const parsed  = { ...cached.parsed, booking: parseDataRow(cached.data_row) };
+    if (cached.user_html) parsed.user = parseUserHtml(cached.user_html);
     const booking = parsed.booking;
     const details = parsed.details;
     const user    = parsed.user;
@@ -511,9 +512,10 @@ app.get('/guided-prewarm/analyse/:id', async (req, res) => {
         const cached = await (require('./services/dbService').getCachedBooking)(bookingId);
         if (cached && cached.parsed) {
           console.log(`[analyse] booking ${bookingId} from cache`);
-          // Re-parse data_row so new parser fields (aiReconfirmation, etc.)
-          // flow through to cached bookings without a DB migration.
+          // Re-parse data_row + user_html so new parser fields (aiReconfirmation,
+          // user.language, etc.) flow through to cached bookings without a migration.
           bookingData = { ...cached.parsed, booking: parseDataRow(cached.data_row) };
+          if (cached.user_html) bookingData.user = parseUserHtml(cached.user_html);
           if (!bookingData.supplier) bookingData.supplier = lookupSupplier(bookingData.booking.supplierName);
           if (cached.booking_html) cleanHtmlForNote = parseBookingHtml(cached.booking_html).cleanHtml;
         } else {
@@ -569,9 +571,10 @@ app.get('/guided-prewarm/booking/:id', async (req, res) => {
     let cleanHtmlForNote = null;
     const cached = await (require('./services/dbService').getCachedBooking)(bookingId);
     if (cached && cached.parsed) {
-      // Re-parse data_row on read so new parser fields propagate to cached
-      // bookings without needing to drop the cache.
+      // Re-parse data_row + user_html on read so new parser fields propagate
+      // to cached bookings without needing to drop the cache.
       bookingData = { ...cached.parsed, booking: parseDataRow(cached.data_row) };
+      if (cached.user_html) bookingData.user = parseUserHtml(cached.user_html);
       if (!bookingData.supplier) bookingData.supplier = lookupSupplier(bookingData.booking.supplierName);
       if (cached.booking_html) cleanHtmlForNote = parseBookingHtml(cached.booking_html).cleanHtml;
     } else {
