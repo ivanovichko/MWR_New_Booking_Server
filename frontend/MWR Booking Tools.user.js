@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.61
+// @version      6.62
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -494,6 +494,7 @@ function renderBookingPanel() {
   postNoteBtn.style.cssText = 'padding:10px 12px;border:none;border-radius:6px;background:#007bff;color:#fff;font-size:16px;font-weight:600;cursor:pointer;';
   postNoteBtn.onclick = () => withPanelBusy(async () => {
     postNoteBtn.disabled = true; postNoteBtn.textContent = '⏳';
+    const refresh = await captureRefresh(ticketId);
     const noteHtml = cached.bookingData.noteHtml || null;
     const { ok, data } = await api.guided.confirm({
       ticketId: String(ticketId),
@@ -505,7 +506,7 @@ function renderBookingPanel() {
       postNoteBtn.style.background = '#28a745';
       postNoteBtn.textContent = '✅ Posted';
       showToast('Note posted.', 'success');
-      refreshFreshdeskTicket();
+      refresh();
     } else {
       postNoteBtn.disabled = false; postNoteBtn.textContent = '📋 Post Note';
       showToast('Post failed: ' + (data?.error || 'unknown'), 'error');
@@ -528,12 +529,13 @@ function renderBookingPanel() {
       emailResult:      ld.emailResult,
       emailHtmlPreview: ld.emailHtmlPreview,
       onSend: async (addr) => withPanelBusy(async () => {
+        const refresh = await captureRefresh(ticketId);
         const { ok: sok, data: sd } = await api.guided.hotelEmailSend({
           ticketId: String(ticketId), bookingId: bid, hotelEmail: addr,
         });
         if (!sok) throw new Error(sd?.error || 'Send failed');
         showToast(`✅ Email sent → ${addr}`, 'success', 3000);
-        refreshFreshdeskTicket();
+        refresh();
       }),
     });
   });
@@ -640,6 +642,7 @@ function appendCustomerSection(body, user, ticketId) {
       memberNoteBtn.style.cssText = 'padding:6px 10px;border:1px solid #28a745;border-radius:4px;background:#fff;color:#28a745;font-size:14px;cursor:pointer;font-weight:500;';
       memberNoteBtn.onclick = () => withPanelBusy(async () => {
         memberNoteBtn.disabled = true; memberNoteBtn.textContent = '⏳';
+        const refresh = await captureRefresh(ticketId);
         const v = (val) => val || '';
         const fields = [['Name', user.fullName || user.name], ['Email', user.email], ['Phone', user.phone], ['Instance', user.instance], ['Status', user.status], ['Country', user.country], ['Language', user.language]].filter(([, val]) => val);
         const lines = fields.map(([l, val]) => `<div><strong>${l}:</strong> ${v(val)}</div>`).join('');
@@ -650,7 +653,7 @@ function appendCustomerSection(body, user, ticketId) {
         memberNoteBtn.disabled = false; memberNoteBtn.textContent = '📋 Post Member Note';
         if (ok) {
           showToast('✅ Member note posted!', 'success');
-          refreshFreshdeskTicket();
+          refresh();
         } else {
           showToast('❌ Failed to post note.', 'error');
         }
@@ -1645,7 +1648,7 @@ function injectConversationControls() {
         const scopeLabel = isDescription
           ? 'description'
           : (wrapper.dataset.album || '').replace(/^note_/, 'note ') || (wrapper.id || '');
-        showChatModal(getFreshdeskTicketId(), () => refreshFreshdeskTicket(), {
+        showChatModal(getFreshdeskTicketId(), null, {
           content: stripQuotedTail(text),
           scopeLabel,
         });
@@ -2059,30 +2062,74 @@ function showHotelEmailConfirmModal(opts) {
 // activities toggle (collapse → expand triggers a refetch). FD has changed
 // the data-test-id over time, so we try multiple known selectors. Console
 // warns when none match so we know to grab the new attribute.
-// 1500ms initial delay — gives FD's backend time to index the just-posted
-// note/reply before we ask the UI to refetch. Without it, the refresh races
-// the write and we see stale data.
-function refreshFreshdeskTicket() {
-  const candidates = [
-    '[data-test-toggle-activity]',
-    '[data-test-id="toggle-activity"]',
-    '[data-test-id="conversation-refresh"]',
-    '[data-test-id="refresh-conversations"]',
-    '[aria-label="Refresh"]',
-    '[aria-label="Refresh conversations"]',
-    'button.refresh-conversation',
-  ];
-  let btn = null;
-  for (const sel of candidates) {
-    btn = document.querySelector(sel);
-    if (btn) break;
+const FD_REFRESH_SELECTORS = [
+  '[data-test-toggle-activity]',
+  '[data-test-id="toggle-activity"]',
+  '[data-test-id="conversation-refresh"]',
+  '[data-test-id="refresh-conversations"]',
+  '[aria-label="Refresh"]',
+  '[aria-label="Refresh conversations"]',
+  'button.refresh-conversation',
+];
+function findFdRefreshButton() {
+  for (const sel of FD_REFRESH_SELECTORS) {
+    const el = document.querySelector(sel);
+    if (el) return el;
   }
-  if (!btn) { console.warn('⚠️ FD refresh button not found — tried', candidates.join(', ')); return; }
+  return null;
+}
+
+// Probe FD's conversations API for the top conversation id. Used as a
+// "baseline" before a write so the refresh poll can detect when FD's
+// backend has indexed the new entry.
+async function getMaxConversationId(ticketId) {
+  if (!ticketId) return 0;
+  try {
+    const r = await fdGet(`/api/_/tickets/${ticketId}/conversations?per_page=1&order_type=desc`);
+    const convs = r?.conversations || r?.results || [];
+    return Number(convs[0]?.id) || 0;
+  } catch { return 0; }
+}
+
+// Capture the current state before a write so the post-write refresh
+// can poll until FD's backend has indexed the new conversation, then
+// click immediately. Use:
+//   const refresh = await captureRefresh(ticketId);
+//   const { ok } = await api.postSomething(...);
+//   if (ok) refresh();
+async function captureRefresh(ticketId) {
+  const id = ticketId ? String(ticketId) : null;
+  const baseline = id ? await getMaxConversationId(id) : 0;
+  return () => refreshFreshdeskTicket(id, baseline);
+}
+
+// Trigger FD to refetch the conversation thread.
+// - With (ticketId, lastSeenId): polls FD's conversations API every 200ms
+//   until the top id exceeds lastSeenId (FD has indexed the new write),
+//   then fires the click. Ceiling 5s — falls back to a blind click after.
+// - With no args (legacy callers): blind 1500ms wait, same as before.
+async function refreshFreshdeskTicket(ticketId, lastSeenId) {
+  const btn = findFdRefreshButton();
+  if (!btn) { console.warn('⚠️ FD refresh button not found — tried', FD_REFRESH_SELECTORS.join(', ')); return; }
   const click = () => btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-  setTimeout(() => {
-    click();
-    setTimeout(click, 350);
-  }, 1500);
+  const doubleClick = () => { click(); setTimeout(click, 350); };
+
+  if (ticketId && Number.isFinite(lastSeenId)) {
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 200));
+      const topId = await getMaxConversationId(ticketId);
+      if (topId > lastSeenId) { doubleClick(); return; }
+    }
+    // Timeout — FD's backend hasn't shown the write yet. Click anyway;
+    // the user can hit the toggle manually if it's still stale.
+    console.warn('[refresh] timed out waiting for new conv on ticket', ticketId, '(last seen', lastSeenId, ')');
+    doubleClick();
+    return;
+  }
+
+  // Legacy blind path.
+  setTimeout(doubleClick, 1500);
 }
 
 
@@ -2165,10 +2212,13 @@ async function showChatModal(ticketId, onNotePosted, opts = {}) {
     const text = chatTextarea.value.trim();
     if (!text) { showToast('Nothing to post.', 'warning'); return; }
     postChatNoteBtn.disabled = true; postChatNoteBtn.textContent = '⏳ Posting...';
+    const refresh = await captureRefresh(freshdeskTicketId);
     const noteHtml = '<p>' + text.replace(/\n/g, '<br>') + '</p>';
     const { ok } = await api.postNote(freshdeskTicketId, noteHtml);
     postChatNoteBtn.disabled = false; postChatNoteBtn.textContent = '📋 Post as Note';
-    if (ok) { showToast('✅ Note posted!', 'success'); refreshFreshdeskTicket(); onNotePosted?.(); }
+    // onNotePosted is itself refreshFreshdeskTicket on the caller side
+    // (booking-panel 🤖 button); skip it to avoid double-firing.
+    if (ok) { showToast('✅ Note posted!', 'success'); refresh(); }
     else showToast('❌ Failed to post note.', 'error');
   };
   chatBtnRow.appendChild(postChatNoteBtn);
@@ -2657,6 +2707,7 @@ function showReplyComposer(opts) {
     const tid = overrideTicketId || getFreshdeskTicketId();
     if (!tid) { showToast('No ticket detected.', 'error'); return; }
     sendBtn.disabled = true; sendBtn.textContent = 'Sending...';
+    const refresh = await captureRefresh(tid);
     const noteHtml = replyArea.innerHTML;
     const attachedFiles = getFiles();
     // Send via JSON with base64-encoded files. GM_xmlhttpRequest on
@@ -2677,7 +2728,7 @@ function showReplyComposer(opts) {
       })));
     }
     const { ok } = await api.sendReply({ freshdeskTicketId: tid, toEmail, bodyHtml: noteHtml, files: filesPayload });
-    if (ok) { sendBtn.textContent = '✅ Sent!'; showToast('Reply sent to ' + label + '.'); refreshFreshdeskTicket(); if (onSent) onSent(); }
+    if (ok) { sendBtn.textContent = '✅ Sent!'; showToast('Reply sent to ' + label + '.'); refresh(); if (onSent) onSent(); }
     else    { sendBtn.textContent = '❌ Failed'; sendBtn.disabled = false; }
   };
 
