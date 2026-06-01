@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.60
+// @version      6.61
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -37,7 +37,7 @@
   };
 
   // ===== API LAYER =====
-  // Wraps gmGet / gmPost / gmPostForm in named methods so URLs and request
+  // Wraps gmGet / gmPost in named methods so URLs and request
   // shapes live in one place. Each method returns `{ ok, status, data }`.
   const api = {
     guided: {
@@ -51,7 +51,6 @@
     postNote:        (ticketId, noteHtml)         => gmPost(`${BACKEND_URL}/post-note`, { freshdeskTicketId: String(ticketId), noteHtml }),
     mergeTicket:     (body)                       => gmPost(`${BACKEND_URL}/merge-ticket`, body),
     sendReply:       (body)                       => gmPost(`${BACKEND_URL}/send-reply`, body),
-    sendReplyForm:   (formData)                   => gmPostForm(`${BACKEND_URL}/send-reply`, formData),
     findUser:        (query)                      => gmPost(`${BACKEND_URL}/find-user`, { query }),
     userReservations:(userId)                     => gmGet(`${BACKEND_URL}/user/${userId}/reservations`),
     searchTickets:   (body)                       => gmPost(`${BACKEND_URL}/search-tickets`, body),
@@ -1290,6 +1289,7 @@ async function showStripDupPreviewModal(dup, currentTicketId, triggerBtn) {
   if (!popBody.children.length) popBody.innerHTML = '<span style="color:#999;">(no content)</span>';
   pop.appendChild(popHeader); pop.appendChild(popBody);
   document.body.appendChild(pop);
+  trapKeyEventsForModal(pop);
   makeDraggable(pop, popHeader);
 }
 
@@ -1418,11 +1418,141 @@ async function showStripDupMergeOutModal(dup, currentTicketId, triggerBtn) {
   if (!popBody.children.length) popBody.innerHTML = '<span style="color:#999;">(no content)</span>';
   pop.appendChild(popHeader); pop.appendChild(popBody); pop.appendChild(editorArea);
   document.body.appendChild(pop);
+  trapKeyEventsForModal(pop);
+}
+
+// Strip quoted-email tail from a conversation body so translation only runs
+// against the latest reply. Walks lines top-down, cuts at the first quote
+// marker. Covers common clients (Gmail, Outlook, Apple Mail) + FR/DE/ES/IT.
+function stripQuotedTail(text) {
+  if (!text) return '';
+  const lines = String(text).replace(/\r\n/g, '\n').split('\n');
+  // First-line patterns that mark the start of a quoted previous message.
+  const quoteStart = [
+    /^\s*>+\s?/,                                  // leading > quote marker
+    /^\s*On\b.*\bwrote\s*:\s*$/i,                 // "On <date>, <name> wrote:"
+    /^-{2,}\s*Original Message\s*-{2,}\s*$/i,     // Outlook
+    /^_{5,}\s*$/,                                 // Outlook underline divider
+    /^-{5,}\s*$/,                                 // generic divider line
+    /^\s*From:\s+.+/i,                            // Outlook header block
+    /^\s*De\s*:\s+.+/i,                           // French
+    /^\s*Von\s*:\s+.+/i,                          // German
+    /^\s*Le\s+\d.*\ba?\s+écrit\s*:?\s*$/i,        // French "Le <date> a écrit:"
+    /^\s*El\s+\d.*\bescribió\s*:?\s*$/i,          // Spanish "El <date> escribió:"
+    /^\s*Il\s+\d.*\bha\s+scritto\s*:?\s*$/i,      // Italian "Il <date> ha scritto:"
+    /^\s*Am\s+\d.*\bschrieb\b.*:?\s*$/i,          // German "Am <date> schrieb ..."
+    /^>+\s*$/,                                    // bare ">" delimiter
+  ];
+  let cut = lines.length;
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (quoteStart.some(re => re.test(l))) { cut = i; break; }
+  }
+  const out = lines.slice(0, cut).join('\n').trim();
+  // If we cut everything, the source was entirely a quote — fall back to full
+  // text so the agent isn't left with nothing to translate.
+  return out || String(text).trim();
+}
+
+// Floating popover near the source element with a read-only translation +
+// copy button. Does NOT mutate the source DOM — Freshdesk re-renders if you
+// touch its conversation nodes. Positioned right of the anchor; clamped to
+// the viewport.
+function showTranslatePopover(anchorEl, sourceText, opts) {
+  opts = opts || {};
+  const title = opts.title || 'Translation';
+  const target = opts.target || 'en';
+
+  // Single-instance: replace any previous popover.
+  const existing = document.getElementById('taTranslatePopover');
+  if (existing) existing.remove();
+
+  const pop = document.createElement('div');
+  pop.id = 'taTranslatePopover';
+  pop.style.cssText = 'position:fixed;width:380px;max-width:92vw;max-height:60vh;background:#fff;border:1px solid #d0d7de;border-radius:8px;box-shadow:0 10px 28px rgba(0,0,0,0.18);z-index:1000002;font-family:' + THEME.font + ';display:flex;flex-direction:column;overflow:hidden;';
+
+  // Anchor next to the source. Default: right of the anchor's right edge.
+  const rect = anchorEl && anchorEl.getBoundingClientRect ? anchorEl.getBoundingClientRect() : null;
+  let top = 80;
+  let left = window.innerWidth - 420;
+  if (rect) {
+    top = Math.max(12, Math.min(rect.top, window.innerHeight - 240));
+    left = Math.min(rect.right + 12, window.innerWidth - 400);
+    if (left < 12) left = 12;
+  }
+  pop.style.top = top + 'px';
+  pop.style.left = left + 'px';
+
+  const head = document.createElement('div');
+  head.style.cssText = 'padding:8px 12px;background:#f6f8fa;border-bottom:1px solid #e1e4e8;display:flex;align-items:center;justify-content:space-between;cursor:move;';
+  const h = document.createElement('div');
+  h.style.cssText = 'font-size:12px;font-weight:600;color:#444;';
+  h.textContent = '🌐 ' + title + ' → ' + target;
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.textContent = '×';
+  closeBtn.style.cssText = 'background:none;border:none;font-size:18px;color:#888;cursor:pointer;padding:0 4px;line-height:1;';
+  closeBtn.onclick = () => pop.remove();
+  head.appendChild(h); head.appendChild(closeBtn);
+
+  // Simple drag on the header.
+  let dragging = false, dx = 0, dy = 0;
+  head.addEventListener('mousedown', (e) => {
+    if (e.target === closeBtn) return;
+    dragging = true;
+    const r = pop.getBoundingClientRect();
+    dx = e.clientX - r.left; dy = e.clientY - r.top;
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    pop.style.left = Math.max(0, e.clientX - dx) + 'px';
+    pop.style.top  = Math.max(0, e.clientY - dy) + 'px';
+  });
+  window.addEventListener('mouseup', () => { dragging = false; });
+
+  const ta = document.createElement('textarea');
+  ta.readOnly = true;
+  ta.style.cssText = 'flex:1;min-height:160px;padding:10px 12px;border:none;outline:none;resize:none;font-size:13px;line-height:1.55;font-family:' + THEME.font + ';background:#fff;color:#222;white-space:pre-wrap;';
+  ta.value = '⏳ Translating…';
+
+  const footer = document.createElement('div');
+  footer.style.cssText = 'padding:8px 12px;border-top:1px solid #e1e4e8;display:flex;gap:8px;justify-content:flex-end;background:#fafbfc;';
+  const copyBtn = document.createElement('button');
+  copyBtn.type = 'button';
+  copyBtn.textContent = '📋 Copy';
+  copyBtn.style.cssText = 'padding:5px 12px;border:1px solid ' + THEME.primary + ';border-radius:5px;background:#fff;color:' + THEME.primary + ';font-size:12px;cursor:pointer;';
+  copyBtn.disabled = true;
+  copyBtn.style.opacity = '0.5';
+  copyBtn.onclick = async () => {
+    try { await navigator.clipboard.writeText(ta.value); showToast('Copied.', 'success', 1200); }
+    catch { ta.select(); document.execCommand('copy'); showToast('Copied.', 'success', 1200); }
+  };
+  footer.appendChild(copyBtn);
+
+  pop.appendChild(head);
+  pop.appendChild(ta);
+  pop.appendChild(footer);
+  document.body.appendChild(pop);
+  trapKeyEventsForModal(pop);
+
+  // Kick off the translation. Strip quoted tail first so we only translate
+  // the latest reply, not the entire quoted email chain.
+  const cleanSource = stripQuotedTail(sourceText);
+  api.translate(cleanSource, target).then(({ ok, data }) => {
+    if (!ok || !data || !data.text) {
+      ta.value = '❌ Translation failed: ' + ((data && data.error) || 'unknown');
+      return;
+    }
+    ta.value = data.text;
+    copyBtn.disabled = false; copyBtn.style.opacity = '1';
+  });
 }
 
 // Per-conversation controls: clicking the header collapses/expands the
-// content; a Translate button lives in the action container next to FD's
-// Edit/Delete. All notes except the last two are collapsed by default.
+// content; 🌐 / 🤖 translate buttons live in the action container next to
+// FD's Edit/Delete. Translations open in a popover/modal — never mutate
+// FD's own DOM. All notes except the last two are collapsed by default.
 function injectConversationControls() {
   const conversationWrappers = Array.from(document.querySelectorAll('[data-test-id="conversation-wrapper"]'));
   const description = document.querySelector('[data-test-id="ticket-description"]');
@@ -1468,8 +1598,9 @@ function injectConversationControls() {
       sender.insertBefore(chev, sender.firstChild);
     }
 
-    // Translate button — lives in the actions container so it doesn't conflict
-    // with the header click target.
+    // Translate buttons — live in the actions container so they don't conflict
+    // with the header click target. Both open a popover/modal — they NEVER
+    // mutate FD's own conversation DOM (FD's framework re-renders on touch).
     if (actions) {
       // Conversations: `[data-test-conversation="conversation-text"]` or `.ticket_note`.
       // Description: `#ticket_original_request`. Fall back to the generic
@@ -1478,51 +1609,27 @@ function injectConversationControls() {
                   || wrapper.querySelector('#ticket_original_request')
                   || wrapper.querySelector('.ticket_note')
                   || wrapper.querySelector('.text-content-wrapper');
-      let originalHtml = null;
-      let translatedHtml = null;
-      let showingTranslated = false;
       const translateBtn = document.createElement('button');
       translateBtn.type = 'button';
       translateBtn.className = 'nucleus-button nucleus-button--small nucleus-button--text ticket-actions';
-      translateBtn.title = 'Translate to English';
+      translateBtn.title = 'Translate to English (popover)';
       translateBtn.style.cssText = 'padding:4px 8px;color:#1976d2;font-size:14px;cursor:pointer;background:transparent;border:none;';
       translateBtn.textContent = '🌐';
-      translateBtn.onclick = async (e) => {
+      translateBtn.onclick = (e) => {
         e.preventDefault(); e.stopPropagation();
         if (!noteEl) { showToast('Could not find note content.', 'error'); return; }
-        if (showingTranslated) {
-          noteEl.innerHTML = originalHtml;
-          showingTranslated = false;
-          translateBtn.textContent = '🌐'; translateBtn.title = 'Translate to English';
-          return;
-        }
-        if (translatedHtml) {
-          originalHtml = noteEl.innerHTML;
-          noteEl.innerHTML = translatedHtml;
-          showingTranslated = true;
-          translateBtn.textContent = '↩'; translateBtn.title = 'Show original';
-          return;
-        }
-        originalHtml = noteEl.innerHTML;
         const text = (noteEl.innerText || '').trim();
         if (!text) { showToast('No text to translate.', 'warning'); return; }
-        translateBtn.textContent = '…'; translateBtn.disabled = true;
-        const { ok, data } = await api.translate(text, 'en');
-        translateBtn.disabled = false;
-        if (!ok) {
-          translateBtn.textContent = '🌐';
-          showToast('Translation failed: ' + (data?.error || 'unknown'), 'error');
-          return;
-        }
-        translatedHtml = (data?.text || '').replace(/\n/g, '<br>');
-        noteEl.innerHTML = translatedHtml;
-        showingTranslated = true;
-        translateBtn.textContent = '↩'; translateBtn.title = 'Show original';
+        const isDescription = wrapper === description;
+        const scopeLabel = isDescription ? 'description'
+          : (wrapper.dataset.album || '').replace(/^note_/, 'note ') || (wrapper.id || 'reply');
+        showTranslatePopover(translateBtn, text, { title: scopeLabel, target: 'en' });
       };
       actions.insertBefore(translateBtn, actions.firstChild);
 
-      // AI Translate (Groq) — passes only this conversation's text to the
-      // "translate chat" prompt and opens the result in showChatModal.
+      // AI Translate (Groq) — passes only this conversation's text (with
+      // quoted tail stripped) to the "translate chat" prompt and opens the
+      // result in showChatModal. Modal-only, no FD-DOM mutation.
       const aiBtn = document.createElement('button');
       aiBtn.type = 'button';
       aiBtn.className = 'nucleus-button nucleus-button--small nucleus-button--text ticket-actions';
@@ -1539,7 +1646,7 @@ function injectConversationControls() {
           ? 'description'
           : (wrapper.dataset.album || '').replace(/^note_/, 'note ') || (wrapper.id || '');
         showChatModal(getFreshdeskTicketId(), () => refreshFreshdeskTicket(), {
-          content: text,
+          content: stripQuotedTail(text),
           scopeLabel,
         });
       };
@@ -1952,7 +2059,7 @@ function showHotelEmailConfirmModal(opts) {
 // activities toggle (collapse → expand triggers a refetch). FD has changed
 // the data-test-id over time, so we try multiple known selectors. Console
 // warns when none match so we know to grab the new attribute.
-// 800ms initial delay — gives FD's backend time to index the just-posted
+// 1500ms initial delay — gives FD's backend time to index the just-posted
 // note/reply before we ask the UI to refetch. Without it, the refresh races
 // the write and we see stale data.
 function refreshFreshdeskTicket() {
@@ -1975,7 +2082,7 @@ function refreshFreshdeskTicket() {
   setTimeout(() => {
     click();
     setTimeout(click, 350);
-  }, 800);
+  }, 1500);
 }
 
 
@@ -2552,17 +2659,24 @@ function showReplyComposer(opts) {
     sendBtn.disabled = true; sendBtn.textContent = 'Sending...';
     const noteHtml = replyArea.innerHTML;
     const attachedFiles = getFiles();
-    var ok;
+    // Send via JSON with base64-encoded files. GM_xmlhttpRequest on
+    // Tampermonkey MV3 cannot ferry File objects through the background
+    // service worker — multipart bodies arrive empty and FD records an
+    // empty stub attachment named after the userscript file.
+    let filesPayload = [];
     if (attachedFiles.length > 0) {
-      var fd = new FormData();
-      fd.append('freshdeskTicketId', tid);
-      fd.append('toEmail', toEmail);
-      fd.append('bodyHtml', noteHtml);
-      attachedFiles.forEach(function(f) { fd.append('files', f, f.name); });
-      ok = (await api.sendReplyForm(fd)).ok;
-    } else {
-      ok = (await api.sendReply({ freshdeskTicketId: tid, toEmail, bodyHtml: noteHtml })).ok;
+      filesPayload = await Promise.all(attachedFiles.map(f => new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => {
+          const result = String(r.result || '');
+          const b64 = result.includes(',') ? result.split(',')[1] : result;
+          resolve({ name: f.name, type: f.type || 'application/octet-stream', dataBase64: b64 });
+        };
+        r.onerror = () => reject(new Error('read failed: ' + f.name));
+        r.readAsDataURL(f);
+      })));
     }
+    const { ok } = await api.sendReply({ freshdeskTicketId: tid, toEmail, bodyHtml: noteHtml, files: filesPayload });
     if (ok) { sendBtn.textContent = '✅ Sent!'; showToast('Reply sent to ' + label + '.'); refreshFreshdeskTicket(); if (onSent) onSent(); }
     else    { sendBtn.textContent = '❌ Failed'; sendBtn.disabled = false; }
   };
@@ -2660,26 +2774,6 @@ function gmPost(url, data) {
         }
       },
       onerror: () => resolve({ ok: false, status: 0, data: { error: `Could not reach server. First request may take ~30s to wake up Render.` } }),
-    });
-  });
-}
-
-function gmPostForm(url, formData) {
-  return new Promise((resolve) => {
-    GM_xmlhttpRequest({
-      method: 'POST',
-      url,
-      data: formData,
-      // No Content-Type header — GM_xmlhttpRequest sets multipart boundary automatically
-      onload: (res) => {
-        try {
-          const json = JSON.parse(res.responseText);
-          resolve({ ok: res.status >= 200 && res.status < 300, data: json });
-        } catch (e) {
-          resolve({ ok: false, data: { error: 'Invalid JSON response' } });
-        }
-      },
-      onerror: () => resolve({ ok: false, data: { error: 'Could not reach server.' } }),
     });
   });
 }

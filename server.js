@@ -19,7 +19,7 @@ const { confirmTicket, lookupHotelEmail, sendHotelEmailConfirmed } = require('./
 const { FD_STATUS } = require('./config');
 
 const app = express();
-app.use(express.json({ limit: '20mb' }));
+app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname)));
 
 // ─── Init DB on startup ───────────────────────────────────────────────────────
@@ -407,13 +407,25 @@ app.post('/extract-booking-id', safeRoute(async (req, res) => {
 }));
 
 // ─── Send outbound reply to supplier or customer ──────────────────────────────
-// Accepts multipart/form-data (with files[]) or plain JSON (no attachments).
+// Accepts JSON with optional base64-encoded files (preferred, since
+// GM_xmlhttpRequest on Tampermonkey MV3 can't ferry File objects through
+// the background service worker), or legacy multipart/form-data via multer.
 app.post('/send-reply', upload.array('files'), async (req, res) => {
-  const { freshdeskTicketId, toEmail, bodyHtml } = req.body;
+  const { freshdeskTicketId, toEmail, bodyHtml, files: jsonFiles } = req.body;
   if (!freshdeskTicketId || !toEmail || !bodyHtml)
     return res.status(400).json({ error: 'freshdeskTicketId, toEmail, and bodyHtml are required' });
 
-  const files = req.files || [];
+  // Prefer multer's parsed multipart files; fall back to JSON base64 payload.
+  let files = req.files || [];
+  if (files.length === 0 && Array.isArray(jsonFiles) && jsonFiles.length > 0) {
+    files = jsonFiles
+      .filter(f => f && f.name && f.dataBase64)
+      .map(f => ({
+        originalname: f.name,
+        mimetype: f.type || 'application/octet-stream',
+        buffer: Buffer.from(f.dataBase64, 'base64'),
+      }));
+  }
   console.log(`[send-reply] ticket ${freshdeskTicketId} → ${toEmail} (${files.length} attachment(s))`);
   try {
     if (files.length > 0) {
