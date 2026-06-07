@@ -35,9 +35,19 @@ export default {
     // Only relay the chat-completions path (and any other Groq path).
     const target = 'https://api.groq.com' + url.pathname + url.search;
 
+    // Forward ONLY the headers Groq needs. Do NOT pass request.headers
+    // verbatim: Cloudflare injects x-forwarded-for / cf-connecting-ip
+    // carrying the caller's (Render's) original blocked IP, and Groq
+    // reads that to geo/IP-gate the request — which 403s even though the
+    // Worker's own egress IP is fine. Build a clean header set instead.
+    const headers = new Headers();
+    const auth = request.headers.get('authorization');
+    if (auth) headers.set('authorization', auth);
+    headers.set('content-type', request.headers.get('content-type') || 'application/json');
+
     const init = {
       method: request.method,
-      headers: request.headers,
+      headers,
       body: (request.method === 'GET' || request.method === 'HEAD')
         ? undefined
         : request.body,
