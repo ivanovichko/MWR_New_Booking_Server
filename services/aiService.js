@@ -1,6 +1,9 @@
 const fetch = require('node-fetch');
 
-const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
+// Defaults to Groq direct. Set GROQ_API_URL to a proxy endpoint (e.g. a
+// Cloudflare Worker) when Groq blocks the host's egress IP with a 403
+// "Access denied. Please check your network settings."
+const GROQ_API_URL = process.env.GROQ_API_URL || 'https://api.groq.com/openai/v1/chat/completions';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 /**
