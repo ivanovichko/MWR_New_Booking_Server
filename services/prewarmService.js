@@ -95,6 +95,20 @@ function buildDataTableParams(bookingId) {
   return params.toString();
 }
 
+// ─── Booking-list date range ─────────────────────────────────────────────────
+// TA's bookingsList now filters on a date range (the two date slots in the path
+// that used to be `null/null`). Flights in particular no longer return without
+// one. Default window: 1 year in the past → today (YYYY-MM-DD, path-safe).
+function fmtDate(d) {
+  return d.toISOString().slice(0, 10); // YYYY-MM-DD
+}
+function bookingDateRange() {
+  const to   = new Date();
+  const from = new Date();
+  from.setFullYear(from.getFullYear() - 1);
+  return { from: fmtDate(from), to: fmtDate(to) };
+}
+
 // ─── Extract href from HTML string ───────────────────────────────────────────
 function extractHref(str) {
   if (!str) return null;
@@ -108,8 +122,9 @@ async function fetchAndCacheBooking(bookingId) {
 
   // TA status codes: 0=confirmed, 3=pending, 2=cancelled
   // Validate first result matches searched ID to avoid false matches
+  const { from, to } = bookingDateRange();
   for (const status of [0, 3, 2]) {
-    const url = `https://traveladvantage.com/admin/bookings/bookingsList/All/${status}/All/null/null/All/${bookingId}`;
+    const url = `https://traveladvantage.com/admin/bookings/bookingsList/All/${status}/All/${from}/${to}/All/${bookingId}`;
     const data = await taPost(url, buildDataTableParams(bookingId));
     if (data?.data?.length > 0) {
       const row = data.data[0];
