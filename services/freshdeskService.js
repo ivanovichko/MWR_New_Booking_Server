@@ -200,6 +200,13 @@ async function updateTicket(ticketId, fields) {
 }
 
 /**
+ * Sets the ticket subject. Thin wrapper over updateTicket.
+ */
+async function setTicketSubject(ticketId, subject) {
+  return updateTicket(ticketId, { subject });
+}
+
+/**
  * Sets tags and type on a ticket in one call.
  * Replaces ALL existing tags.
  */
@@ -376,4 +383,4 @@ async function sendEmailWithAttachments(ticketId, toEmail, bodyHtml, files = [])
   return response.json();
 }
 
-module.exports = { getAuthHeader, fdGet, fdPost, addNote, addNoteWithImages, uploadInlineAttachment, sendEmail, sendEmailWithAttachments, setTicketPending, updateTicket, tagTicket, searchDuplicates, getTicketContext };
+module.exports = { getAuthHeader, fdGet, fdPost, addNote, addNoteWithImages, uploadInlineAttachment, sendEmail, sendEmailWithAttachments, setTicketPending, updateTicket, tagTicket, setTicketSubject, searchDuplicates, getTicketContext };

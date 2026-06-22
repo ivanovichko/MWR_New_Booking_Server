@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.62
+// @version      6.63
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -49,6 +49,7 @@
       hotelEmailSend:   (body) => gmPost(`${BACKEND_URL}/guided-prewarm/hotel-email/send`, body),
     },
     postNote:        (ticketId, noteHtml)         => gmPost(`${BACKEND_URL}/post-note`, { freshdeskTicketId: String(ticketId), noteHtml }),
+    renameSubject:   (ticketId, subject)          => gmPost(`${BACKEND_URL}/rename-subject`, { ticketId: String(ticketId), subject }),
     mergeTicket:     (body)                       => gmPost(`${BACKEND_URL}/merge-ticket`, body),
     sendReply:       (body)                       => gmPost(`${BACKEND_URL}/send-reply`, body),
     findUser:        (query)                      => gmPost(`${BACKEND_URL}/find-user`, { query }),
@@ -554,6 +555,68 @@ function renderBookingPanel() {
   actionRow.appendChild(viewNoteBtn);
   actionRow.appendChild(hotelEmailBtn);
   leftCol.appendChild(actionRow);
+
+  // ── Rename Subject — standalone: builds "bookingId / supplierId / Issue".
+  const SUBJECT_ISSUES = ['Reconfirmation','Cancellation','Modification','Complaint','Question','GuaranteeClaim','InfoRequest','Voucher','Info','Other'];
+  const renameRow = document.createElement('div');
+  renameRow.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin-top:8px;padding-top:8px;border-top:1px dashed #eee;';
+
+  const renameTop = document.createElement('div');
+  renameTop.style.cssText = 'display:flex;gap:6px;align-items:center;';
+  const issueSel = document.createElement('select');
+  issueSel.style.cssText = 'flex:1;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:14px;background:#fff;color:#333;';
+  for (const opt of SUBJECT_ISSUES) {
+    const o = document.createElement('option'); o.value = opt; o.textContent = opt; issueSel.appendChild(o);
+  }
+  const otherInput = document.createElement('input');
+  otherInput.type = 'text'; otherInput.placeholder = 'Custom issue…';
+  otherInput.style.cssText = 'flex:1;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:14px;display:none;';
+  const renameBtn = document.createElement('button');
+  renameBtn.textContent = '✏️ Rename Subject';
+  renameBtn.style.cssText = 'padding:8px 12px;border:1px solid #6f42c1;border-radius:6px;background:#fff;color:#6f42c1;font-size:14px;font-weight:600;cursor:pointer;white-space:nowrap;';
+  renameTop.appendChild(issueSel);
+  renameTop.appendChild(otherInput);
+  renameTop.appendChild(renameBtn);
+
+  const preview = document.createElement('div');
+  preview.style.cssText = 'font-size:12px;color:#888;font-family:system-ui,sans-serif;word-break:break-word;';
+
+  const currentIssue = () => issueSel.value === 'Other' ? otherInput.value.trim() : issueSel.value;
+  const buildSubject = () => [booking.internalBookingId, booking.supplierId, currentIssue()].filter(Boolean).join(' / ');
+  const syncRename = () => {
+    otherInput.style.display = issueSel.value === 'Other' ? '' : 'none';
+    const subject = buildSubject();
+    const noBooking = !booking.internalBookingId;
+    const needsOther = issueSel.value === 'Other' && !otherInput.value.trim();
+    renameBtn.disabled = noBooking || needsOther;
+    renameBtn.style.opacity = renameBtn.disabled ? '0.5' : '1';
+    renameBtn.style.cursor = renameBtn.disabled ? 'not-allowed' : 'pointer';
+    renameBtn.title = noBooking ? "No booking ID — can't rename" : '';
+    preview.textContent = noBooking ? '⚠️ No booking ID — rename disabled' : `→ ${subject}`;
+  };
+  issueSel.onchange = syncRename;
+  otherInput.oninput = syncRename;
+  syncRename();
+
+  renameBtn.onclick = () => withPanelBusy(async () => {
+    if (renameBtn.disabled) return;
+    const subject = buildSubject();
+    renameBtn.disabled = true; renameBtn.textContent = '⏳';
+    const refresh = await captureRefresh(ticketId);
+    const { ok, data } = await api.renameSubject(ticketId, subject);
+    renameBtn.textContent = '✏️ Rename Subject';
+    if (ok) {
+      showToast('Subject renamed.', 'success');
+      refresh();
+    } else {
+      showToast('Rename failed: ' + (data?.error || 'unknown'), 'error');
+    }
+    syncRename();
+  });
+
+  renameRow.appendChild(renameTop);
+  renameRow.appendChild(preview);
+  leftCol.appendChild(renameRow);
 
   // Customer section — right column.
   appendCustomerSection(rightCol, getDisplayUser(ticketId, cached), ticketId);

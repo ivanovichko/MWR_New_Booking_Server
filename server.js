@@ -8,7 +8,7 @@ const { parseUserHtml, findUser }        = require('./services/userService');
 const { buildNoteHtml }                  = require('./services/noteBuilder');
 const { lookupSupplier }                 = require('./services/supplierService');
 const { aiAssist, findHotelEmail }       = require('./services/aiService');
-const { getAuthHeader, fdGet, addNote, addNoteWithImages, sendEmail, sendEmailWithAttachments, setTicketPending, searchDuplicates, getTicketContext } = require('./services/freshdeskService');
+const { getAuthHeader, fdGet, addNote, addNoteWithImages, sendEmail, sendEmailWithAttachments, setTicketPending, setTicketSubject, searchDuplicates, getTicketContext } = require('./services/freshdeskService');
 const { fetchAgentMap, fetchAllAgents, fillMissingAgentNames } = require('./services/agentService');
 const { fetchTicket } = require('./services/ticketService');
 const { initDb, getCachedBooking, cacheBooking, storeSession, getPrompts, createPrompt, updatePrompt, deletePrompt, storeFreshdeskSession } = require('./services/dbService');
@@ -194,6 +194,15 @@ app.post('/post-note', safeRoute(async (req, res) => {
   if (!freshdeskTicketId || !noteHtml) throw new HttpError('freshdeskTicketId and noteHtml are required');
   await addNoteWithImages(freshdeskTicketId, noteHtml);
   console.log(`[post-note] posted to ticket ${freshdeskTicketId}`);
+  res.json({ success: true });
+}));
+
+// ─── Rename ticket subject (agent triggered) ──────────────────────────────────
+app.post('/rename-subject', safeRoute(async (req, res) => {
+  const { ticketId, subject } = req.body;
+  if (!ticketId || !subject) throw new HttpError('ticketId and subject are required');
+  await setTicketSubject(ticketId, subject);
+  console.log(`[rename-subject] ticket ${ticketId} → "${subject}"`);
   res.json({ success: true });
 }));
 
