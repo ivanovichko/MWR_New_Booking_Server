@@ -124,7 +124,7 @@ async function fetchAndCacheBooking(bookingId) {
   // Validate first result matches searched ID to avoid false matches
   const { from, to } = bookingDateRange();
   for (const status of [0, 3, 2]) {
-    const url = `https://traveladvantage.com/admin/bookings/bookingsList/All/${status}/All/${from}/${to}/All/${bookingId}`;
+    const url = `https://traveladvantage.com/admin/bookings/bookingsList/All/${status}/All/${from}/${to}/All/null/null/${bookingId}`;
     const data = await taPost(url, buildDataTableParams(bookingId));
     if (data?.data?.length > 0) {
       const row = data.data[0];
