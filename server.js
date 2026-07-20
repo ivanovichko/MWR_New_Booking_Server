@@ -92,6 +92,20 @@ app.post('/zoho/oauth-session', safeRoute(async (req, res) => {
   res.json(result);
 }));
 
+// ─── Booking-ref extraction for the Zoho widget ──────────────────────────────
+// Replaces the planned Deluge/Zia function: same job, but reusing the Groq
+// extraction the Freshdesk path already runs in production rather than a
+// hand-ported copy. Keeps the widget to plain fetch (no ZOHODESK.request, so
+// no whiteListedDomains entry needed) and drops the Developer Space step.
+app.post('/zoho/extract', safeRoute(async (req, res) => {
+  requireZohoSecret(req);
+  const { subject, description } = req.body;
+  if (!subject && !description) throw new HttpError('subject or description is required');
+  const result = await extractBookingId({ subject: subject || '', description: description || '' });
+  console.log(`[zoho] extract → ${result.bookingId || 'none'}`);
+  res.json({ success: true, ...result });
+}));
+
 // ─── Which Zoho config is this server actually running with? ─────────────────
 // Diagnostic only. Returns no secrets — just which vars are set and which data
 // centre the exchange will hit, so an invalid_client can be pinned down.
