@@ -77,6 +77,31 @@ app.post('/ta-session', safeRoute(async (req, res) => {
 // requireZohoSecret guards every /zoho/* route with the same bearer value the
 // extension's plugin-manifest.json config (backend_shared_secret) sends —
 // otherwise anyone who finds the URL could post notes to arbitrary tickets.
+// Zoho serves extension widgets from a per-install sandbox origin
+// (https://<uuid>.zappsusercontent.eu|com), so the widget's fetch calls are
+// cross-origin. The Freshdesk userscript never needed this — GM_xmlhttpRequest
+// bypasses CORS entirely. Scoped to /zoho/* and to Zoho's sandbox hosts; every
+// route behind it still requires the bearer secret.
+const ZOHO_WIDGET_ORIGIN = /^https:\/\/[a-z0-9-]+\.zappsusercontent\.(eu|com)$/i;
+
+function allowZohoWidgetOrigin(req, res, next) {
+  const origin = req.get('Origin');
+  if (origin && ZOHO_WIDGET_ORIGIN.test(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Max-Age', '86400');
+  }
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+}
+
+// The widget hits both prefixes: /zoho/* for extract + post-note, and
+// /guided-prewarm/booking/:id for the booking lookup it shares with Freshdesk.
+app.use('/zoho', allowZohoWidgetOrigin);
+app.use('/guided-prewarm', allowZohoWidgetOrigin);
+
 function requireZohoSecret(req) {
   const expected = process.env.ZOHO_BACKEND_SHARED_SECRET;
   if (!expected) throw new HttpError('ZOHO_BACKEND_SHARED_SECRET not configured on server', 500);
