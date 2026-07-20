@@ -76,12 +76,30 @@ async function getAccessToken() {
   return refreshAccessToken(session.refresh_token);
 }
 
-async function authHeaders() {
+async function bearerHeaders() {
   const token = await getAccessToken();
-  return {
-    'Authorization': `Zoho-oauthtoken ${token}`,
-    'orgId': getOrgId(),
-  };
+  return { 'Authorization': `Zoho-oauthtoken ${token}` };
+}
+
+async function authHeaders() {
+  return { ...(await bearerHeaders()), 'orgId': getOrgId() };
+}
+
+/**
+ * Lists the orgs this token can reach. Deliberately uses bearerHeaders rather
+ * than authHeaders — this is the one Desk endpoint that must work *before*
+ * ZOHO_ORG_ID is known, so it can't depend on getOrgId(). Doubles as the
+ * cheapest end-to-end health check that the stored session actually works.
+ */
+async function listOrganizations() {
+  const headers = await bearerHeaders();
+  const response = await fetch(`${ZOHO_API_DOMAIN}/api/v1/organizations`, { headers });
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Zoho listOrganizations failed ${response.status}: ${err}`);
+  }
+  const data = await response.json();
+  return (data.data || []).map(o => ({ id: o.id, name: o.companyName || o.portalName }));
 }
 
 /**
@@ -126,4 +144,4 @@ async function tagTicket(ticketId, tags) {
   return response.json();
 }
 
-module.exports = { exchangeGrantToken, getAccessToken, postComment, tagTicket };
+module.exports = { exchangeGrantToken, getAccessToken, listOrganizations, postComment, tagTicket };

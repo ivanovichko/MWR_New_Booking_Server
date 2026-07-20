@@ -18,7 +18,7 @@ const { buildHotelEmailHtml }            = require('./services/hotelEmailBuilder
 const { confirmTicket, lookupHotelEmail, sendHotelEmailConfirmed } = require('./services/ticketActionService');
 const { runBatchTriage, MAX_BATCH } = require('./services/batchTriageService');
 const { confirmTicketZoho } = require('./services/zohoTicketActionService');
-const { exchangeGrantToken } = require('./services/zohoDeskService');
+const { exchangeGrantToken, listOrganizations } = require('./services/zohoDeskService');
 const { FD_STATUS } = require('./config');
 
 const app = express();
@@ -90,6 +90,15 @@ app.post('/zoho/oauth-session', safeRoute(async (req, res) => {
   if (!grantCode) throw new HttpError('grantCode is required');
   const result = await exchangeGrantToken(grantCode);
   res.json(result);
+}));
+
+// ─── Zoho Desk health check + org ID discovery ───────────────────────────────
+// Works before ZOHO_ORG_ID is set, so it's the first call to prove the stored
+// session can actually reach Desk (the OAuth exchange only proves accounts.zoho).
+app.get('/zoho/orgs', safeRoute(async (req, res) => {
+  requireZohoSecret(req);
+  const orgs = await listOrganizations();
+  res.json({ success: true, orgs });
 }));
 
 // ─── Post note to a Zoho Desk ticket (Zoho counterpart to /post-note) ────────
