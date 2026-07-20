@@ -43,6 +43,14 @@ async function initDb() {
       created_at  TIMESTAMPTZ DEFAULT NOW()
     );
 
+    CREATE TABLE IF NOT EXISTS zoho_sessions (
+      id            SERIAL PRIMARY KEY,
+      access_token  TEXT,
+      refresh_token TEXT NOT NULL,
+      expires_at    TIMESTAMPTZ,
+      created_at    TIMESTAMPTZ DEFAULT NOW()
+    );
+
     CREATE TABLE IF NOT EXISTS booking_cache (
       booking_id    TEXT PRIMARY KEY,
       data_row      JSONB,
@@ -114,6 +122,33 @@ async function getSession() {
   return res.rows[0]?.cookie || null;
 }
 
+// ─── Zoho Desk OAuth session ──────────────────────────────────────────────────
+// Single shared row, same pattern as ta_sessions/freshdesk_sessions: refresh_token
+// is durable (from the one-time self-client grant exchange), access_token/expires_at
+// are refreshed in place as they expire.
+async function storeZohoSession({ accessToken = null, refreshToken, expiresAt = null }) {
+  await pool.query(`DELETE FROM zoho_sessions`);
+  await pool.query(
+    `INSERT INTO zoho_sessions (access_token, refresh_token, expires_at) VALUES ($1, $2, $3)`,
+    [accessToken, refreshToken, expiresAt]
+  );
+}
+
+async function getZohoSession() {
+  const res = await pool.query(
+    `SELECT access_token, refresh_token, expires_at FROM zoho_sessions ORDER BY created_at DESC LIMIT 1`
+  );
+  return res.rows[0] || null;
+}
+
+async function updateZohoAccessToken(accessToken, expiresAt) {
+  await pool.query(
+    `UPDATE zoho_sessions SET access_token = $1, expires_at = $2
+     WHERE id = (SELECT id FROM zoho_sessions ORDER BY created_at DESC LIMIT 1)`,
+    [accessToken, expiresAt]
+  );
+}
+
 // ─── Booking cache ────────────────────────────────────────────────────────────
 async function cacheBooking({ bookingId, dataRow, bookingHtml, userHtml, parsed }) {
   await pool.query(`
@@ -164,4 +199,4 @@ async function deletePrompt(id) {
   await pool.query(`DELETE FROM agent_prompts WHERE id=$1`, [id]);
 }
 
-module.exports = { initDb, storeSession, getSession, cacheBooking, getCachedBooking, storeTicketSummary, getTicketSummaries, pool, getPrompts, createPrompt, updatePrompt, deletePrompt, storeFreshdeskSession, getFreshdeskSession, getFreshdeskCsrfToken };
+module.exports = { initDb, storeSession, getSession, cacheBooking, getCachedBooking, storeTicketSummary, getTicketSummaries, pool, getPrompts, createPrompt, updatePrompt, deletePrompt, storeFreshdeskSession, getFreshdeskSession, getFreshdeskCsrfToken, storeZohoSession, getZohoSession, updateZohoAccessToken };

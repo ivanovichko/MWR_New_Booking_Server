@@ -16,6 +16,8 @@ const { fetchAndCacheBooking, extractBookingId, checkPendings } = require('./ser
 const { taGet, taPost }                  = require('./services/taAuthService');
 const { buildHotelEmailHtml }            = require('./services/hotelEmailBuilder');
 const { confirmTicket, lookupHotelEmail, sendHotelEmailConfirmed } = require('./services/ticketActionService');
+const { confirmTicketZoho } = require('./services/zohoTicketActionService');
+const { exchangeGrantToken } = require('./services/zohoDeskService');
 const { FD_STATUS } = require('./config');
 
 const app = express();
@@ -67,6 +69,36 @@ app.post('/ta-session', safeRoute(async (req, res) => {
   await storeSession(cookie);
   console.log(`[ta-session] stored (length: ${cookie.length})`);
   res.json({ success: true });
+}));
+
+// ─── Zoho Desk OAuth: one-time self-client grant token exchange ──────────────
+// Beta/Zoho-port routes. Additive only — no existing Freshdesk route touched.
+// requireZohoSecret guards every /zoho/* route with the same bearer value the
+// extension's plugin-manifest.json config (backend_shared_secret) sends —
+// otherwise anyone who finds the URL could post notes to arbitrary tickets.
+function requireZohoSecret(req) {
+  const expected = process.env.ZOHO_BACKEND_SHARED_SECRET;
+  if (!expected) throw new HttpError('ZOHO_BACKEND_SHARED_SECRET not configured on server', 500);
+  const got = (req.get('Authorization') || '').replace(/^Bearer\s+/i, '');
+  if (got !== expected) throw new HttpError('Unauthorized', 401);
+}
+
+app.post('/zoho/oauth-session', safeRoute(async (req, res) => {
+  requireZohoSecret(req);
+  const { grantCode } = req.body;
+  if (!grantCode) throw new HttpError('grantCode is required');
+  const result = await exchangeGrantToken(grantCode);
+  res.json(result);
+}));
+
+// ─── Post note to a Zoho Desk ticket (Zoho counterpart to /post-note) ────────
+app.post('/zoho/post-note', safeRoute(async (req, res) => {
+  requireZohoSecret(req);
+  const { ticketId, bookingId, noteHtml } = req.body;
+  if (!ticketId || !bookingId) throw new HttpError('ticketId and bookingId are required');
+  const results = await confirmTicketZoho(ticketId, bookingId, noteHtml || null);
+  console.log(`[zoho] posted note to ticket ${ticketId}`);
+  res.json({ success: true, results });
 }));
 
 
