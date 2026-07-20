@@ -16,6 +16,7 @@ const { fetchAndCacheBooking, extractBookingId, checkPendings } = require('./ser
 const { taGet, taPost }                  = require('./services/taAuthService');
 const { buildHotelEmailHtml }            = require('./services/hotelEmailBuilder');
 const { confirmTicket, lookupHotelEmail, sendHotelEmailConfirmed } = require('./services/ticketActionService');
+const { runBatchTriage, MAX_BATCH } = require('./services/batchTriageService');
 const { confirmTicketZoho } = require('./services/zohoTicketActionService');
 const { exchangeGrantToken } = require('./services/zohoDeskService');
 const { FD_STATUS } = require('./config');
@@ -125,6 +126,63 @@ app.post('/check-pendings/stop', (req, res) => {
 
 app.get('/check-pendings/status', (req, res) => {
   res.json({ running: pendingsJob.running, done: pendingsJob.done, error: pendingsJob.error, log: pendingsJob.log, results: pendingsJob.results, stopped: pendingsJob.stopped });
+});
+
+
+// ─── Batch triage ────────────────────────────────────────────────────────────
+// Processes the LOW-priority tickets the userscript collected from the agent's
+// current Freshdesk view. Same shape as pendingsJob: start responds immediately,
+// the run happens detached, the frontend polls /status.
+const triageJob = {
+  running: false, done: false, error: null, stopped: false, dryRun: true,
+  startedAt: null, finishedAt: null,
+  total: 0, processed: 0, log: [], rows: [], summary: {},
+};
+
+app.post('/batch-triage/start', safeRoute(async (req, res) => {
+  if (triageJob.running) throw new HttpError('A triage run is already in progress', 409);
+
+  const { tickets, dryRun = true, options = {} } = req.body;
+  if (!Array.isArray(tickets) || !tickets.length) throw new HttpError('tickets[] is required');
+
+  // Re-validate frontend input: LOW priority only, deduped, capped.
+  const seen = new Set();
+  const queue = tickets.filter(t => {
+    if (!t || t.id == null) return false;
+    if (t.priority !== 1) return false;
+    const key = String(t.id);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, MAX_BATCH);
+
+  if (!queue.length) throw new HttpError('No LOW-priority tickets in the supplied list');
+
+  Object.assign(triageJob, {
+    running: true, done: false, error: null, stopped: false, dryRun: !!dryRun,
+    startedAt: new Date().toISOString(), finishedAt: null,
+    total: queue.length, processed: 0, log: [], rows: [], summary: {},
+  });
+
+  console.log(`[triage] start — ${queue.length} ticket(s), dryRun=${!!dryRun}`);
+  res.json({ success: true, total: queue.length, skipped: tickets.length - queue.length });
+
+  runBatchTriage(queue, { dryRun: !!dryRun, options }, triageJob, () => triageJob.stopped)
+    .then(() => { triageJob.done = true; triageJob.running = false; triageJob.finishedAt = new Date().toISOString(); })
+    .catch(err => {
+      console.error(`[triage] aborted: ${err.message}`);
+      triageJob.error = err.message;
+      triageJob.done = true; triageJob.running = false; triageJob.finishedAt = new Date().toISOString();
+    });
+}));
+
+app.post('/batch-triage/stop', (req, res) => {
+  triageJob.stopped = true;
+  res.json({ success: true });
+});
+
+app.get('/batch-triage/status', (req, res) => {
+  res.json(triageJob);
 });
 
 

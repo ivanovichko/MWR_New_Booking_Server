@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.63
+// @version      6.64
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -60,6 +60,11 @@
     aiAssist:        (body)                       => gmPost(`${BACKEND_URL}/ai-assist`, body),
     prompts:         ()                           => gmGet(`${BACKEND_URL}/settings/prompts`),
     bulkConfirm:     (tag)                        => gmPost(`${BACKEND_URL}/bulk-confirm`, { tag }),
+    triage: {
+      start:  (body) => gmPost(`${BACKEND_URL}/batch-triage/start`, body),
+      stop:   ()     => gmPost(`${BACKEND_URL}/batch-triage/stop`, {}),
+      status: ()     => gmGet(`${BACKEND_URL}/batch-triage/status`),
+    },
     attachmentUrl:   (url)                        => `${BACKEND_URL}/attachment?url=${encodeURIComponent(url)}`,
   };
 
@@ -2515,6 +2520,360 @@ function showCheckPendingsModal() {
   });
 }
 
+// ── Batch Triage ─────────────────────────────────────────────────────────────
+// Walks the LOW-priority tickets in the agent's current filter view through the
+// backend triage pipeline. Dry-run by default: the whole pipeline runs but
+// note-posting, tagging and hotel emails are simulated, so the table shows what
+// WOULD happen. Flipping to live requires an explicit confirm.
+
+// Outcome → [label, colour]. Anything not listed renders grey.
+const TRIAGE_OUTCOMES = {
+  reconf_hotel_email_sent:       ['📧 Hotel emailed',     '#28a745'],
+  reconf_call_hotel:             ['📞 Call hotel',        '#fd7e14'],
+  reconf_duplicates_found:       ['🔗 Related tickets',   '#17a2b8'],
+  reconf_already_emailed:        ['✓ Already emailed',    '#6c757d'],
+  reconf_hotel_email_no_address: ['❓ No address',        '#ffc107'],
+  reconf_search_failed:          ['⚠️ Search failed',     '#dc3545'],
+  reconf_no_checkin_date:        ['❓ No check-in date',  '#ffc107'],
+  reconf_past_checkin:           ['⏮ Past check-in',     '#6c757d'],
+  customer_needs_response:       ['💬 Needs response',    '#dc3545'],
+  customer_pending_supplier:     ['⏳ Pending supplier',  '#6f42c1'],
+  customer_pending_customer:     ['⏳ Pending customer',  '#17a2b8'],
+  customer_resolved:             ['✓ Resolved',          '#28a745'],
+  booking_voucher:               ['🎟 Voucher — skipped', '#6c757d'],
+  unsupported_product:           ['⏭ Unsupported type',  '#6c757d'],
+  needs_manual_classification:   ['🤔 Manual review',     '#ffc107'],
+  no_booking_id:                 ['❓ No booking ref',    '#ffc107'],
+  booking_not_found:             ['❓ Booking not in TA', '#ffc107'],
+  error_ticket_fetch:            ['❌ Fetch failed',      '#dc3545'],
+  error_booking_fetch:           ['❌ Booking failed',    '#dc3545'],
+  error_classify:                ['❌ Classify failed',   '#dc3545'],
+  error:                         ['❌ Error',             '#dc3545'],
+};
+
+/** Pulls every page of the filter view, then narrows to LOW priority. */
+async function collectLowPriorityQueue(filterId, maxPages = 10) {
+  const out = [];
+  const seen = new Set();
+  for (let page = 1; page <= maxPages; page++) {
+    const d = await fdGet(`/api/_/tickets?filter=${filterId}&per_page=30&page=${page}&include=requester,stats`);
+    const batch = d.tickets || [];
+    for (const t of batch) {
+      if (seen.has(t.id)) continue;
+      seen.add(t.id);
+      out.push(t);
+    }
+    if (batch.length < 30) break;
+  }
+  return out.filter(t => t.priority === 1).map(t => ({
+    id: t.id,
+    subject: t.subject,
+    priority: t.priority,
+    status: t.status,
+    tags: t.tags || [],
+    requesterEmail: t.requester?.email || null,
+  }));
+}
+
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+function triageOutcomeChip(outcome) {
+  const [label, color] = TRIAGE_OUTCOMES[outcome] || [outcome || '—', '#6c757d'];
+  return `<span style="display:inline-block;padding:2px 7px;border-radius:10px;background:${color};color:#fff;font-size:11px;white-space:nowrap;">${esc(label)}</span>`;
+}
+
+function triageNoteCell(row) {
+  const map = {
+    already_posted: ['✓ existed', '#6c757d'],
+    posted:         ['📝 posted', '#28a745'],
+    simulated:      ['🧪 would post', '#b8860b'],
+    failed:         ['✗ failed', '#dc3545'],
+    skipped:        ['—', '#999'],
+  };
+  const [label, color] = map[row.noteState] || ['—', '#999'];
+  const via = row.noteDetectMethod ? ` title="detected via ${esc(row.noteDetectMethod)}${row.noteEvidence ? ': ' + esc(row.noteEvidence) : ''}"` : '';
+  return `<span style="color:${color};"${via}>${label}</span>`;
+}
+
+/** The "what did it actually do" cell — the point of the whole table. */
+function triageActionCell(row) {
+  const bits = [];
+  if (row.hotelEmail?.address) {
+    const state = row.hotelEmail.state === 'simulated' ? '🧪 ' : (row.hotelEmail.state === 'sent' ? '📧 ' : '');
+    bits.push(`${state}${esc(row.hotelEmail.address)}`);
+  } else if (row.hotelEmail?.state === 'not_found') {
+    bits.push('no address found');
+  }
+  if (row.relatedTickets?.length) {
+    bits.push(row.relatedTickets.map(t => `<a href="${t.url}" target="_blank">#${t.id}</a>`).join(' '));
+  }
+  if (row.tagsAdded?.length) {
+    bits.push(`<span style="color:#6f42c1;">${row.tagsMode === 'simulated' ? '🧪 ' : ''}+${esc(row.tagsAdded.join(', '))}</span>`);
+  }
+  return bits.length ? bits.join('<br>') : '—';
+}
+
+function triageStepsHtml(row) {
+  const modeColor = { read: '#666', live: '#28a745', simulated: '#b8860b', error: '#dc3545' };
+  const lines = (row.steps || []).map(s =>
+    `<div style="padding:1px 0;"><span style="color:#999;">${esc(s.t.slice(11, 19))}</span> ` +
+    `<span style="display:inline-block;min-width:78px;color:#6f42c1;">${esc(s.stage)}</span> ` +
+    `<span style="color:${modeColor[s.mode] || '#666'};">${esc(s.msg)}</span></div>`
+  ).join('');
+  const extra = [];
+  if (row.classifyReason) extra.push(`<div style="margin-top:4px;color:#666;"><b>Why:</b> ${esc(row.classifyReason)}</div>`);
+  if (row.threadSummary)  extra.push(`<div style="color:#666;"><b>Thread:</b> ${esc(row.threadSummary)}</div>`);
+  if (row.nextAction)     extra.push(`<div style="color:#666;"><b>Next:</b> ${esc(row.nextAction)}</div>`);
+  if (row.error)          extra.push(`<div style="color:#dc3545;"><b>Error:</b> ${esc(row.error)}</div>`);
+  return `<div style="font-family:monospace;font-size:11px;background:#fafafa;padding:8px 10px;border-left:3px solid #6f42c1;">${lines}${extra.join('')}</div>`;
+}
+
+function renderTriageRows(rows, dryRun) {
+  if (!rows.length) return '<div style="color:#888;font-size:12px;padding:8px 0;">No results yet…</div>';
+  const th = 'padding:5px 8px;border:1px solid #ddd;text-align:left;';
+  const td = 'padding:5px 8px;border:1px solid #ddd;vertical-align:top;';
+  const body = rows.map((r, i) => {
+    const tint = dryRun ? 'background:#fffdf5;' : '';
+    const days = r.daysUntil == null ? '' :
+      `<span style="color:${r.daysUntil <= 3 ? '#dc3545' : '#666'};font-weight:${r.daysUntil <= 3 ? '600' : '400'};">d+${r.daysUntil}</span>`;
+    const cls = r.classification
+      ? ({ booking_reconf: '🏨 reconf', customer: '💬 customer', booking_voucher: '🎟 voucher', unsupported_product: '⏭ n/a' }[r.classification] || esc(r.classification))
+      : '—';
+    const conf = r.confidence && r.confidence !== 'high' ? ` <span style="color:#b8860b;font-size:10px;">(${esc(r.confidence)})</span>` : '';
+    return `
+      <tr style="${tint}">
+        <td style="${td}"><a href="${r.url}" target="_blank">#${r.ticketId}</a></td>
+        <td style="${td}" title="${esc(r.subject)}">${esc((r.subject || '').slice(0, 42))}</td>
+        <td style="${td}">${esc(r.internalId || r.bookingId || '—')}${r.supplierId ? `<br><span style="color:#888;">${esc(r.supplierId)}</span>` : ''}</td>
+        <td style="${td}">${esc(r.productType || '—')}</td>
+        <td style="${td}">${esc(r.checkIn || '—')}${days ? '<br>' + days : ''}</td>
+        <td style="${td}">${cls}${conf}</td>
+        <td style="${td}">${triageNoteCell(r)}</td>
+        <td style="${td}">${triageActionCell(r)}</td>
+        <td style="${td}">${esc(r.verdict || '—')}</td>
+        <td style="${td}">${triageOutcomeChip(r.outcome)}</td>
+        <td style="${td}"><button data-steps="${i}" style="border:none;background:none;cursor:pointer;color:#6f42c1;font-size:13px;">▸</button></td>
+      </tr>
+      <tr data-stepsrow="${i}" style="display:none;"><td style="${td}" colspan="11">${triageStepsHtml(r)}</td></tr>`;
+  }).join('');
+
+  return `<table style="width:100%;border-collapse:collapse;font-size:12px;">
+    <thead><tr style="background:#f5f5f5;">
+      <th style="${th}">#</th><th style="${th}">Subject</th><th style="${th}">Booking</th>
+      <th style="${th}">Type</th><th style="${th}">Check-in</th><th style="${th}">Class</th>
+      <th style="${th}">Note</th><th style="${th}">Action</th><th style="${th}">Verdict</th>
+      <th style="${th}">Outcome</th><th style="${th}"></th>
+    </tr></thead>
+    <tbody>${body}</tbody></table>`;
+}
+
+function triageRowsToText(rows) {
+  return rows.map(r => [
+    `#${r.ticketId}`,
+    r.internalId || r.bookingId || '—',
+    r.productType || '—',
+    r.classification || '—',
+    `note:${r.noteState}`,
+    r.verdict || '',
+    r.outcome,
+    r.hotelEmail?.address ? `email:${r.hotelEmail.address}` : '',
+    r.relatedTickets?.length ? `related:${r.relatedTickets.map(t => '#' + t.id).join('/')}` : '',
+    r.tagsAdded?.length ? `tags:+${r.tagsAdded.join('/')}` : '',
+    r.error ? `err:${r.error}` : '',
+  ].filter(Boolean).join(' | ')).join('\n');
+}
+
+function showBatchTriageModal() {
+  const { modal, body } = createModal('taTriageModal', '⚡ Batch Triage', {
+    style: 'top:40px;left:50%;transform:translateX(-50%);width:1280px;max-width:calc(100vw - 48px);max-height:92vh;resize:both;overflow:auto;min-width:600px;',
+    bodyStyle: 'padding:14px 16px;display:flex;flex-direction:column;gap:12px;',
+  });
+
+  // ── Control row ──
+  const ctrl = document.createElement('div');
+  ctrl.style.cssText = `padding:12px 16px;border-bottom:1px solid ${THEME.border};display:flex;align-items:center;gap:10px;flex-wrap:wrap;flex-shrink:0;`;
+
+  let dryRun = true;
+  const modeBtn = document.createElement('button');
+  const styleModeBtn = () => {
+    modeBtn.textContent = dryRun ? '🧪 Dry-run' : '🔴 LIVE';
+    modeBtn.title = dryRun
+      ? 'Everything is analysed for real, but notes/tags/emails are only simulated. Click to go live.'
+      : 'Notes will be posted, tags written and hotel emails SENT. Click to return to dry-run.';
+    modeBtn.style.cssText = dryRun
+      ? 'background:#fff;color:#b8860b;border:1px solid #b8860b;padding:5px 12px;border-radius:14px;cursor:pointer;font-size:12px;font-weight:600;'
+      : 'background:#dc3545;color:#fff;border:none;padding:5px 12px;border-radius:14px;cursor:pointer;font-size:12px;font-weight:700;';
+  };
+  modeBtn.onclick = () => {
+    if (dryRun) {
+      const n = selected().length;
+      if (!confirm(`Switch to LIVE mode?\n\n${n} ticket(s) will be really modified: booking notes posted, tags written, and hotel emails SENT to real properties.\n\nThis cannot be undone.`)) return;
+    }
+    dryRun = !dryRun;
+    styleModeBtn();
+  };
+  styleModeBtn();
+
+  const startBtn = document.createElement('button');
+  startBtn.textContent = '▶ Start';
+  startBtn.style.cssText = 'background:#6f42c1;color:#fff;border:none;padding:5px 14px;border-radius:5px;cursor:pointer;font-size:12px;font-weight:600;';
+
+  const stopBtn = document.createElement('button');
+  stopBtn.textContent = '■ Stop';
+  stopBtn.disabled = true;
+  stopBtn.style.cssText = `padding:5px 12px;border:1px solid ${THEME.danger};border-radius:5px;background:#fff;color:${THEME.danger};font-size:12px;cursor:pointer;opacity:0.4;`;
+
+  const queueInfo = document.createElement('div');
+  queueInfo.style.cssText = 'font-size:12px;color:#666;margin-left:auto;';
+  queueInfo.textContent = 'Loading queue…';
+
+  ctrl.append(modeBtn, startBtn, stopBtn, queueInfo);
+  modal.insertBefore(ctrl, body);
+
+  // ── Queue preview (checkbox list) ──
+  const preview = document.createElement('details');
+  preview.style.cssText = 'font-size:12px;';
+  preview.innerHTML = '<summary style="cursor:pointer;color:#6f42c1;font-weight:600;">Queue</summary>';
+  const previewList = document.createElement('div');
+  previewList.style.cssText = 'max-height:180px;overflow-y:auto;margin-top:6px;border:1px solid #eee;border-radius:5px;padding:6px 8px;';
+  preview.appendChild(previewList);
+
+  const progress = document.createElement('div');
+  progress.style.cssText = 'font-size:12px;color:#666;';
+
+  const results = document.createElement('div');
+  results.style.cssText = 'overflow-x:auto;';
+
+  const logPane = document.createElement('details');
+  logPane.style.cssText = 'font-size:11px;';
+  logPane.innerHTML = '<summary style="cursor:pointer;color:#888;">Log</summary>';
+  const logBox = document.createElement('div');
+  logBox.style.cssText = 'font-family:monospace;background:#f8f8f8;padding:8px 10px;max-height:200px;overflow-y:auto;line-height:1.6;margin-top:6px;';
+  logPane.appendChild(logBox);
+
+  const footer = document.createElement('div');
+  footer.style.cssText = 'display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12px;';
+
+  body.append(preview, progress, results, footer, logPane);
+
+  let queue = [];
+  const selected = () => queue.filter(t => t._checked !== false);
+
+  // Expand/collapse the per-ticket step trail.
+  results.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-steps]');
+    if (!btn) return;
+    const tr = results.querySelector(`[data-stepsrow="${btn.dataset.steps}"]`);
+    if (!tr) return;
+    const open = tr.style.display !== 'none';
+    tr.style.display = open ? 'none' : '';
+    btn.textContent = open ? '▸' : '▾';
+  });
+
+  // ── Load the queue from the agent's current filter view ──
+  (async () => {
+    const filterId = _lastFilterId;
+    if (!filterId) {
+      queueInfo.textContent = 'No filter view captured';
+      previewList.innerHTML = '<div style="color:#dc3545;">Open a ticket list / filter view in Freshdesk first, then reopen this panel.</div>';
+      startBtn.disabled = true; startBtn.style.opacity = '0.4';
+      return;
+    }
+    try {
+      queue = await collectLowPriorityQueue(filterId);
+      queueInfo.textContent = `Filter #${filterId} · ${queue.length} LOW ticket(s)`;
+      if (!queue.length) {
+        previewList.innerHTML = '<div style="color:#888;">No LOW-priority tickets in this view.</div>';
+        startBtn.disabled = true; startBtn.style.opacity = '0.4';
+        return;
+      }
+      previewList.innerHTML = queue.map((t, i) =>
+        `<label style="display:block;padding:2px 0;cursor:pointer;">
+           <input type="checkbox" data-q="${i}" checked style="margin-right:6px;">
+           <a href="https://${window.location.hostname}/a/tickets/${t.id}" target="_blank" onclick="event.stopPropagation()">#${t.id}</a>
+           <span style="color:#555;">${esc((t.subject || '').slice(0, 80))}</span>
+         </label>`).join('');
+      previewList.addEventListener('change', (e) => {
+        const cb = e.target.closest('[data-q]');
+        if (!cb) return;
+        queue[Number(cb.dataset.q)]._checked = cb.checked;
+        queueInfo.textContent = `Filter #${filterId} · ${selected().length} of ${queue.length} selected`;
+      });
+    } catch (err) {
+      queueInfo.textContent = 'Queue fetch failed';
+      previewList.innerHTML = `<div style="color:#dc3545;">${esc(err.message)}</div>`;
+      startBtn.disabled = true; startBtn.style.opacity = '0.4';
+    }
+  })();
+
+  // ── Run ──
+  let pollInterval = null;
+  const stopPolling = () => {
+    if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+    startBtn.disabled = false; startBtn.style.opacity = '1';
+    stopBtn.disabled = true; stopBtn.style.opacity = '0.4';
+    modeBtn.disabled = false; modeBtn.style.pointerEvents = 'auto';
+  };
+
+  let lastLogLen = 0;
+  const render = (d) => {
+    progress.innerHTML = `<b>${d.processed || 0}</b> / ${d.total || 0} processed` +
+      (d.dryRun ? ' <span style="color:#b8860b;">· dry-run, nothing was modified</span>' : ' <span style="color:#dc3545;font-weight:600;">· LIVE</span>') +
+      (d.stopped ? ' · <span style="color:#dc3545;">stopped</span>' : '');
+    results.innerHTML = renderTriageRows(d.rows || [], d.dryRun);
+
+    (d.log || []).slice(lastLogLen).forEach(m => { logBox.innerHTML += `<div>${esc(m)}</div>`; });
+    if ((d.log || []).length !== lastLogLen) { lastLogLen = (d.log || []).length; logBox.scrollTop = logBox.scrollHeight; }
+
+    const counts = Object.entries(d.summary || {}).sort((a, b) => b[1] - a[1]);
+    footer.innerHTML = counts.map(([o, n]) => `${triageOutcomeChip(o)} <b>${n}</b>`).join(' &nbsp; ');
+    if (d.error) footer.innerHTML += `<div style="color:#dc3545;font-weight:600;width:100%;">❌ ${esc(d.error)}</div>`;
+    if ((d.rows || []).length) {
+      const copy = document.createElement('button');
+      copy.textContent = '📋 Copy';
+      copy.style.cssText = 'margin-left:auto;padding:4px 12px;border:1px solid #6c757d;border-radius:5px;background:#fff;color:#6c757d;font-size:12px;cursor:pointer;';
+      copy.onclick = () => { navigator.clipboard.writeText(triageRowsToText(d.rows)); showToast('Copied.', 'success', 1500); };
+      footer.appendChild(copy);
+    }
+  };
+
+  const poll = async () => {
+    const { ok, data } = await api.triage.status();
+    if (!ok) { stopPolling(); logBox.innerHTML += '<div style="color:red;">Status poll failed</div>'; return; }
+    render(data);
+    if (data.done || data.error) {
+      stopPolling();
+      showToast(data.error ? `Triage aborted: ${data.error}` : `Triage done — ${data.processed} ticket(s)`, data.error ? 'error' : 'success', 3000);
+    }
+  };
+
+  startBtn.onclick = async () => {
+    const tickets = selected();
+    if (!tickets.length) { showToast('No tickets selected.', 'warning'); return; }
+    startBtn.disabled = true; startBtn.style.opacity = '0.4';
+    stopBtn.disabled = false; stopBtn.style.opacity = '1';
+    modeBtn.style.pointerEvents = 'none';
+    logBox.innerHTML = ''; lastLogLen = 0;
+
+    const { ok, data } = await api.triage.start({
+      tickets: tickets.map(({ _checked, ...t }) => t),
+      dryRun,
+    });
+    if (!ok) {
+      logBox.innerHTML += `<div style="color:red;">Failed to start: ${esc(data?.error || 'unknown')}</div>`;
+      stopPolling();
+      return;
+    }
+    pollInterval = setInterval(poll, 2000);
+    poll();
+  };
+
+  stopBtn.onclick = () => {
+    stopBtn.disabled = true; stopBtn.textContent = 'Stopping…';
+    api.triage.stop().then(() => { stopBtn.textContent = '■ Stop'; });
+  };
+}
+
 function buildAttachmentUI() {
   const wrap = document.createElement('div');
   wrap.style.cssText = 'margin-top:6px;display:flex;flex-wrap:wrap;align-items:center;gap:6px;';
@@ -2823,6 +3182,7 @@ function addToolbarButtons() {
     container.appendChild(assistedToggle);
     container.appendChild(mkBtn('taBulkBtn',     '🏨 Bulk',     '#795548', () => showBulkConfirmModal()));
     container.appendChild(mkBtn('taPendingsBtn', '📋 Pendings', '#6c757d', () => showCheckPendingsModal()));
+    container.appendChild(mkBtn('taTriageBtn',   '⚡ Triage',   '#6f42c1', () => showBatchTriageModal()));
 
     clearInterval(check);
   }, 1000);

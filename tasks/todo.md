@@ -1,3 +1,92 @@
+# Batch Triage module (session 19)
+
+Walks every LOW-priority ticket in the agent's current Freshdesk filter view through a
+triage pipeline and reports what happened as a step-by-step table. **Dry-run by default** —
+the full pipeline runs for real but notes/tags/emails are simulated, so the table shows what
+*would* happen. Built for hot testing before trusting it with live mail.
+
+## Pipeline
+```
+fetch ticket → extract booking ref → resolve booking
+  → product bucket (deterministic, no LLM):
+      voucherUrl set, or car/transfer/ground/activity → voucher
+      hotel/getaway                                   → continue
+      anything else (flight, cruise, unknown)         → unsupported_product
+  → note already posted? (marker scan, Groq only on a miss) → post if not
+  → voucher: stop here
+  → Groq: booking_reconf vs customer
+      customer → Groq pending-state → report only, no writes
+      reconf   → search other live tickets by internal + supplier ref
+                   found        → collect links, stop
+                   check-in >3d → find hotel address → send → tag → Pending
+                   check-in ≤3d → tag call_hotel
+```
+23 terminal outcomes; every one is a distinct chip in the results table.
+
+## New files
+- `services/batchTriageService.js` — job runner, state machine, dry-run effects factory
+- `services/triageAiService.js` — thread serializer + `classifyThread` / `assessCustomerThread`
+- `services/noteDetectionService.js` — two-tier note detection
+
+## Modified
+- `services/freshdeskService.js` — `getTicketTags`, `addTags` (**merging**), `searchTicketsStrict` (**throws**);
+  `searchDuplicates` is now a swallow-wrapper over the strict one, contract unchanged
+- `services/aiService.js` — `groqJson()`: one JSON caller with a concurrency gate (`GROQ_MAX_CONCURRENCY`,
+  `GROQ_MIN_GAP_MS`) + the existing 429 backoff
+- `services/ticketActionService.js` — `buildBookingTags(booking, existingTags = [])`
+- `server.js` — `triageJob` + `/batch-triage/start|stop|status`, following the `pendingsJob` pattern
+- Userscript → **@version 6.64** — `api.triage.*`, `⚡ Triage` toolbar button, `showBatchTriageModal`,
+  `collectLowPriorityQueue` (paginates the filter view, narrows to `priority === 1`)
+
+## Design notes
+- **One code path.** `makeEffects(dryRun, step)` is the only place that branches on dry-run.
+  The state machine is written once, so a dry-run genuinely exercises the live path.
+  Reads stay live in dry-run — including `fetchAndCacheBooking`'s DB write, which is our own
+  booking cache, not a customer-visible mutation.
+- **Hotel email sends BEFORE tagging.** Tagging first would let a failed send be recorded as
+  done and never retried — a silent gap on a prepaid booking. This ordering trades that for a
+  possible duplicate email, which is at least visible in the FD thread.
+- **`hotel_emailed` tag** makes the email branch idempotent across re-runs.
+- **Session expiry aborts the whole job** rather than degrading to "no related tickets found",
+  which would otherwise push every ticket into the email branch.
+
+## Hazards fixed in existing code
+1. `tagTicket` replaces ALL tags, and `buildBookingTags`'s `existing` was always `[]` because
+   `parseDataRow` emits no `tags` field. Batch-tagging would have wiped every ticket's tags →
+   new merging `addTags`.
+2. `searchDuplicates` swallowed `FRESHDESK_SESSION_EXPIRED` into `[]` → new `searchTicketsStrict`.
+3. Spotlight search is fuzzy full-text → added an `exact` post-filter requiring the ref to
+   literally appear in the subject/description.
+4. Flights would have fallen through classification into the hotel-email branch → third
+   `unsupported_product` bucket.
+
+## Verification done
+Offline, no network (scripts in scratchpad, not committed):
+- Marker detection 6/6 — a real `buildNoteHtml` note scores 7 markers; a customer email, a
+  merge note, an outbound hotel email (which carries its own `Check-in:` labels) and a bare
+  booking-ID mention all correctly score 0.
+- Product bucketing 8/8 including `Hotel + voucherUrl → voucher` and `null → unsupported`.
+- State machine 14/14 branch outcomes, **with zero writes in dry-run on every branch**;
+  the same scenarios in live mode do write (`note,tags,email,update`).
+- Session-expiry abort: throws on ticket 1 of 3, no emails attempted.
+- `addTags` 4/4 — merges supplied tags, reads current tags when not supplied, no-ops when
+  nothing is new; `tagTicket` still replaces (unchanged).
+
+## Still to verify against the real system
+Dry-run on a live LOW queue and read the table by hand — the classification accuracy check is
+the whole point of the hot test and cannot be done offline. Then narrow to one ticket before
+flipping to LIVE.
+
+## Open questions
+- `call_hotel` currently tags only. The removed pre-refactor code also bumped priority to High —
+  reinstate?
+- Customer-thread verdicts are report-only. Should `pending_supplier`/`pending_customer`
+  actually set FD status to Pending?
+- Live actions require `high` classification confidence. `options.actOnMediumConfidence` exists
+  but is off; revisit once the dry-run accuracy is known.
+
+---
+
 # Mimicked composer + Translate near Send + RTF toolbar (session 17)
 
 ## Architectural shift

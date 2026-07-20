@@ -217,6 +217,40 @@ async function tagTicket(ticketId, tags, type) {
 }
 
 /**
+ * Reads a ticket's current tags. Used by addTags when the caller doesn't
+ * already have them in hand.
+ */
+async function getTicketTags(ticketId) {
+  const response = await fetch(`${getBaseUrl()}/tickets/${ticketId}`, {
+    headers: { 'Authorization': getAuthHeader() },
+  });
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Freshdesk getTicketTags failed ${response.status}: ${err.slice(0, 200)}`);
+  }
+  const ticket = await response.json();
+  return ticket.tags || [];
+}
+
+/**
+ * Additive counterpart to tagTicket — merges `add` into the ticket's existing
+ * tags instead of replacing them. Batch jobs must use this: tagTicket would
+ * wipe every tag an agent had already applied.
+ *
+ * `existing` is the caller's already-fetched tag list; pass it to save a GET.
+ * When empty/omitted the current tags are read back from Freshdesk.
+ */
+async function addTags(ticketId, existing, add, type) {
+  const base   = (existing && existing.length) ? existing : await getTicketTags(ticketId);
+  const merged = [...new Set([...base, ...add])];
+  if (merged.length === base.length && !type) return { tags: base }; // nothing new
+  const fields = { tags: merged };
+  if (type) fields.type = type;
+  await updateTicket(ticketId, fields);
+  return { tags: merged };
+}
+
+/**
  * Search for tickets containing a reference number.
  * Returns array of matching tickets (excluding the current ticket).
  */
@@ -291,23 +325,41 @@ async function uploadInlineAttachment(buffer, filename, mimeType) {
 }
 
 /**
+ * Search for tickets containing a reference, via Freshdesk's internal
+ * full-text (spotlight) search. THROWS on failure — callers that cannot
+ * tell "searched, found nothing" from "search broke" must use this one.
+ *
+ * `exact` post-filters the fuzzy spotlight results down to tickets where the
+ * reference literally appears in the subject or description.
+ */
+async function searchTicketsStrict(ref, { excludeTicketId, includeClosed = false, exact = false } = {}) {
+  if (!ref) return [];
+  const data = await fdGet(`/api/_/search/tickets?term=${encodeURIComponent(ref)}&context=spotlight`);
+  const results = data.results || data.tickets || data || [];
+  if (!Array.isArray(results)) return [];
+
+  const needle = String(ref).toLowerCase();
+  const filtered = results.filter(t => {
+    if (String(t.id) === String(excludeTicketId)) return false;
+    if (!includeClosed && t.status !== FD_STATUS.OPEN && t.status !== FD_STATUS.PENDING) return false;
+    if (exact) {
+      const haystack = [t.subject, t.description_text, t.description].filter(Boolean).join(' ').toLowerCase();
+      if (!haystack.includes(needle)) return false;
+    }
+    return true;
+  });
+  console.log(`[freshdesk] searchTicketsStrict ref="${ref}" → ${filtered.length} match(es)`);
+  return filtered;
+}
+
+/**
  * Search for duplicate tickets using Freshdesk internal full-text search.
  * Falls back to empty array on session errors so callers degrade gracefully.
  */
 async function searchDuplicates(ref, excludeTicketId, isEmail = false, includeClosed = false) {
   if (!ref) return [];
   try {
-    const data = await fdGet(`/api/_/search/tickets?term=${encodeURIComponent(ref)}&context=spotlight`);
-    const results = data.results || data.tickets || data || [];
-    const filtered = Array.isArray(results)
-      ? results.filter(t => {
-          if (String(t.id) === String(excludeTicketId)) return false;
-          if (includeClosed) return true;
-          return t.status === FD_STATUS.OPEN || t.status === FD_STATUS.PENDING;
-        })
-      : [];
-    console.log(`[freshdesk] searchDuplicates ref="${ref}" → ${filtered.length} match(es)`);
-    return filtered;
+    return await searchTicketsStrict(ref, { excludeTicketId, includeClosed });
   } catch (err) {
     if (err.message === 'FRESHDESK_SESSION_EXPIRED') {
       console.warn('[freshdesk] session expired — duplicate check skipped');
@@ -383,4 +435,4 @@ async function sendEmailWithAttachments(ticketId, toEmail, bodyHtml, files = [])
   return response.json();
 }
 
-module.exports = { getAuthHeader, fdGet, fdPost, addNote, addNoteWithImages, uploadInlineAttachment, sendEmail, sendEmailWithAttachments, setTicketPending, updateTicket, tagTicket, setTicketSubject, searchDuplicates, getTicketContext };
+module.exports = { getAuthHeader, fdGet, fdPost, addNote, addNoteWithImages, uploadInlineAttachment, sendEmail, sendEmailWithAttachments, setTicketPending, updateTicket, tagTicket, getTicketTags, addTags, setTicketSubject, searchDuplicates, searchTicketsStrict, getTicketContext };

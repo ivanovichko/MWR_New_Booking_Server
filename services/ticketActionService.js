@@ -10,9 +10,12 @@ const { buildHotelEmailHtml } = require('./hotelEmailBuilder');
  * Builds the standard tag set for a booking: month tag (e.g. "May 14"),
  * destination country, plus any existing tags. These date tags are what the
  * Pendings job later reads to decide when to reopen a ticket.
+ *
+ * `existingTags` is the ticket's current tag list. It has to be passed in —
+ * parseDataRow emits no `tags` field, so `booking.tags` is always undefined.
  */
-function buildBookingTags(booking) {
-  const existing = booking.tags || [];
+function buildBookingTags(booking, existingTags = []) {
+  const existing = booking.tags || existingTags || [];
   const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   let monthTag = null;
   if (booking.checkIn) {

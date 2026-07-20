@@ -6,6 +6,86 @@ const fetch = require('node-fetch');
 const GROQ_API_URL = process.env.GROQ_API_URL || 'https://api.groq.com/openai/v1/chat/completions';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// ─── Shared Groq JSON caller ─────────────────────────────────────────────────
+// Batch jobs fire one LLM call per ticket, so calls are gated to keep the whole
+// process under Groq's rate limit rather than relying on 429 backoff alone.
+const MAX_CONCURRENT = Number(process.env.GROQ_MAX_CONCURRENCY || 2);
+const MIN_GAP_MS     = Number(process.env.GROQ_MIN_GAP_MS || 350);
+
+let _inFlight = 0;
+let _lastCallAt = 0;
+const _waiting = [];
+
+async function acquireSlot() {
+  if (_inFlight >= MAX_CONCURRENT) {
+    await new Promise(resolve => _waiting.push(resolve));
+  }
+  _inFlight++;
+  const gap = MIN_GAP_MS - (Date.now() - _lastCallAt);
+  if (gap > 0) await sleep(gap);
+  _lastCallAt = Date.now();
+}
+
+function releaseSlot() {
+  _inFlight--;
+  const next = _waiting.shift();
+  if (next) next();
+}
+
+/**
+ * Calls Groq expecting a JSON object back, and parses it. Handles the 429
+ * backoff and the "model wrapped the JSON in prose" case that findHotelEmail
+ * already deals with. Returns null when the response can't be parsed.
+ */
+async function groqJson({ model, prompt, maxTokens = 300, temperature = 0, scope = 'groq' }) {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error('GROQ_API_KEY not set');
+
+  await acquireSlot();
+  try {
+    const MAX_RETRIES = 3;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      const response = await fetch(GROQ_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: 'user', content: prompt }],
+          temperature,
+          max_tokens: maxTokens,
+        }),
+      });
+
+      if (response.status === 429) {
+        if (attempt === MAX_RETRIES) throw new Error('Groq rate limit hit — try again in a minute.');
+        await sleep(attempt * 10000);
+        continue;
+      }
+
+      if (!response.ok) {
+        const err = await response.text();
+        throw new Error(`Groq API error ${response.status}: ${err.slice(0, 200)}`);
+      }
+
+      const data    = await response.json();
+      const rawText = data?.choices?.[0]?.message?.content || '';
+      const match   = rawText.match(/\{[\s\S]*\}/);
+      const cleaned = match ? match[0] : rawText.replace(/```json|```/g, '').trim();
+      try {
+        return JSON.parse(cleaned);
+      } catch {
+        console.warn(`[${scope}] Groq returned non-JSON: ${rawText.slice(0, 200)}`);
+        return null;
+      }
+    }
+  } finally {
+    releaseSlot();
+  }
+}
+
 /**
  * Builds a context string from booking + user + supplier data.
  */
@@ -183,4 +263,4 @@ Return ONLY a JSON object, no markdown:
   }
 }
 
-module.exports = { aiAssist, findHotelEmail };
+module.exports = { aiAssist, findHotelEmail, groqJson };
