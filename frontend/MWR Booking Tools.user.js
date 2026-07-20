@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.64
+// @version      6.65
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -2693,26 +2693,40 @@ function showBatchTriageModal() {
   const ctrl = document.createElement('div');
   ctrl.style.cssText = `padding:12px 16px;border-bottom:1px solid ${THEME.border};display:flex;align-items:center;gap:10px;flex-wrap:wrap;flex-shrink:0;`;
 
+  // Mode is picked from two explicit choices rather than one toggle: a toggle
+  // whose label shows the CURRENT state reads like a command, and clicking it
+  // to "run a dry-run" would actually arm live mode.
   let dryRun = true;
-  const modeBtn = document.createElement('button');
-  const styleModeBtn = () => {
-    modeBtn.textContent = dryRun ? '🧪 Dry-run' : '🔴 LIVE';
-    modeBtn.title = dryRun
-      ? 'Everything is analysed for real, but notes/tags/emails are only simulated. Click to go live.'
-      : 'Notes will be posted, tags written and hotel emails SENT. Click to return to dry-run.';
-    modeBtn.style.cssText = dryRun
-      ? 'background:#fff;color:#b8860b;border:1px solid #b8860b;padding:5px 12px;border-radius:14px;cursor:pointer;font-size:12px;font-weight:600;'
-      : 'background:#dc3545;color:#fff;border:none;padding:5px 12px;border-radius:14px;cursor:pointer;font-size:12px;font-weight:700;';
+  const modeWrap = document.createElement('div');
+  modeWrap.style.cssText = 'display:flex;border:1px solid #ddd;border-radius:6px;overflow:hidden;';
+
+  const dryBtn  = document.createElement('button');
+  const liveBtn = document.createElement('button');
+  dryBtn.textContent  = '🧪 Dry-run';
+  liveBtn.textContent = '🔴 Live';
+  dryBtn.title  = 'Analyse everything for real, but only simulate notes, tags and emails. Nothing is modified.';
+  liveBtn.title = 'Really post notes, write tags and SEND hotel emails.';
+
+  const styleModeBtns = () => {
+    dryBtn.style.cssText = dryRun
+      ? 'background:#b8860b;color:#fff;border:none;padding:5px 14px;cursor:pointer;font-size:12px;font-weight:700;'
+      : 'background:#fff;color:#999;border:none;padding:5px 14px;cursor:pointer;font-size:12px;font-weight:500;';
+    liveBtn.style.cssText = !dryRun
+      ? 'background:#dc3545;color:#fff;border:none;padding:5px 14px;cursor:pointer;font-size:12px;font-weight:700;'
+      : 'background:#fff;color:#999;border:none;padding:5px 14px;cursor:pointer;font-size:12px;font-weight:500;';
+    startBtn.textContent = dryRun ? '▶ Start dry-run' : '▶ Start LIVE run';
+    startBtn.style.background = dryRun ? '#6f42c1' : '#dc3545';
   };
-  modeBtn.onclick = () => {
-    if (dryRun) {
-      const n = selected().length;
-      if (!confirm(`Switch to LIVE mode?\n\n${n} ticket(s) will be really modified: booking notes posted, tags written, and hotel emails SENT to real properties.\n\nThis cannot be undone.`)) return;
-    }
-    dryRun = !dryRun;
-    styleModeBtn();
+
+  dryBtn.onclick = () => { dryRun = true; styleModeBtns(); };
+  liveBtn.onclick = () => {
+    if (!dryRun) return;
+    const n = selected().length;
+    if (!confirm(`Arm LIVE mode?\n\nThis does NOT start the run — it only switches the mode.\n\nWhen you then press Start, ${n} ticket(s) will be really modified: booking notes posted, tags written, and hotel emails SENT to real properties. This cannot be undone.`)) return;
+    dryRun = false;
+    styleModeBtns();
   };
-  styleModeBtn();
+  modeWrap.append(dryBtn, liveBtn);
 
   const startBtn = document.createElement('button');
   startBtn.textContent = '▶ Start';
@@ -2727,8 +2741,9 @@ function showBatchTriageModal() {
   queueInfo.style.cssText = 'font-size:12px;color:#666;margin-left:auto;';
   queueInfo.textContent = 'Loading queue…';
 
-  ctrl.append(modeBtn, startBtn, stopBtn, queueInfo);
+  ctrl.append(modeWrap, startBtn, stopBtn, queueInfo);
   modal.insertBefore(ctrl, body);
+  styleModeBtns(); // after startBtn exists — it styles that too
 
   // ── Queue preview (checkbox list) ──
   const preview = document.createElement('details');
@@ -2812,7 +2827,7 @@ function showBatchTriageModal() {
     if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
     startBtn.disabled = false; startBtn.style.opacity = '1';
     stopBtn.disabled = true; stopBtn.style.opacity = '0.4';
-    modeBtn.disabled = false; modeBtn.style.pointerEvents = 'auto';
+    modeWrap.style.pointerEvents = 'auto'; modeWrap.style.opacity = '1';
   };
 
   let lastLogLen = 0;
@@ -2852,7 +2867,7 @@ function showBatchTriageModal() {
     if (!tickets.length) { showToast('No tickets selected.', 'warning'); return; }
     startBtn.disabled = true; startBtn.style.opacity = '0.4';
     stopBtn.disabled = false; stopBtn.style.opacity = '1';
-    modeBtn.style.pointerEvents = 'none';
+    modeWrap.style.pointerEvents = 'none'; modeWrap.style.opacity = '0.5';
     logBox.innerHTML = ''; lastLogLen = 0;
 
     const { ok, data } = await api.triage.start({
