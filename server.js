@@ -18,7 +18,7 @@ const { buildHotelEmailHtml }            = require('./services/hotelEmailBuilder
 const { confirmTicket, lookupHotelEmail, sendHotelEmailConfirmed } = require('./services/ticketActionService');
 const { runBatchTriage, MAX_BATCH } = require('./services/batchTriageService');
 const { confirmTicketZoho } = require('./services/zohoTicketActionService');
-const { exchangeGrantToken, listOrganizations } = require('./services/zohoDeskService');
+const { exchangeGrantToken, listOrganizations, describeConfig } = require('./services/zohoDeskService');
 const { FD_STATUS } = require('./config');
 
 const app = express();
@@ -90,6 +90,14 @@ app.post('/zoho/oauth-session', safeRoute(async (req, res) => {
   if (!grantCode) throw new HttpError('grantCode is required');
   const result = await exchangeGrantToken(grantCode);
   res.json(result);
+}));
+
+// ─── Which Zoho config is this server actually running with? ─────────────────
+// Diagnostic only. Returns no secrets — just which vars are set and which data
+// centre the exchange will hit, so an invalid_client can be pinned down.
+app.get('/zoho/config', safeRoute(async (req, res) => {
+  requireZohoSecret(req);
+  res.json({ success: true, config: describeConfig() });
 }));
 
 // ─── Zoho Desk health check + org ID discovery ───────────────────────────────

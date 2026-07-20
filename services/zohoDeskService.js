@@ -86,6 +86,24 @@ async function authHeaders() {
 }
 
 /**
+ * Reports which Zoho config the server is actually running with, so a failed
+ * exchange can be diagnosed without guessing at Render's env. Secrets are
+ * never returned — only whether they're set, plus a short non-reversible
+ * fingerprint of the client ID to tell two credentials apart.
+ */
+function describeConfig() {
+  const clientId = process.env.ZOHO_CLIENT_ID || '';
+  return {
+    accountsUrl: ZOHO_ACCOUNTS_URL,
+    apiDomain: ZOHO_API_DOMAIN,
+    orgIdSet: Boolean(process.env.ZOHO_ORG_ID),
+    clientIdSet: Boolean(clientId),
+    clientIdTail: clientId ? `…${clientId.slice(-6)}` : null,
+    clientSecretSet: Boolean(process.env.ZOHO_CLIENT_SECRET),
+  };
+}
+
+/**
  * Lists the orgs this token can reach. Deliberately uses bearerHeaders rather
  * than authHeaders — this is the one Desk endpoint that must work *before*
  * ZOHO_ORG_ID is known, so it can't depend on getOrgId(). Doubles as the
@@ -144,4 +162,4 @@ async function tagTicket(ticketId, tags) {
   return response.json();
 }
 
-module.exports = { exchangeGrantToken, getAccessToken, listOrganizations, postComment, tagTicket };
+module.exports = { exchangeGrantToken, getAccessToken, describeConfig, listOrganizations, postComment, tagTicket };
