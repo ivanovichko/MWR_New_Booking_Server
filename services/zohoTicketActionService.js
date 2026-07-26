@@ -2,12 +2,13 @@ const { getCachedBooking } = require('./dbService');
 const { lookupSupplier } = require('./supplierService');
 const { buildNoteHtml } = require('./noteBuilder');
 const { parseBookingHtml } = require('./parserService');
-const { postComment, tagTicket } = require('./zohoDeskService');
-const { buildBookingTags } = require('./ticketActionService');
+const { postComment } = require('./zohoDeskService');
 
 /**
- * Zoho counterpart to ticketActionService.confirmTicket — same booking-note
- * + tagging logic, posting through zohoDeskService instead of freshdeskService.
+ * Zoho counterpart to ticketActionService.confirmTicket — posts the booking
+ * note through zohoDeskService instead of freshdeskService. Unlike the
+ * Freshdesk path it does NOT tag: Zoho Desk tags aren't part of this workflow,
+ * so the date/country tags the Freshdesk Pendings job relies on are dropped.
  * Kept as a separate function rather than parameterizing confirmTicket so the
  * production Freshdesk path carries no dependency on this beta code.
  */
@@ -24,10 +25,8 @@ async function confirmTicketZoho(ticketId, bookingId, prebuiltNoteHtml = null) {
   const noteHtml = prebuiltNoteHtml || buildNoteHtml(booking, cleanHtml, details, user, supplier);
 
   await postComment(ticketId, noteHtml, false);
-  const tags = buildBookingTags(booking);
-  await tagTicket(ticketId, tags);
 
-  return { notePosted: true, tagged: tags };
+  return { notePosted: true };
 }
 
 module.exports = { confirmTicketZoho };

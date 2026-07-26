@@ -1,3 +1,254 @@
+# Zoho: merge-field substitution vindicated + secretless widget (session 21)
+
+The "Deluge function" dead-end from session 20 is resolved — in the opposite
+direction than recorded. **Zoho DOES substitute `{{...}}` merge fields**; the
+2026-07-20 abandonment proof was invalid.
+
+## Root cause of the false negative
+
+1. The old widget percent-encoded the placeholders while assembling the Sigma
+   Execution URL (`%7B%7BsigmaInstallId%7D%7D`). Substitution is a literal
+   text-match performed **server-side in the ZOHODESK.request proxy** — an
+   encoded token matches nothing, so the raw placeholder went out as the API
+   key and Sigma rejected every call before the function body ran.
+2. The "proof" was a browser console log — but the browser is *supposed* to
+   see raw placeholders; substitution happens after the browser, in the proxy.
+   And plain `fetch` bypasses the proxy entirely and never substitutes.
+
+## Live probes (MWR_TEST widget console → Render /zoho/extract)
+
+- `Bearer {{backend_shared_secret}}` raw in headers → passed
+  `requireZohoSecret` (400 on missing body = auth OK); wrong-bearer control
+  got 401. **Substitution confirmed.**
+- Final probe → **200** `{success, bookingId, summary}` end-to-end via proxy.
+- Probe traps found: no top-level `contentType` param exists (Content-Type
+  must go inside `headers`, else `req.body` arrives as `{}`); the promise
+  RESOLVES even on 4xx/5xx with a JSON-string envelope
+  `{responseHeaders, response, statusCode}`; Render hibernation returns an
+  HTML wake page mid-probe.
+
+## What changed
+
+- `widget.js`: `callBackend()` now goes through `ZOHODESK.request` with the
+  literal placeholder in the Authorization header; `getSharedSecret()` + the
+  `extension.config` read deleted. **The org-level secret no longer reaches
+  the browser** — the beta devtools-exposure trade-off is closed.
+- No manifest change needed (Render host was already in `whiteListedDomains`).
+- `zet validate` clean; `zet pack` → `dist/TA_Zoho_beta.zip` (8 files).
+- Deluge/`functions/*.dg` stay dead — not needed for any of this.
+
+## Booking table parity (session 21, cont.)
+
+- `widget.js` `renderBooking` rewritten as a **row-for-row mirror** of the
+  Freshdesk userscript's `renderBookingPanel`: same rows (Booking ID, Supplier
+  ID, Type, Supplier, Hotel/Airline by product type, Guest, Check-In/Out, Days
+  until, Room Type, Bed Types, Arrival time, Requests, AI Reconfirm), same
+  order + conditional logic, same inline table styling (16px, th #888 / 35% /
+  nowrap, td #333). `cleanSupplierName`, `daysUntil`, and
+  `renderAiReconfirmBadge` ported verbatim. Both panels read from the same
+  `/guided-prewarm/booking/:id` shape, so no new fields needed.
+- Buttons now **Post Note · View Note · Change Booking** (Hotel Email dropped
+  for now). Change Booking toggles an inline input (pre-filled with the current
+  ID) → `fetchBooking(id)` → re-render. `fetchBooking` factored out and shared
+  with the initial load.
+- Fixed the stale `widget.html` comment that still claimed Zoho never
+  substitutes merge fields.
+- `node --check` + `zet validate` clean; repacked `dist/TA_Zoho_beta.zip`.
+
+## Member section under booking (session 21, cont.)
+
+- Ported the Freshdesk `appendCustomerSection` into the widget as
+  `appendMemberSection`, rendered directly under the booking table: **Profile**
+  tab (Login as User / Open Full Profile links + Post Member Note + member
+  details table), **Reservations** tab (lazy-loaded list; row click loads that
+  booking into the panel), and **Find member** search (Select overrides the
+  displayed member for the session).
+- Refactored render flow: `renderBooking` is now a thin setter →
+  `renderPanel()` paints booking-or-no-booking + always the member section.
+  Every re-render path funnels through `renderPanel`. No-booking tickets now
+  still show Find member (was a dead end before).
+- **Request-helper generalized:** `callBackend` → thin wrapper over a new
+  `proxyRequest(path, {method, body, withSecret})`. All backend traffic now
+  goes through Zoho's request proxy, including the unauthenticated read routes
+  `/find-user` and `/user/:id/reservations` — they carry no CORS headers for
+  the sandbox origin, but the proxy is server-side so CORS never applies (host
+  already in `whiteListedDomains`). Reservation-row booking loads still use the
+  plain-fetch `fetchBooking` (that route has CORS).
+- Backend: added `POST /zoho/member-note` (behind `requireZohoSecret`, CORS via
+  the existing `/zoho` mount) — posts arbitrary prebuilt HTML via `postComment`
+  with no booking/tagging, for the member note. **Needs a Render redeploy.**
+- `node --check` (both files) + `zet validate` clean; repacked.
+- Caveat: the member-note write is still cross-DC blocked like Post Note
+  (backend on prod `.com`, test org on `.eu`) — reads (reservations, find) work
+  now; the write won't land until the backend is repointed.
+
+## View Note → native Zoho modal (session 21, cont.)
+
+- **Original bug:** View Note threw `Cannot read properties of undefined
+  (reading 'indexOf')`. Root cause was the **argument shape**, not a missing
+  API: `App.instance.modal()` IS real but takes a single options **object**
+  `{ url, title }`. The earlier call passed `(url, title)` positionally, so the
+  SDK read `.url` off a string / undefined → the indexOf throw.
+- First fix was an in-widget overlay, but it's trapped in the narrow right-panel
+  iframe (a sandboxed cross-origin iframe can't paint over the parent page), so
+  it was cramped. **Replaced with the native modal**, which Zoho renders
+  centered over the whole Desk page.
+- `onViewNote` now calls `App.instance.modal({ url:
+  '/app/modal-note.html?bookingId=' + id, title: 'Booking Note' })`. Restored
+  the `App` handle from onload.
+- Recreated `app/modal-note.html` as a **self-fetching page**: reads
+  `?bookingId`, re-fetches `/guided-prewarm/booking/:id` (CORS-enabled, plain
+  fetch), renders `noteHtml`. Only the id travels in the URL — no note-size
+  limit. Best-effort `ZOHODESK.invoke('RESIZE', {width:'70%',height:'80%'})` to
+  enlarge; rendering never depends on the SDK.
+- `node --check` + `zet validate` clean; repacked (8 files again). **No backend
+  redeploy needed** — the booking route already exists.
+- **First-side-load risks to watch:** (1) whether the modal page needs a
+  `plugin-manifest.json` declaration (docs unclear — went without, matching the
+  documented example); (2) whether RESIZE fires / the default modal size.
+
+### Modal 400 — Zoho double-'?' (fixed)
+
+- **Symptom:** modal opened but `modal-note.html` request 400'd. URL was
+  `.../modal-note.html?bookingId=X?serviceOrigin=...` — **two `?`**. Zoho
+  appends its own params (serviceOrigin, frameorigin, _iam_*) to the modal URL
+  with a literal `?`, assuming the passed URL has **no query of its own**. Our
+  `?bookingId=` collided → malformed URL → 400.
+- **Fix:** pass the id in the **hash** (`#bookingId=`), not the query. Zoho's
+  `?`-append then lands inside the fragment, so the file request stays
+  query-clean. `modal-note.html` parses the id via
+  `(location.hash + '&' + location.search).match(/bookingId=([^?&#]+)/)` — robust
+  to Zoho's trailing params landing in either hash or search.
+- Residual (unlikely) risk: if the appfiles server *requires* serviceOrigin as
+  a real query param to serve the file, the hash puts it in the fragment and it
+  could still 400. If so, fall back to passing no data in the URL (ZOHODESK
+  storage, or re-extract in the modal). Judged unlikely — the file path is
+  signed/versioned, so the 400 was the malformed double-`?`, not a missing param.
+
+## Next
+
+- [x] Re-publish + reinstall the new zip on MWR_TEST — **verified live
+      2026-07-22**: extract renders through the proxied secretless path.
+- Backlog §4b is now cleaner: `GET /zoho/booking/:id` behind
+  `requireZohoSecret`, called via `ZOHODESK.request` with the placeholder;
+  then drop the `/guided-prewarm` CORS mount.
+- Post Note still blocked cross-DC (backend on prod `.com`, test org on `.eu`).
+
+---
+
+# Zoho Desk extension setup (session 20)
+
+Getting `TA_Zoho_beta/` from hand-authored prototype to a package that
+`zet validate` accepts, so the only remaining work is console-side.
+
+## Backend state (done this session)
+
+- OAuth self-client grant exchanged — durable `refresh_token` in `zoho_sessions`.
+- `ZOHO_CLIENT_ID` / `ZOHO_CLIENT_SECRET` / `ZOHO_BACKEND_SHARED_SECRET` live on Render.
+- Org confirmed via new `GET /zoho/orgs`: **`914515468` ("MWR LIFE")**, on the
+  **`.com` data center** — no `ZOHO_ACCOUNTS_URL` / `ZOHO_API_DOMAIN` overrides needed.
+- `ZOHO_ORG_ID` set on Render.
+
+## Key finding
+
+`zet validate` runs **offline, no login**, and the authoritative reference
+manifest ships inside the installed CLI at
+`$(npm root -g)/zoho-extension-toolkit/apptemplate/desk/plugin-manifest.json`.
+That retires the README's "manifest shape not confidently verified" caveat.
+(`zet init`'s `--zoho-service` flag is broken for every casing of `desk`, but
+it's moot — the template is readable directly.)
+
+## Checklist
+
+- [x] Merge the four missing manifest keys (`type`, `zohoAuthorisation`,
+      `connectors`, `moduleSupport`); drop the non-template `secret` key
+- [x] Copy real `icon.png` / `logo.png` from the template into `app/img/`
+- [x] `zet validate` until clean
+- [x] `.gitignore` the `zet` crash artifacts (`ZET_INIT/`, `ZET-debug.log`)
+- [x] Refresh `TA_Zoho_beta/README.md` with what's now confirmed
+
+## Deferred deliberately
+
+Not restructuring around the suspected `secure: true` config problem
+(`plugin-manifest.json` marks `backend_shared_secret` secure, but `widget.js`
+reads it client-side via `ZOHODESK.get('extension.config')`). If Zoho won't
+expose it to client JS, Post Note 401s and the call must move into the Deluge
+function. Can't be tested offline — confirm on first side-load rather than
+rebuilding on a suspicion.
+
+## Still needs Zoho console access
+
+- Create the `analyzeTicket` function, verify the guessed `Zia[... parameters:]`
+  provider key, paste its Execution URL into `widget.js:12`
+- Side-load and test Post Note against a sandbox ticket
+
+## Review
+
+**What landed**
+
+`plugin-manifest.json` gained `type: "personal"`, `zohoAuthorisation: {}`,
+`connectors: []`, `moduleSupport: false`; the non-template `secret` key was
+dropped. Added `resources.json` and `app/translations/en.json` (empty `{}`
+stubs — the `desk` template omits translations, but validation requires it
+when `locale` is set). Real 512×512 `icon.png` / `logo.png` copied from the
+template into the previously-empty `app/img/`.
+
+**Verification**
+
+- `zet validate` → `Validation Rules passed successfully.`
+- `zet pack` → `dist/TA_Zoho_beta.zip`, 8 files, 24.5 KB. Contents confirmed
+  by `unzip -l`: manifest, resources, both images, all three app files,
+  translations. `functions/analyzeTicket.dg` correctly absent (console-side).
+- Backend `GET /zoho/orgs` returned `{"success":true,"orgs":[{"id":914515468,
+  "name":"MWR LIFE"}]}` — first proof a stored session reaches Desk.
+
+**Iteration path** (worth recording — each `zet validate` run surfaces only
+the first error class): missing `connectors` → missing translations +
+`resources.json` → clean.
+
+**Not done / next**
+
+Console-side only: create `analyzeTicket`, verify the guessed Zia provider
+key, paste the Execution URL into `widget.js:12`, install the zip, enter
+`backend_shared_secret`. Then the `secure: true` question resolves itself on
+the first Post Note.
+
+## Install attempt — Developer Mode failed (unresolved)
+
+Desk Developer Mode enabled, `zet run` serving `https://127.0.0.1:5000`, cert
+trusted in Chrome's nssdb. Zoho fetches `plugin-manifest.json` +
+`resources.json` (200) then **never requests `/app/widget.html`** — rejects at
+parse with "Unable to load your extension. Please check your plugin-manifest
+or Resources.json."
+
+Ruled out by direct test, each confirmed via the dev server's request log
+(byte sizes track each edit, so we know Zoho re-fetched every version):
+
+1. `config` block → served `"config": []`, same error
+2. widget `location` → `desk.ticket.detail.rightpanel` is in the CLI's own
+   valid-location list
+3. `resources.json` → `{}` is what the template ships; no template has content
+4. extension name → `server/index.js` injects the *directory* name
+   (`TA_Zoho_beta`); patched to serve the registered `MWR_BOOKING_MODULE`,
+   same error
+
+**Zoho's pristine template manifest fails identically**, which is what proves
+this isn't manifest content. Cause still unknown.
+
+`zet validate` passing means less than it appears — it's a local lint that
+never contacts Zoho. A manifest can pass it and still be rejected on load.
+
+**Next route:** publish-as-private (Sigma Drafts → Publish → Visibility
+Private → Installation URL → select portal/departments/profiles → Install),
+using the already-validated zip. Slower iteration, but doesn't depend on the
+local-server handshake.
+
+Dev harness now in `TA_Zoho_beta/` (gitignored): `package.json`,
+`server/index.js`, self-signed certs, `node_modules`. `zet pack` excludes all
+of it — zip stays at 8 files.
+
+---
+
 # Batch Triage module (session 19)
 
 Walks every LOW-priority ticket in the agent's current Freshdesk filter view through a

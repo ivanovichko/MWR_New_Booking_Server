@@ -144,22 +144,4 @@ async function postComment(ticketId, html, isPublic = false) {
   return response.json();
 }
 
-/**
- * Replaces a ticket's tags. Mirrors freshdeskService.tagTicket's signature
- * (minus the Freshdesk-only `type` field, which Zoho Desk doesn't have).
- */
-async function tagTicket(ticketId, tags) {
-  const headers = await authHeaders();
-  const response = await fetch(`${ZOHO_API_DOMAIN}/api/v1/tickets/${ticketId}`, {
-    method: 'PATCH',
-    headers: { ...headers, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ tags }),
-  });
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Zoho tagTicket failed ${response.status}: ${err}`);
-  }
-  return response.json();
-}
-
-module.exports = { exchangeGrantToken, getAccessToken, describeConfig, listOrganizations, postComment, tagTicket };
+module.exports = { exchangeGrantToken, getAccessToken, describeConfig, listOrganizations, postComment };

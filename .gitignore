@@ -4,6 +4,10 @@ node_modules/
 # Zoho Desk migration prototype - not ready for main repo history
 TA_Zoho_beta/
 
+# zet CLI artifacts - `zet init` crashes without a TTY and drops these
+ZET_INIT/
+ZET-debug.log
+
 # Tampermonkey @require cache files generated next to the userscript
 frontend/*-marked.min.js
 frontend/*.requires.json

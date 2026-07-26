@@ -18,7 +18,7 @@ const { buildHotelEmailHtml }            = require('./services/hotelEmailBuilder
 const { confirmTicket, lookupHotelEmail, sendHotelEmailConfirmed } = require('./services/ticketActionService');
 const { runBatchTriage, MAX_BATCH } = require('./services/batchTriageService');
 const { confirmTicketZoho } = require('./services/zohoTicketActionService');
-const { exchangeGrantToken, listOrganizations, describeConfig } = require('./services/zohoDeskService');
+const { exchangeGrantToken, listOrganizations, describeConfig, postComment } = require('./services/zohoDeskService');
 const { FD_STATUS } = require('./config');
 
 const app = express();
@@ -156,6 +156,19 @@ app.post('/zoho/post-note', safeRoute(async (req, res) => {
   const results = await confirmTicketZoho(ticketId, bookingId, noteHtml || null);
   console.log(`[zoho] posted note to ticket ${ticketId}`);
   res.json({ success: true, results });
+}));
+
+// ─── Post an arbitrary member/details note to a Zoho Desk ticket ─────────────
+// The widget's Member section builds member-detail HTML that has no booking
+// behind it, so this posts the prebuilt HTML directly via postComment — no
+// cached booking, no tagging (unlike /zoho/post-note → confirmTicketZoho).
+app.post('/zoho/member-note', safeRoute(async (req, res) => {
+  requireZohoSecret(req);
+  const { ticketId, noteHtml } = req.body;
+  if (!ticketId || !noteHtml) throw new HttpError('ticketId and noteHtml are required');
+  await postComment(ticketId, noteHtml, false);
+  console.log(`[zoho] posted member note to ticket ${ticketId}`);
+  res.json({ success: true });
 }));
 
 

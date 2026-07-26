@@ -64,6 +64,23 @@ Net: userscript 5300 → 2720 lines; `services/` lost 2 files.
 - [ ] Per-conversation 🌐 Google translate — auto-detect source language and
       show it inline instead of always assuming English target.
 
+## 4b. Zoho port — security follow-up
+
+- [ ] `/guided-prewarm/booking/:id` has **no auth** and is now browser-reachable
+      cross-origin from Zoho widget sandbox origins (`*.zappsusercontent.eu|com`)
+      after the CORS middleware landed. Fix: add `GET /zoho/booking/:id` behind
+      `requireZohoSecret`, point `TA_Zoho_beta/app/widget.js` at it, then drop
+      the `/guided-prewarm` CORS mount from `server.js`. Deliberately deferred
+      to unblock end-to-end testing — don't let it stick.
+      *(Session 21 made this cleaner: call it via `ZOHODESK.request` with the
+      `{{backend_shared_secret}}` placeholder — proxy substitution is confirmed
+      working, so no secret in the browser. The widget's other calls already
+      moved to this pattern; once this lands, the plain-fetch path and the
+      whole `/guided-prewarm` CORS exposure can go.)*
+- [x] ~~Browser-readable org-level secret (devtools exposure)~~ — closed in
+      session 21: the widget no longer reads `extension.config`; the secret is
+      injected server-side by Zoho's request proxy.
+
 ## 5. Loose ends to verify
 
 - [ ] Login as User URL — `console.log` added (6.48). Confirm the
