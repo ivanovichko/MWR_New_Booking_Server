@@ -58,12 +58,20 @@ Return ONLY a JSON object, no markdown:
       'Authorization': `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: 'llama-3.3-70b-versatile',
+      model: 'openai/gpt-oss-20b',
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.1,
-      max_tokens: 100,
+      reasoning_effort: 'low',
+      // gpt-oss spends completion tokens on reasoning before it emits any
+      // content, so the budget has to cover both — the JSON itself is ~40.
+      max_tokens: 512,
     }),
   });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Groq API error ${res.status}: ${err.slice(0, 200)}`);
+  }
 
   const data = await res.json();
   const raw  = data?.choices?.[0]?.message?.content || '{}';

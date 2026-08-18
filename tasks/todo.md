@@ -1,3 +1,62 @@
+# Groq model deprecation fix — llama-3.3-70b-versatile shut down 2026-08-16
+
+Every backend LLM call except `groq/compound` was pointed at a retired model.
+
+- `llama-3.3-70b-versatile` — deprecation announced 2026-06-17, **shut down
+  2026-08-16**. Groq's recommended replacements: `openai/gpt-oss-120b` or
+  `qwen/qwen3.6-27b`.
+- `compound-beta-mini` — delisted; the compound systems are now `groq/compound`
+  and `groq/compound-mini`.
+- `groq/compound` (aiService.js:169) is still current — untouched.
+
+Chose `openai/gpt-oss-20b` for the extraction/triage calls: $0.075/$0.30 per M
+and ~1000 tok/s, which matters because Assisted mode prewarms 3 tickets in
+parallel on every ticket navigation. These are simple structured-extraction
+prompts, well inside its range.
+
+**gpt-oss is a reasoning model.** Reasoning text lands in `message.reasoning`,
+not `message.content`, so the existing content + regex-JSON parsing is
+unaffected — but reasoning tokens spend the completion budget, so the old
+`max_tokens` caps (100/120/150/250) would have returned empty content. Every
+budget was raised and `reasoning_effort: 'low'` set.
+
+## Tasks
+
+- [x] `services/prewarmService.js:61` — model → `openai/gpt-oss-20b`,
+      `reasoning_effort: 'low'`, `max_tokens` 100 → 512
+- [x] `services/prewarmService.js` — add the missing `res.ok` check in
+      `extractBookingId`. Without it a decommissioned-model 400 was parsed as
+      JSON, failed, and fell through to `{ bookingId: null }` — so prewarm
+      reported "no booking found" instead of erroring. This is why the outage
+      was silent.
+- [x] `services/aiService.js` — `groqJson` takes `reasoningEffort` (default
+      `'low'`) and sends it; both triage services inherit it
+- [x] `services/aiService.js:233` — `compound-beta-mini` → `groq/compound-mini`
+      (+ stale docstring on line 198)
+- [x] `services/noteDetectionService.js:3` / `services/triageAiService.js:3` —
+      `TRIAGE_MODEL` default → `openai/gpt-oss-20b`; `process.env.TRIAGE_MODEL`
+      override kept
+- [x] Triage token budgets: noteDetection 120 → 512; triageAi 150 → 512, 250 → 768
+- [ ] Live smoke test (needs `GROQ_API_KEY`, not present in this checkout)
+- [ ] Redeploy Render — no env-var change needed
+
+## Review
+
+Static verification done: no `llama-3\*` or `compound-beta*` strings remain
+anywhere outside `node_modules`; all four patched services pass `node --check`
+and `require()` clean.
+
+Not yet verified live — this checkout has no `.env` / `GROQ_API_KEY`. The smoke
+test written for it hits `/openai/v1/models` (asserting the new IDs are present
+and the old ones gone) and then exercises all five changed call paths, asserting
+a *parsed* result, which is what catches a too-small reasoning budget:
+
+    GROQ_API_KEY=gsk_… node <scratchpad>/groq-smoke.js
+
+Residual risk if that isn't run: the 512/768-token budgets are an estimate. If
+`reasoning_effort: 'low'` still overruns them, the symptom is `groqJson`
+returning `null` and the `[triage] Groq returned non-JSON` warning in the logs.
+
 # Zoho: merge-field substitution vindicated + secretless widget (session 21)
 
 The "Deluge function" dead-end from session 20 is resolved — in the opposite

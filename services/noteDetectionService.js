@@ -1,6 +1,6 @@
 const { groqJson } = require('./aiService');
 
-const TRIAGE_MODEL = process.env.TRIAGE_MODEL || 'llama-3.3-70b-versatile';
+const TRIAGE_MODEL = process.env.TRIAGE_MODEL || 'openai/gpt-oss-20b';
 
 // ─── Tier 1: deterministic marker scan ───────────────────────────────────────
 // Markers emitted by noteBuilder.buildNoteHtml / buildShortNoteHtml. Anything
@@ -93,7 +93,7 @@ ${notes.join('\n')}
 Return ONLY JSON, no markdown:
 {"note_posted": 0 or 1, "evidence": "max 15 words quoting what matched, or null"}`;
 
-  const out = await groqJson({ model: TRIAGE_MODEL, prompt, maxTokens: 120, scope: 'triage' });
+  const out = await groqJson({ model: TRIAGE_MODEL, prompt, maxTokens: 512, scope: 'triage' });
   if (!out) return { posted: 0, method: 'llm', evidence: 'could not parse Groq response' };
   return {
     posted: out.note_posted === 1 || out.note_posted === true ? 1 : 0,

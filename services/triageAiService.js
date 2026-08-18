@@ -1,6 +1,6 @@
 const { groqJson } = require('./aiService');
 
-const TRIAGE_MODEL = process.env.TRIAGE_MODEL || 'llama-3.3-70b-versatile';
+const TRIAGE_MODEL = process.env.TRIAGE_MODEL || 'openai/gpt-oss-20b';
 
 const strip = (html) => (html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 
@@ -78,7 +78,7 @@ ${serializeThread(ticket, conversations)}
 Return ONLY JSON, no markdown:
 {"thread_type":"booking_reconf" or "customer","confidence":"high" or "medium" or "low","reason":"max 20 words"}`;
 
-  const out = await groqJson({ model: TRIAGE_MODEL, prompt, maxTokens: 150, scope: 'triage' });
+  const out = await groqJson({ model: TRIAGE_MODEL, prompt, maxTokens: 512, scope: 'triage' });
   if (!out || !out.thread_type) return null;
   return {
     threadType: out.thread_type === 'booking_reconf' ? 'booking_reconf' : 'customer',
@@ -118,7 +118,7 @@ Return ONLY JSON, no markdown:
  "summary":"max 20 words, what the thread is about",
  "next_action":"max 15 words, what support should do"}`;
 
-  const out = await groqJson({ model: TRIAGE_MODEL, prompt, maxTokens: 250, scope: 'triage' });
+  const out = await groqJson({ model: TRIAGE_MODEL, prompt, maxTokens: 768, scope: 'triage' });
   if (!out || !out.verdict) return null;
   return {
     verdict:     out.verdict,

@@ -37,7 +37,7 @@ function releaseSlot() {
  * backoff and the "model wrapped the JSON in prose" case that findHotelEmail
  * already deals with. Returns null when the response can't be parsed.
  */
-async function groqJson({ model, prompt, maxTokens = 300, temperature = 0, scope = 'groq' }) {
+async function groqJson({ model, prompt, maxTokens = 300, temperature = 0, reasoningEffort = 'low', scope = 'groq' }) {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) throw new Error('GROQ_API_KEY not set');
 
@@ -55,6 +55,7 @@ async function groqJson({ model, prompt, maxTokens = 300, temperature = 0, scope
           model,
           messages: [{ role: 'user', content: prompt }],
           temperature,
+          reasoning_effort: reasoningEffort,
           max_tokens: maxTokens,
         }),
       });
@@ -194,7 +195,7 @@ Write in English unless instructed otherwise.`;
 }
 
 /**
- * Finds a hotel's contact email using Groq groq/compound (web search enabled).
+ * Finds a hotel's contact email using Groq groq/compound-mini (web search enabled).
  * Returns { email, source, confidence, notes }
  */
 async function findHotelEmail(hotelName, hotelAddress, hotelCountry) {
@@ -229,7 +230,7 @@ Return ONLY a JSON object, no markdown:
         'Authorization': `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: 'compound-beta-mini',
+        model: 'groq/compound-mini',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.1,
         max_tokens: 300,
