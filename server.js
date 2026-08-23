@@ -7,7 +7,7 @@ const { parseDataRow, parseBookingHtml } = require('./services/parserService');
 const { parseUserHtml, findUser }        = require('./services/userService');
 const { buildNoteHtml }                  = require('./services/noteBuilder');
 const { lookupSupplier }                 = require('./services/supplierService');
-const { aiAssist, findHotelEmail }       = require('./services/aiService');
+const { aiAssist, findHotelEmail, translateText } = require('./services/aiService');
 const { getAuthHeader, fdGet, addNote, addNoteWithImages, sendEmail, sendEmailWithAttachments, setTicketPending, setTicketSubject, searchDuplicates, getTicketContext } = require('./services/freshdeskService');
 const { fetchAgentMap, fetchAllAgents, fillMissingAgentNames } = require('./services/agentService');
 const { fetchTicket } = require('./services/ticketService');
@@ -360,8 +360,10 @@ app.post('/post-note', safeRoute(async (req, res) => {
 app.post('/rename-subject', safeRoute(async (req, res) => {
   const { ticketId, subject } = req.body;
   if (!ticketId || !subject) throw new HttpError('ticketId and subject are required');
-  await setTicketSubject(ticketId, subject);
-  console.log(`[rename-subject] ticket ${ticketId} → "${subject}"`);
+  // Renaming always happens on booking tickets, so stamp the Reservations
+  // category at the same time — same as confirmTicket does when posting a note.
+  await setTicketSubject(ticketId, subject, 'Reservations');
+  console.log(`[rename-subject] ticket ${ticketId} → "${subject}" (type=Reservations)`);
   res.json({ success: true });
 }));
 
@@ -982,11 +984,20 @@ app.post('/translate', async (req, res) => {
     const translated = (Array.isArray(data?.[0]) ? data[0] : [])
       .map(seg => seg?.[0] || seg?.[1] || '')
       .join('');
+    if (!translated.trim()) throw new Error('Google Translate returned no text');
     const detectedLang = data?.[2] || null;
-    res.json({ success: true, text: translated, detectedLang });
+    res.json({ success: true, text: translated, detectedLang, provider: 'google' });
   } catch (err) {
-    console.error('[/translate] failed:', err.message);
-    res.status(500).json({ error: err.message });
+    // Google's free endpoint is quota'd per client IP and Render's egress IP is
+    // shared, so 429s are routine. Fall back to Groq rather than failing.
+    console.warn('[/translate] google failed:', err.message, '— falling back to Groq');
+    try {
+      const translated = await translateText({ text, target: tl, source: sl });
+      res.json({ success: true, text: translated, detectedLang: null, provider: 'groq' });
+    } catch (fallbackErr) {
+      console.error('[/translate] groq fallback failed:', fallbackErr.message);
+      res.status(502).json({ error: `Translation unavailable: ${fallbackErr.message}` });
+    }
   }
 });
 

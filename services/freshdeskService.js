@@ -200,10 +200,13 @@ async function updateTicket(ticketId, fields) {
 }
 
 /**
- * Sets the ticket subject. Thin wrapper over updateTicket.
+ * Sets the ticket subject, and optionally the type (category) in the same call.
+ * Thin wrapper over updateTicket.
  */
-async function setTicketSubject(ticketId, subject) {
-  return updateTicket(ticketId, { subject });
+async function setTicketSubject(ticketId, subject, type) {
+  const fields = { subject };
+  if (type) fields.type = type;
+  return updateTicket(ticketId, fields);
 }
 
 /**

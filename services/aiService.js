@@ -264,4 +264,61 @@ Return ONLY a JSON object, no markdown:
   }
 }
 
-module.exports = { aiAssist, findHotelEmail, groqJson };
+/**
+ * Plain-text translation via Groq. Used as the fallback for /translate when
+ * Google's free endpoint rate-limits the host IP. Returns the translation only.
+ */
+async function translateText({ text, target = 'en', source = 'auto' }) {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error('GROQ_API_KEY not set');
+
+  const model = process.env.TRANSLATE_MODEL || 'openai/gpt-oss-20b';
+  const from = source && source !== 'auto' ? ` from ${source}` : '';
+  const systemPrompt = `You are a translation engine. Translate the user's message${from} into ${target}.
+Preserve line breaks, names, numbers, codes and booking references exactly.
+If the text is already in ${target}, return it unchanged.
+Output ONLY the translation — no preamble, no notes, no quotes.`;
+
+  await acquireSlot();
+  try {
+    const MAX_RETRIES = 3;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      const response = await fetch(GROQ_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user',   content: text },
+          ],
+          temperature: 0,
+          max_tokens: 8000,
+        }),
+      });
+
+      if (response.status === 429) {
+        if (attempt === MAX_RETRIES) throw new Error('Groq rate limit hit — try again in a minute.');
+        await sleep(attempt * 5000);
+        continue;
+      }
+
+      if (!response.ok) {
+        const err = await response.text();
+        throw new Error(`Groq API error ${response.status}: ${err.slice(0, 200)}`);
+      }
+
+      const data = await response.json();
+      const out  = data?.choices?.[0]?.message?.content || '';
+      if (!out.trim()) throw new Error('Groq returned empty translation');
+      return out.trim();
+    }
+  } finally {
+    releaseSlot();
+  }
+}
+
+module.exports = { aiAssist, findHotelEmail, groqJson, translateText };
