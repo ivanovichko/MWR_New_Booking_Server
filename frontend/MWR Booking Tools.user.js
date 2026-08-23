@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.65
+// @version      6.67
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -951,7 +951,6 @@ function openMimickedComposer(recipientType) {
   }
 
   const bookingData = cached?.bookingData || null;
-  const userFallback = cached?.userData || null;
 
   let booking = {};
   let details = {};
@@ -960,11 +959,11 @@ function openMimickedComposer(recipientType) {
   if (bookingData) {
     booking  = bookingData.booking  || {};
     details  = bookingData.details  || {};
-    user     = bookingData.user     || userFallback || {};
     supplier = bookingData.supplier || null;
-  } else if (userFallback) {
-    user = userFallback;
   }
+  // Same precedence the panel uses — a member picked via Find Member wins over
+  // the booking's own user, so the reply follows whoever the agent selected.
+  user = getDisplayUser(tid, cached) || {};
 
   // Resolve To:
   let toEmail = '';
@@ -975,11 +974,10 @@ function openMimickedComposer(recipientType) {
       return;
     }
   } else {
+    // Customer To: is editable in the composer, so an empty one is fine here —
+    // the agent can type it. Only warn.
     toEmail = user?.email || '';
-    if (!toEmail) {
-      showToast('No customer email found for this ticket.', 'warning');
-      return;
-    }
+    if (!toEmail) showToast('No customer email found — enter one in the To: field.', 'warning');
   }
 
   const titleEmoji = recipientType === 'supplier' ? '🏨' : '💬';
@@ -1525,6 +1523,18 @@ function stripQuotedTail(text) {
   return out || String(text).trim();
 }
 
+// Returns the current selection's text if it falls inside `withinEl`, else ''.
+// Lets the agent translate exactly what they highlighted instead of relying on
+// stripQuotedTail's heuristics, which misjudge unusual quote styles.
+function getSelectionTextWithin(withinEl) {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return '';
+  const text = String(sel).trim();
+  if (!text) return '';
+  if (withinEl && !withinEl.contains(sel.getRangeAt(0).commonAncestorContainer)) return '';
+  return text;
+}
+
 // Floating popover near the source element with a read-only translation +
 // copy button. Does NOT mutate the source DOM — Freshdesk re-renders if you
 // touch its conversation nodes. Positioned right of the anchor; clamped to
@@ -1607,9 +1617,10 @@ function showTranslatePopover(anchorEl, sourceText, opts) {
   document.body.appendChild(pop);
   trapKeyEventsForModal(pop);
 
-  // Kick off the translation. Strip quoted tail first so we only translate
-  // the latest reply, not the entire quoted email chain.
-  const cleanSource = stripQuotedTail(sourceText);
+  // Kick off the translation. Strip the quoted tail so we only translate the
+  // latest reply — unless the caller passed a selection, which is already
+  // exactly what the agent wants translated.
+  const cleanSource = opts.raw ? String(sourceText).trim() : stripQuotedTail(sourceText);
   api.translate(cleanSource, target).then(({ ok, data }) => {
     if (!ok || !data || !data.text) {
       ta.value = '❌ Translation failed: ' + ((data && data.error) || 'unknown');
@@ -1683,18 +1694,25 @@ function injectConversationControls() {
       const translateBtn = document.createElement('button');
       translateBtn.type = 'button';
       translateBtn.className = 'nucleus-button nucleus-button--small nucleus-button--text ticket-actions';
-      translateBtn.title = 'Translate to English (popover)';
+      translateBtn.title = 'Translate to English — select text first to translate just that';
       translateBtn.style.cssText = 'padding:4px 8px;color:#1976d2;font-size:14px;cursor:pointer;background:transparent;border:none;';
       translateBtn.textContent = '🌐';
+      // Keep the agent's selection alive — without this the mousedown collapses
+      // it before the click handler can read it.
+      translateBtn.addEventListener('mousedown', (e) => e.preventDefault());
       translateBtn.onclick = (e) => {
         e.preventDefault(); e.stopPropagation();
         if (!noteEl) { showToast('Could not find note content.', 'error'); return; }
-        const text = (noteEl.innerText || '').trim();
+        // A selection inside this note wins and is translated verbatim; with no
+        // selection we fall back to the whole note minus its quoted tail.
+        const selected = getSelectionTextWithin(noteEl);
+        const text = selected || (noteEl.innerText || '').trim();
         if (!text) { showToast('No text to translate.', 'warning'); return; }
         const isDescription = wrapper === description;
-        const scopeLabel = isDescription ? 'description'
-          : (wrapper.dataset.album || '').replace(/^note_/, 'note ') || (wrapper.id || 'reply');
-        showTranslatePopover(translateBtn, text, { title: scopeLabel, target: 'en' });
+        const scopeLabel = (isDescription ? 'description'
+          : (wrapper.dataset.album || '').replace(/^note_/, 'note ') || (wrapper.id || 'reply'))
+          + (selected ? ' (selection)' : '');
+        showTranslatePopover(translateBtn, text, { title: scopeLabel, target: 'en', raw: !!selected });
       };
       actions.insertBefore(translateBtn, actions.firstChild);
 
@@ -3019,11 +3037,33 @@ function showReplyComposer(opts) {
   bodyEl.innerHTML = '';
   const container = bodyEl;
 
-  // To: header
-  const toInfo = document.createElement('div');
-  toInfo.style.cssText = 'font-size:12px;color:#666;margin-bottom:6px;';
-  toInfo.innerHTML = '<strong>To:</strong> ' + toEmail;
-  container.appendChild(toInfo);
+  // To: header — editable for customer replies (the resolved member email is
+  // only a default; agents often need to send to a different address).
+  // Supplier stays read-only: it comes from the supplier map.
+  const toRow = document.createElement('div');
+  toRow.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:12px;color:#666;margin-bottom:6px;';
+  const toLabel = document.createElement('strong');
+  toLabel.textContent = 'To:';
+  toRow.appendChild(toLabel);
+
+  let toInput = null;
+  if (recipientType === 'supplier') {
+    const toText = document.createElement('span');
+    toText.textContent = toEmail;
+    toRow.appendChild(toText);
+  } else {
+    toInput = document.createElement('input');
+    toInput.type = 'email';
+    toInput.value = toEmail || '';
+    toInput.placeholder = 'customer@example.com';
+    toInput.spellcheck = false;
+    toInput.style.cssText = `flex:1;min-width:0;padding:4px 7px;border:1px solid #ddd;border-radius:4px;font-size:12px;font-family:${THEME.font};color:#333;`;
+    toRow.appendChild(toInput);
+  }
+  container.appendChild(toRow);
+
+  // Live recipient — reads the field at send time, not the opening value.
+  const currentToEmail = () => (toInput ? toInput.value.trim() : toEmail);
 
   const actionsArea = document.createElement('div');
   actionsArea.style.cssText = 'display:flex;gap:8px;flex-shrink:0;';
@@ -3141,6 +3181,9 @@ function showReplyComposer(opts) {
   sendBtn.onclick = async () => {
     const body = replyArea.innerText.trim();
     if (!body) { showToast('Message is empty.', 'warning'); return; }
+    const sendTo = currentToEmail();
+    if (!sendTo)                       { showToast('Recipient email is empty.', 'warning'); return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(sendTo)) { showToast('Recipient email looks invalid.', 'warning'); return; }
     const tid = overrideTicketId || getFreshdeskTicketId();
     if (!tid) { showToast('No ticket detected.', 'error'); return; }
     sendBtn.disabled = true; sendBtn.textContent = 'Sending...';
@@ -3164,7 +3207,7 @@ function showReplyComposer(opts) {
         r.readAsDataURL(f);
       })));
     }
-    const { ok } = await api.sendReply({ freshdeskTicketId: tid, toEmail, bodyHtml: noteHtml, files: filesPayload });
+    const { ok } = await api.sendReply({ freshdeskTicketId: tid, toEmail: sendTo, bodyHtml: noteHtml, files: filesPayload });
     if (ok) { sendBtn.textContent = '✅ Sent!'; showToast('Reply sent to ' + label + '.'); refresh(); if (onSent) onSent(); }
     else    { sendBtn.textContent = '❌ Failed'; sendBtn.disabled = false; }
   };
