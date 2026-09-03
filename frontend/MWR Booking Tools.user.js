@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Booking Tools
 // @namespace    https://traveladvantage.com
-// @version      6.67
+// @version      6.69
 // @description  Find booking data from Freshdesk — notes, email, tagging, duplicate detection
 // @match        https://*.freshdesk.com/*
 // @grant        GM_xmlhttpRequest
@@ -870,6 +870,15 @@ function appendCustomerSection(body, user, ticketId) {
   body.appendChild(sec);
 }
 
+// insertBefore requires `ref` to be a DIRECT child of `container`, but the refs
+// we get come from querySelector, which matches any descendant. When FD nests
+// the ref one level deeper the raw call throws NotFoundError and kills whatever
+// injection pass it's running in. Insert into the ref's real parent instead.
+function insertBeforeSafe(container, node, ref) {
+  if (ref && ref.parentNode) ref.parentNode.insertBefore(node, ref);
+  else container.appendChild(node);
+}
+
 function injectReplyBarButtons() {
   const bar = document.querySelector('ul.reply-bar');
   if (!bar) return;
@@ -934,7 +943,7 @@ function injectTranslateNearSend() {
   btn.style.cssText = 'background:#fff;border:1px solid #17a2b8;color:#17a2b8;padding:6px 12px;border-radius:4px;font-size:13px;font-weight:500;cursor:pointer;margin-right:8px;';
   btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); translateFdComposer(); };
 
-  wrapper.insertBefore(btn, replyBtn);
+  insertBeforeSafe(wrapper, btn, replyBtn);
 }
 
 // Floating mimicked composer — opens via the reply-customer/supplier tabs.
@@ -1040,13 +1049,32 @@ async function translateFdComposer() {
   showToast('Translated to ' + target + '.', 'success');
 }
 
+// Picks the anchor to sit above: the reply bar (composer closed) or the editor
+// (composer/note open). Both can be in the DOM at once — FD hides one instead
+// of removing it — so only a *visible* candidate counts. offsetParent is null
+// whenever an ancestor is display:none, which is exactly the hidden case.
+function pickDuplicateStripAnchor() {
+  const candidates = document.querySelectorAll('.reply-bar-wrapper, .ticket-editor');
+  for (const el of candidates) {
+    if (el.parentElement && el.offsetParent !== null) return el;
+  }
+  return null;
+}
+
 function injectDuplicateStrip() {
-  if (document.getElementById(DUP_STRIP_ID)) return;
-  // Anchor before the reply bar (composer closed) OR the editor (composer
-  // open) — whichever is present — so the strip stays visible in both states.
-  const anchor = document.querySelector('.reply-bar-wrapper')
-              || document.querySelector('.ticket-editor');
+  const anchor = pickDuplicateStripAnchor();
   if (!anchor || !anchor.parentElement) return;
+
+  const existing = document.getElementById(DUP_STRIP_ID);
+  if (existing) {
+    // Already mounted in the right place — leave it alone.
+    if (existing.nextElementSibling === anchor && existing.offsetParent !== null) return;
+    // Opening the Note window hides the container the strip was mounted in, so
+    // the strip vanishes while still being in the DOM. Move the existing node
+    // (rather than rebuild) so search results and listeners survive.
+    anchor.parentElement.insertBefore(existing, anchor);
+    return;
+  }
 
   const strip = document.createElement('div');
   strip.id = DUP_STRIP_ID;
@@ -1784,14 +1812,24 @@ function mountNativeInjections() {
   if (_assistedMode) {
     setTimeout(() => { if (getFreshdeskTicketId()) prewarmWindow(); }, 1500);
   }
+  // Each injection runs isolated: FD's markup shifts under us, and before this
+  // a single throw (e.g. an insertBefore against a nested ref) aborted the rest
+  // of the pass — which is how opening the Note window used to make the
+  // duplicate strip vanish until reload.
+  const injections = [
+    injectBookingPanel,
+    injectReplyBarButtons,
+    injectReplyComposerTabs,
+    injectTranslateNearSend,
+    injectDuplicateStrip,
+    injectConversationControls,
+    injectSummaryButton,
+  ];
   setInterval(() => {
-    injectBookingPanel();
-    injectReplyBarButtons();
-    injectReplyComposerTabs();
-    injectTranslateNearSend();
-    injectDuplicateStrip();
-    injectConversationControls();
-    injectSummaryButton();
+    for (const inject of injections) {
+      try { inject(); }
+      catch (err) { console.warn('[MWR] injection failed:', inject.name, err); }
+    }
     // Each re-inject (after FD wipes the DOM) sets fresh content via
     // refreshDuplicateStrip() called inside injectDuplicateStrip.
   }, 1500);
@@ -1818,8 +1856,7 @@ function injectSummaryButton() {
 
   // Sit just before FD's native Summary button when present.
   const fdSummary = headerEnd.querySelector('[data-test-id="add-summary-button"]');
-  if (fdSummary) headerEnd.insertBefore(btn, fdSummary);
-  else headerEnd.appendChild(btn);
+  insertBeforeSafe(headerEnd, btn, fdSummary);
 }
 
 function getFreshdeskTicketId() {
