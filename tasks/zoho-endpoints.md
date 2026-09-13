@@ -129,12 +129,19 @@ failure was the fake ticket. Writes are unblocked.
 ## Open items
 
 - ~~CSRF token source~~ — **RESOLVED 2026-09-13, see "Write token" below.**
-- **Merge — DEFERRED, not captured.** No disposable tickets were available to merge
-  against (2026-09-13). Zoho exposes no documented REST merge endpoint; it exists in
-  Deluge as `zoho.desk.ticket.merge` and in the UI, so the in-page call shape has to
-  come from a live capture. Until then the duplicate strip ships with preview +
-  link-out and no merge button. **To finish: merge two scratch tickets with the
-  capture harness armed, then fill in this section.**
+- ~~Merge endpoint~~ — **NOT NEEDED.** Reading the Freshdesk implementation showed
+  `/merge-ticket` never called Freshdesk's native merge either: it posted a note on
+  the survivor carrying the chosen message, posted a pointer note on the other, and
+  closed it. The overlay reproduces exactly that, so merge needs only `comments` +
+  a status update — both same-origin and agent-attributed. Zoho's own undocumented
+  merge is not involved.
+- **Closing a ticket is the one unverified step.** `PATCH /tickets/{id}` with
+  `{status:'Closed'}` passed body validation (404 on a fake id, not 422), but `PUT`
+  returned the same 404, so the 404 does not prove PATCH is the accepted verb — a
+  disambiguating probe was cut short when the browser renderer froze. PATCH is what
+  Zoho's REST v1 documents, and `"Closed"` is the literal status seen on real
+  tickets in search results. **Verify on the first real merge.** The close runs last
+  and reports separately, so if it fails the merged content is already safe.
 - ~~`sendReply` body~~ — **RESOLVED** by validator probing, see Writes above. Still
   unproven end-to-end: no real email has been sent through this path yet.
 - **Composer DOM anchors** — the reply editor is absent from the DOM until Reply is

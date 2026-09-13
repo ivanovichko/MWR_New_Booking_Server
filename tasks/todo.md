@@ -969,7 +969,15 @@ the **acting agent**, which forces the in-page same-origin path over backend OAu
       label — matching the Freshdesk strip — plus status/priority/assignee chips
       and a "searched: …" line naming which references were used
 - [ ] Move to a strip above the reply bar (needs the composer anchor, Phase 0)
-- [ ] Preview modal; Merge + Merge-out (merge shape still uncaptured)
+- [x] Preview + Merge in / Merge out — ported from the Freshdesk modals. Merge
+      needs NO Zoho merge endpoint: Freshdesk's own merge was a note on the
+      survivor + a pointer note + closing the other, which is reproducible with
+      comments + a status PATCH
+- [x] `fetchTicketMessages` merges Zoho's split threads/comments collections into
+      one chronological list, so both modals get the Freshdesk shape
+- [ ] **Unverified: closing a ticket.** `PATCH /tickets/{id}` `{status:'Closed'}`
+      validated but the verb is unproven (PUT 404s identically). Verify on the
+      first real merge; the close runs last so a failure cannot lose content
 - [ ] Port `renderDuplicates` / `buildStripDupRow`, remap FD int codes -> Zoho strings
 - [ ] Preview modal; Merge + Merge-out
 

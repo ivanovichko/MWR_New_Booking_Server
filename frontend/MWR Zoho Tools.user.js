@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Zoho Tools
 // @namespace    https://traveladvantage.com
-// @version      0.2.0
+// @version      0.3.0
 // @description  TA booking tools for Zoho Desk — booking panel, duplicates, notes, supplier email
 // @match        https://desk.zoho.com/agent/*
 // @grant        GM_xmlhttpRequest
@@ -190,8 +190,9 @@
     return json;
   }
 
-  const zdGet  = (path)       => zdRequest(path);
-  const zdPost = (path, body) => zdRequest(path, { method: 'POST', body });
+  const zdGet   = (path)       => zdRequest(path);
+  const zdPost  = (path, body) => zdRequest(path, { method: 'POST', body });
+  const zdPatch = (path, body) => zdRequest(path, { method: 'PATCH', body });
 
   // ===== BACKEND =====
   function gmRequest(method, url, data) {
@@ -1073,12 +1074,17 @@
       const subj = r.subject ? escapeHtml(String(r.subject).slice(0, 70)) : '';
       const closed = r.statusType === 'Closed';
       const who = r.assignee ? `<span style="color:${THEME.primary};font-size:9px;font-weight:500;" title="Assigned to">${escapeHtml(r.assignee)}</span>` : '';
-      return `<a href="${ticketUrl(r.id)}" style="display:block;padding:6px 7px;border:1px solid ${THEME.border};border-radius:4px;margin-bottom:5px;text-decoration:none;color:${THEME.text};background:${closed ? '#fafafa' : '#fff'};">
+      return `<div style="padding:6px 7px;border:1px solid ${THEME.border};border-radius:4px;margin-bottom:5px;color:${THEME.text};background:${closed ? '#fafafa' : '#fff'};">
         <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;">
-          <strong style="font-size:11px;color:#007bff;">${label}</strong>${statusChip(r)}${priorityChip(r)}${who}
+          <a href="${ticketUrl(r.id)}" style="font-size:11px;color:#007bff;font-weight:700;text-decoration:none;">${label}</a>${statusChip(r)}${priorityChip(r)}${who}
         </div>
         <div style="color:#666;font-size:10px;margin:2px 0 0;">${subj}</div>
-        <div>${matchChip(r)}</div></a>`;
+        <div>${matchChip(r)}</div>
+        <div style="display:flex;gap:4px;margin-top:5px;">
+          <button data-taact="in" data-taid="${escapeHtml(r.id)}" style="padding:2px 7px;border:1px solid #fd7e14;border-radius:4px;background:#fff;color:#fd7e14;font-size:10px;cursor:pointer;font-weight:600;">📥 Merge in</button>
+          <button data-taact="out" data-taid="${escapeHtml(r.id)}" style="padding:2px 7px;border:1px solid #6c757d;border-radius:4px;background:#fff;color:#6c757d;font-size:10px;cursor:pointer;font-weight:600;">📤 Merge out</button>
+        </div>
+      </div>`;
     }).join('');
 
     const hiddenCount = all.length - rows.length;
@@ -1098,6 +1104,15 @@
         <input id="taDupQuery" type="text" placeholder="Search tickets…" style="flex:1;min-width:0;padding:5px 8px;border:1px solid #ddd;border-radius:4px;font-size:11px;" />
         <button id="taDupGo" style="flex:0 0 auto;padding:5px 9px;border:1px solid #d3d8de;border-radius:4px;background:#fff;cursor:pointer;font-size:11px;">🔍</button>
       </div>`;
+
+    host.querySelectorAll('[data-taact]').forEach((btn) => {
+      btn.onclick = () => {
+        const row = (duplicateCache[currentTicketId] || []).find((x) => String(x.id) === btn.dataset.taid);
+        if (!row) return;
+        if (btn.dataset.taact === 'in') showMergeInModal(row, btn);
+        else showMergeOutModal(row, btn);
+      };
+    });
 
     document.getElementById('taDupClosed').onchange = (e) => {
       dupIncludeClosed = e.target.checked;
@@ -1163,6 +1178,238 @@
       style: 'top:50%;left:50%;transform:translate(-50%,-50%);width:640px;max-height:80vh;',
     });
     body.innerHTML = bd.noteHtml;
+  }
+
+  // ===== MERGE =====
+  // Freshdesk had no native merge either — /merge-ticket posted a note on the
+  // surviving ticket carrying the chosen message, posted a pointer note on the
+  // other, and closed it. Reproducing that shape means merge needs no
+  // undocumented Zoho endpoint: it is comments plus a status update, both
+  // same-origin and both attributed to the acting agent.
+
+  const MSG_FETCH_MAX = 15;   // thread bodies pulled per ticket
+
+  function fmtDate(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (isNaN(d)) return '';
+    return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+      + ' ' + d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  }
+
+  // Zoho splits a conversation across two collections: threads (email in/out)
+  // and comments (internal notes). Freshdesk returned both in one list, so they
+  // are merged chronologically here to give the modals the same shape.
+  async function fetchTicketMessages(ticketId) {
+    const ticket = await zdGet(`/tickets/${ticketId}`);
+    const [threadList, commentList] = await Promise.all([
+      zdGet(`/tickets/${ticketId}/threads?limit=20`).then((r) => (r && r.data) || []).catch(() => []),
+      zdGet(`/tickets/${ticketId}/comments?limit=20`).then((r) => (r && r.data) || []).catch(() => []),
+    ]);
+
+    // The list carries only a truncated summary; real bodies need the detail call.
+    const details = await Promise.all(
+      threadList.slice(0, MSG_FETCH_MAX).map((t) =>
+        zdGet(`/tickets/${ticketId}/threads/${t.id}`).catch(() => null)
+      )
+    );
+
+    const messages = [];
+    details.forEach((d, i) => {
+      const t = d || threadList[i];
+      if (!t) return;
+      const incoming = t.direction === 'in';
+      const author = (t.author && (t.author.name || t.author.email)) || t.fromEmailAddress || null;
+      messages.push({
+        label: incoming ? '📩 Customer' : '📤 Agent reply',
+        bg: incoming ? '#f8f9fa' : '#f0f4ff',
+        border: incoming ? '#6c757d' : '#0056d2',
+        html: d ? (d.content || d.summary || '') : (t.summary || ''),
+        author,
+        date: t.createdTime,
+      });
+    });
+    commentList.forEach((c) => {
+      messages.push({
+        label: c.isPublic ? '💬 Public comment' : '📌 Agent note',
+        bg: '#fffbf0',
+        border: '#fd7e14',
+        html: c.content || '',
+        author: (c.commenter && (c.commenter.name || c.commenter.email)) || null,
+        date: c.commentedTime || c.createdTime,
+      });
+    });
+
+    messages.sort((a, b) => new Date(a.date || 0) - new Date(b.date || 0));
+    return { ticket, messages };
+  }
+
+  // Posts the carried message onto the survivor, leaves a pointer on the other,
+  // then closes it. The close is last and reported separately: if it fails the
+  // content has still been preserved, which is the part that cannot be redone.
+  async function mergeTickets({ sourceId, sourceNumber, targetId, targetNumber, html }) {
+    const sourceLink = location.origin + ticketUrl(sourceId);
+    const targetLink = location.origin + ticketUrl(targetId);
+
+    await zdPost(`/tickets/${targetId}/comments`, {
+      content: `<p>Merged from <a href="${sourceLink}">#${sourceNumber || sourceId}</a></p>${html}`,
+      contentType: 'html',
+      isPublic: false,
+    });
+
+    try {
+      await zdPost(`/tickets/${sourceId}/comments`, {
+        content: `<p>Merged into <a href="${targetLink}">#${targetNumber || targetId}</a></p>`,
+        contentType: 'html',
+        isPublic: false,
+      });
+    } catch (err) {
+      console.warn('[ta] pointer note on source failed:', err.message);
+    }
+
+    await zdPatch(`/tickets/${sourceId}`, { status: 'Closed' });
+  }
+
+  function buildMessageList(container, messages, actionLabel, onPick) {
+    if (!messages.length) {
+      container.innerHTML = `<span style="color:${THEME.subtle};">(no content)</span>`;
+      return;
+    }
+    messages.forEach((m) => {
+      const wrap = document.createElement('div');
+      wrap.style.cssText = `margin-bottom:10px;padding:8px 10px;background:${m.bg};border-left:3px solid ${m.border};border-radius:3px;font-size:12px;line-height:1.5;`;
+      const head = document.createElement('div');
+      head.style.cssText = 'display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;gap:6px;flex-wrap:wrap;';
+      const meta = document.createElement('div');
+      meta.innerHTML = `<span style="font-size:10px;color:#999;font-weight:600;">${escapeHtml(m.label)}</span>`
+        + ((m.author || m.date)
+          ? `<div style="font-size:10px;color:#aaa;margin-top:1px;">${escapeHtml([m.author, fmtDate(m.date)].filter(Boolean).join(' · '))}</div>`
+          : '');
+      const btn = document.createElement('button');
+      btn.textContent = actionLabel;
+      btn.style.cssText = 'padding:2px 8px;border:1px solid #fd7e14;border-radius:4px;background:#fff;color:#fd7e14;font-size:10px;cursor:pointer;font-weight:600;flex-shrink:0;';
+      btn.onclick = (e) => { e.stopPropagation(); onPick(m.html, btn); };
+      head.appendChild(meta);
+      head.appendChild(btn);
+      const content = document.createElement('div');
+      content.innerHTML = m.html;
+      wrap.appendChild(head);
+      wrap.appendChild(content);
+      container.appendChild(wrap);
+    });
+  }
+
+  // Merge IN: read the duplicate's messages, pick one, bring it into this ticket
+  // and close the duplicate.
+  async function showMergeInModal(dup, triggerBtn) {
+    let data;
+    try {
+      data = await withButtonLoading(triggerBtn, '⏳', () => fetchTicketMessages(dup.id));
+    } catch (err) {
+      showToast('Could not load ticket: ' + err.message, 'error');
+      return;
+    }
+    const num = dup.ticketNumber || dup.id;
+    const { body } = createModal('taMergeIn', `#${num} — ${data.ticket.subject || ''}`, {
+      style: 'top:8%;left:50%;transform:translateX(-50%);width:680px;max-width:92vw;height:78vh;',
+      zIndex: 1000001,
+    });
+    const hint = document.createElement('div');
+    hint.style.cssText = `font-size:11px;color:${THEME.subtle};margin-bottom:10px;`;
+    hint.textContent = `Pick a message to merge into #${(currentTicketMeta && currentTicketMeta.ticketNumber) || currentTicketId} — #${num} will be closed.`;
+    body.appendChild(hint);
+    const list = document.createElement('div');
+    body.appendChild(list);
+
+    buildMessageList(list, data.messages, '📥 Merge in', async (html, btn) => {
+      if (!window.confirm(`Bring this message into #${(currentTicketMeta && currentTicketMeta.ticketNumber) || currentTicketId} and close #${num}?`)) return;
+      await withButtonLoading(btn, '⏳ Merging…', async () => {
+        try {
+          await mergeTickets({
+            sourceId: dup.id,
+            sourceNumber: dup.ticketNumber,
+            targetId: currentTicketId,
+            targetNumber: currentTicketMeta && currentTicketMeta.ticketNumber,
+            html,
+          });
+          document.getElementById('taMergeIn').remove();
+          showToast(`Merged from #${num} — it has been closed.`, 'success');
+          loadDuplicates(true);
+        } catch (err) {
+          showToast('Merge failed: ' + err.message, 'error');
+        }
+      });
+    });
+  }
+
+  // Merge OUT: pick a message from THIS ticket, push it to the duplicate, and
+  // close this one. The chosen text is editable before sending.
+  async function showMergeOutModal(dup, triggerBtn) {
+    let data;
+    try {
+      data = await withButtonLoading(triggerBtn, '⏳', () => fetchTicketMessages(currentTicketId));
+    } catch (err) {
+      showToast('Could not load this ticket: ' + err.message, 'error');
+      return;
+    }
+    const num = dup.ticketNumber || dup.id;
+    const mine = (currentTicketMeta && currentTicketMeta.ticketNumber) || currentTicketId;
+    const { body } = createModal('taMergeOut', `Merge #${mine} → #${num}`, {
+      style: 'top:50%;left:50%;transform:translate(-50%,-50%);width:680px;max-width:92vw;max-height:84vh;',
+      zIndex: 1000001,
+    });
+
+    const hint = document.createElement('div');
+    hint.style.cssText = `font-size:11px;color:${THEME.subtle};margin-bottom:10px;`;
+    hint.textContent = 'Select a message, edit if needed, then confirm.';
+    body.appendChild(hint);
+    const list = document.createElement('div');
+    body.appendChild(list);
+
+    const editorWrap = document.createElement('div');
+    editorWrap.style.cssText = 'position:sticky;bottom:0;background:#fffbf0;border-top:2px solid #fd7e14;margin:10px -16px -16px;padding:10px 16px;';
+    editorWrap.innerHTML = `<div style="font-size:11px;color:${THEME.muted};margin-bottom:4px;font-weight:600;">Note to post on #${escapeHtml(String(num))}:</div>`;
+    const editor = document.createElement('div');
+    editor.contentEditable = 'true';
+    editor.style.cssText = 'min-height:60px;max-height:150px;overflow-y:auto;border:1px solid #ddd;border-radius:4px;padding:6px 8px;font-size:12px;background:#fff;outline:none;';
+    editor.innerHTML = `<span style="color:#aaa;font-style:italic;">Select a message above…</span>`;
+    let picked = false;
+    const actions = document.createElement('div');
+    actions.style.cssText = 'display:flex;justify-content:flex-end;margin-top:6px;';
+    const confirmBtn = document.createElement('button');
+    confirmBtn.textContent = `📤 Merge out → #${num}`;
+    confirmBtn.style.cssText = 'padding:5px 12px;border:none;border-radius:4px;background:#6c757d;color:#fff;font-size:11px;cursor:pointer;font-weight:600;';
+    actions.appendChild(confirmBtn);
+    editorWrap.appendChild(editor);
+    editorWrap.appendChild(actions);
+    body.appendChild(editorWrap);
+
+    buildMessageList(list, data.messages, '✏️ Use this', (html) => {
+      editor.innerHTML = html;
+      picked = true;
+      editor.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+
+    confirmBtn.onclick = async () => {
+      if (!picked) { showToast('Select a message first.', 'error'); return; }
+      if (!window.confirm(`Merge #${mine} into #${num}? This posts a note on #${num} and closes #${mine}.`)) return;
+      await withButtonLoading(confirmBtn, '⏳ Merging…', async () => {
+        try {
+          await mergeTickets({
+            sourceId: currentTicketId,
+            sourceNumber: currentTicketMeta && currentTicketMeta.ticketNumber,
+            targetId: dup.id,
+            targetNumber: dup.ticketNumber,
+            html: editor.innerHTML,
+          });
+          document.getElementById('taMergeOut').remove();
+          showToast(`Merged #${mine} into #${num} — this ticket is closed.`, 'success');
+          loadDuplicates(true);
+        } catch (err) {
+          showToast('Merge failed: ' + err.message, 'error');
+        }
+      });
+    };
   }
 
   // ===== SUPPLIER (HOTEL) EMAIL =====
