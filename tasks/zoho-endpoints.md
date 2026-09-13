@@ -218,3 +218,42 @@ The overlay queries both and merges, deduping by ticket id and unioning a
 
 DB-linked rows carry no `statusType`, so the overlay enriches up to 6 of them with
 a `GET /tickets/{id}` before applying the open/closed filter.
+
+
+## Sender addresses for sendReply
+
+`GET /mailReplyAddress?departmentId={id}` — the department's configured reply
+addresses. `departmentId` is mandatory (422 without it); `ticketId` is ignored.
+
+Each row: `address`, `displayName`, `isActive`, `isVerified`, `isDepartmentDefault`,
+`serviceProviderType`.
+
+**Only `isActive && isVerified` addresses may be used as `fromEmailAddress`.** On
+the production Customer Support department, 6 rows exist but only 3 are active and
+one of those (`events@mwrlife.com`) is unverified — so 2 are actually usable:
+
+| address | display name |
+|---|---|
+| `support@mwrlife.com` | MWR Life Support |
+| `member@traveladvantage.com` | Travel Advantage Support |
+
+Desk's own outbound threads carry the composite form `"Display Name"<address>`, so
+that is what the overlay sends.
+
+**Do NOT derive the From address from the ticket's threads.** The first
+implementation took the latest outbound thread's `fromEmailAddress` and fell back
+to "any thread that has one" — on a ticket whose only thread is inbound, that
+resolves to the **customer's own address**, which Zoho rejects with
+`INVALID_DATA`. (A silent success there would have been considerably worse than
+the error.) Threads are now used only as a *preference hint*: if the ticket has
+already replied from a configured address, that one is pre-selected.
+
+Selection order: prior outbound address (if it matches a configured one) →
+`isDepartmentDefault` → first active+verified. The agent sees a From dropdown and
+can override, because the active identities are meaningfully different.
+
+### Reading validation failures
+
+`INVALID_DATA` responses carry `errors:[{fieldName:'/x', errorType:'missing'}]`.
+The top-level message is only "The data is invalid due to validation
+restrictions", which is undiagnosable on its own — always surface `errors[]`.

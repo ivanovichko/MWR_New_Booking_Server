@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Zoho Tools
 // @namespace    https://traveladvantage.com
-// @version      0.4.0
+// @version      0.4.1
 // @description  TA booking tools for Zoho Desk — booking panel, duplicates, notes, supplier email
 // @match        https://desk.zoho.com/agent/*
 // @grant        GM_xmlhttpRequest
@@ -63,7 +63,7 @@
   let currentTicketMeta = null;   // { ticketNumber, subject, status } for the link row
   const duplicateCache  = {};     // ticketId -> merged duplicate rows
   let dupIncludeClosed  = false;  // Zoho returns Closed tickets by default
-  const fromAddressCache = {};    // ticketId -> fromEmailAddress for sendReply
+  const fromAddressCache = {};    // departmentId -> active+verified sender addresses
 
   // ===== SECRET =====
   // The repo that serves this script is public, so nothing may be hardcoded. The
@@ -184,7 +184,14 @@
     let json = null;
     try { json = text ? JSON.parse(text) : null; } catch (e) { /* non-JSON */ }
     if (!res.ok) {
-      const msg = (json && (json.message || json.errorCode)) || `HTTP ${res.status}`;
+      // Zoho's INVALID_DATA carries an errors[] naming the offending field; the
+      // top-level message alone ("validation restrictions") is undiagnosable.
+      let msg = (json && (json.message || json.errorCode)) || `HTTP ${res.status}`;
+      const fields = (json && Array.isArray(json.errors))
+        ? json.errors.map((e) => `${String(e.fieldName || '?').replace(/^\//, '')} (${e.errorType || 'invalid'})`)
+        : [];
+      if (fields.length) msg += ' → ' + fields.join(', ');
+      console.error(`[ta] ${method} ${path} failed`, res.status, json);
       throw new Error(`Zoho Desk ${method} ${path} failed: ${msg}`);
     }
     return json;
@@ -1441,17 +1448,47 @@
     return existing;
   }
 
-  // sendReply requires a fromEmailAddress. Rather than hardcode a support
-  // address, reuse whatever this ticket's own outbound mail already used.
-  async function resolveFromAddress(ticketId) {
-    if (fromAddressCache[ticketId]) return fromAddressCache[ticketId];
-    const threads = await zdGet(`/tickets/${ticketId}/threads?limit=10`);
-    const list = (threads && threads.data) || [];
-    const outbound = list.find((t) => t.direction === 'out' && t.fromEmailAddress);
-    const any = list.find((t) => t.fromEmailAddress);
-    const from = (outbound || any || {}).fromEmailAddress || null;
-    if (from) fromAddressCache[ticketId] = from;
-    return from;
+  // sendReply requires a fromEmailAddress, and Zoho only accepts an address that
+  // is configured, active AND verified for the ticket's department. An earlier
+  // version read it off the ticket's threads and fell back to "any thread with a
+  // from address" — on a ticket whose only thread is inbound that resolved to the
+  // CUSTOMER's address, which Zoho rejected as INVALID_DATA. It would have been
+  // worse if it had succeeded.
+  async function fetchFromAddresses(departmentId) {
+    if (!departmentId) return [];
+    if (fromAddressCache[departmentId]) return fromAddressCache[departmentId];
+    const res = await zdGet(`/mailReplyAddress?departmentId=${encodeURIComponent(departmentId)}`);
+    const rows = ((res && res.data) || [])
+      .filter((r) => r.isActive && r.isVerified && r.address)
+      .map((r) => ({
+        address: r.address,
+        displayName: r.displayName || '',
+        isDefault: !!r.isDepartmentDefault,
+        // Desk's own outbound threads carry the composite form, so match it.
+        composite: r.displayName ? `"${r.displayName}"<${r.address}>` : r.address,
+      }));
+    fromAddressCache[departmentId] = rows;
+    return rows;
+  }
+
+  // Preference order: whatever this ticket has already replied from, then the
+  // department default, then the first active+verified address.
+  async function pickFromAddress(ticketId, departmentId) {
+    const options = await fetchFromAddresses(departmentId);
+    if (!options.length) return { options: [], chosen: null };
+
+    let priorAddress = null;
+    try {
+      const threads = await zdGet(`/tickets/${ticketId}/threads?limit=10`);
+      const out = ((threads && threads.data) || []).filter((t) => t.direction === 'out' && t.fromEmailAddress);
+      if (out.length) priorAddress = String(out[0].fromEmailAddress);
+    } catch (e) { /* optional signal */ }
+
+    const matchesPrior = priorAddress
+      ? options.find((o) => priorAddress.indexOf(o.address) !== -1)
+      : null;
+    const chosen = matchesPrior || options.find((o) => o.isDefault) || options[0];
+    return { options, chosen };
   }
 
   // Body structure is a port of the Freshdesk composer's supplier template
@@ -1489,19 +1526,29 @@
       + `<p>${sig}</p>`;
   }
 
-  function openSupplierEmail() {
+  async function openSupplierEmail() {
     const bd = ticketBookingCache[currentTicketId];
     if (!bd || !bd.booking) { showToast('No booking loaded.', 'error'); return; }
     const agentName = promptForAgentName(false);
     if (!agentName) { showToast('A sender name is needed to send supplier email.', 'warning'); return; }
-    showSupplierEmailModal(bd, agentName);
+    let from = { options: [], chosen: null };
+    try {
+      from = await pickFromAddress(currentTicketId, currentTicketMeta && currentTicketMeta.departmentId);
+    } catch (err) {
+      console.warn('[ta] from-address lookup failed:', err.message);
+    }
+    if (!from.options.length) {
+      showToast('No active, verified sender address for this department — cannot send.', 'error');
+      return;
+    }
+    showSupplierEmailModal(bd, agentName, from);
   }
 
-  function onSupplierEmail() {
-    openSupplierEmail();
+  function onSupplierEmail(e) {
+    return withButtonLoading(e.currentTarget, '⏳', openSupplierEmail);
   }
 
-  function showSupplierEmailModal(bd, agentName) {
+  function showSupplierEmailModal(bd, agentName, from) {
     const { booking, details, user, supplier } = bd;
     const stripHtml = (x) => (x ? String(x).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : '');
     const supplierName = stripHtml(booking.supplierName).replace(/\s*\(\d+\)\s*$/, '');
@@ -1528,6 +1575,10 @@
 
     body.innerHTML = `
       ${unknown}${noteBanner}${urlLine}
+      <label style="display:block;font-size:11px;color:${THEME.muted};margin-bottom:3px;">From</label>
+      <select id="taSupFrom" style="width:100%;box-sizing:border-box;padding:7px 10px;border:1px solid #d3d8de;border-radius:4px;font-size:13px;margin-bottom:10px;background:#fff;">
+        ${from.options.map((o) => `<option value="${escapeHtml(o.composite)}" ${o === from.chosen ? 'selected' : ''}>${escapeHtml(o.displayName)} &lt;${escapeHtml(o.address)}&gt;</option>`).join('')}
+      </select>
       <label style="display:block;font-size:11px;color:${THEME.muted};margin-bottom:3px;">To</label>
       <input id="taSupTo" type="text" value="${escapeHtml(to)}" placeholder="supplier@example.com"
         style="width:100%;box-sizing:border-box;padding:7px 10px;border:1px solid ${to ? '#d3d8de' : THEME.danger};border-radius:4px;font-size:13px;margin-bottom:10px;" />
@@ -1556,7 +1607,7 @@
       const name = promptForAgentName(true);
       if (name) {
         document.getElementById('taSupplierEmail').remove();
-        showSupplierEmailModal(bd, name);
+        showSupplierEmailModal(bd, name, from);
       }
     };
 
@@ -1575,9 +1626,9 @@
 
       await withButtonLoading(sendBtn, 'Sending…', async () => {
         try {
-          const fromEmailAddress = await resolveFromAddress(currentTicketId);
+          const fromEmailAddress = document.getElementById('taSupFrom').value;
           if (!fromEmailAddress) {
-            showToast('Could not determine a From address for this ticket.', 'error');
+            showToast('Pick a From address.', 'error');
             return;
           }
           const payload = {
@@ -1627,6 +1678,7 @@
         subject: ctx.ticket.subject || null,
         status: ctx.ticket.status || null,
         email: ctx.ticket.email || null,
+        departmentId: ctx.ticket.departmentId || null,
       };
     } catch (err) {
       console.error('[ta] ticket read failed:', err);
