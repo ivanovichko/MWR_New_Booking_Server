@@ -959,10 +959,16 @@ the **acting agent**, which forces the in-page same-origin path over backend OAu
 - [x] Client-side open/closed filter (`statusType` is rejected as a query param)
       + "incl. closed" toggle showing the hidden count
 - [x] Manual search box (unverified — the agent typed it deliberately) + refresh
-- [x] Renders in the booking panel
+- [x] Own card in the rail, independent of the booking card — duplicate search
+      runs on EVERY ticket, including those with no booking reference and even
+      with no backend key (the Zoho search half is same-origin)
+- [x] Searches the ticket's own contact email as well as booking ID / supplier
+      ref / member email; duplicate terms are de-duped so the same address is
+      not searched twice
+- [x] Rows show the **matched value** (`🔗 412468 · GO31086415…`), not a generic
+      label — matching the Freshdesk strip — plus status/priority/assignee chips
+      and a "searched: …" line naming which references were used
 - [ ] Move to a strip above the reply bar (needs the composer anchor, Phase 0)
-- [ ] Duplicates for tickets with **no** booking (currently the panel only renders
-      the block when a booking resolved)
 - [ ] Preview modal; Merge + Merge-out (merge shape still uncaptured)
 - [ ] Port `renderDuplicates` / `buildStripDupRow`, remap FD int codes -> Zoho strings
 - [ ] Preview modal; Merge + Merge-out

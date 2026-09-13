@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MWR Zoho Tools
 // @namespace    https://traveladvantage.com
-// @version      0.1.0
-// @description  TA booking tools for Zoho Desk — booking panel, notes, member lookup
+// @version      0.2.0
+// @description  TA booking tools for Zoho Desk — booking panel, duplicates, notes, supplier email
 // @match        https://desk.zoho.com/agent/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -375,38 +375,34 @@
     return { subject: ticket.subject || '', description, ticket };
   }
 
-  // ===== BOOKING PANEL =====
-  function injectBookingPanel() {
-    if (document.getElementById('taBookingPanel')) return;
-    const panel = document.createElement('div');
-    panel.id = 'taBookingPanel';
-    panel.style.cssText = `position:fixed;top:80px;right:18px;width:340px;max-height:calc(100vh - 110px);background:#fff;border-radius:${THEME.radius};box-shadow:${THEME.shadow};z-index:999998;font-family:${THEME.font};display:flex;flex-direction:column;`;
+  // ===== PANELS =====
+  // Two independent cards in one rail. Duplicates deliberately does NOT live
+  // inside the booking card: duplicate detection has to work on tickets where no
+  // booking reference was ever found, which is exactly when an agent most needs
+  // to know the ticket is a repeat.
+  function buildCard(id, titleText, color) {
+    const card = document.createElement('div');
+    card.id = id;
+    card.style.cssText = `background:#fff;border-radius:${THEME.radius};box-shadow:${THEME.shadow};display:flex;flex-direction:column;flex-shrink:0;max-height:100%;`;
 
     const header = document.createElement('div');
-    header.id = 'taBookingPanelHeader';
-    header.style.cssText = `padding:10px 14px;border-bottom:1px solid ${THEME.border};display:flex;justify-content:space-between;align-items:center;flex-shrink:0;`;
+    header.style.cssText = `padding:9px 13px;border-bottom:1px solid ${THEME.border};display:flex;justify-content:space-between;align-items:center;flex-shrink:0;`;
     const title = document.createElement('span');
-    title.id = 'taPanelTitle';
-    title.style.cssText = `font-weight:600;font-size:13px;color:${THEME.primary};`;
-    title.textContent = 'TA Booking';
+    title.id = id + 'Title';
+    title.style.cssText = `font-weight:600;font-size:13px;color:${color};`;
+    title.textContent = titleText;
     const controls = document.createElement('span');
-    const gear = document.createElement('button');
-    gear.textContent = '⚙';
-    gear.title = 'Set backend key';
-    gear.style.cssText = 'background:none;border:none;font-size:14px;color:#bbb;cursor:pointer;margin-right:4px;';
-    gear.onclick = () => promptForSecret(true);
+    controls.id = id + 'Controls';
     const collapse = document.createElement('button');
     collapse.textContent = '–';
     collapse.style.cssText = 'background:none;border:none;font-size:16px;color:#aaa;cursor:pointer;';
-    controls.appendChild(gear);
     controls.appendChild(collapse);
     header.appendChild(title);
     header.appendChild(controls);
 
     const body = document.createElement('div');
-    body.id = 'taBookingPanelBody';
-    body.style.cssText = 'flex:1;overflow-y:auto;padding:12px 14px;';
-    body.innerHTML = `<div style="color:${THEME.subtle};font-size:13px;">Loading…</div>`;
+    body.id = id + 'Body';
+    body.style.cssText = 'flex:1;overflow-y:auto;padding:11px 13px;';
 
     collapse.onclick = () => {
       const hidden = body.style.display === 'none';
@@ -414,10 +410,39 @@
       collapse.textContent = hidden ? '–' : '+';
     };
 
-    panel.appendChild(header);
-    panel.appendChild(body);
-    document.body.appendChild(panel);
-    makeDraggable(panel, header);
+    card.appendChild(header);
+    card.appendChild(body);
+    return { card, header, body, controls };
+  }
+
+  function injectPanels() {
+    if (document.getElementById('taRail')) return;
+    const rail = document.createElement('div');
+    rail.id = 'taRail';
+    rail.style.cssText = `position:fixed;top:80px;right:18px;width:345px;max-height:calc(100vh - 100px);z-index:999998;font-family:${THEME.font};display:flex;flex-direction:column;gap:10px;overflow-y:auto;`;
+
+    const booking = buildCard('taBookingPanel', 'TA Booking', THEME.primary);
+    const gear = document.createElement('button');
+    gear.textContent = '⚙';
+    gear.title = 'Set backend key';
+    gear.style.cssText = 'background:none;border:none;font-size:14px;color:#bbb;cursor:pointer;margin-right:4px;';
+    gear.onclick = () => promptForSecret(true);
+    booking.controls.insertBefore(gear, booking.controls.firstChild);
+    booking.body.innerHTML = `<div style="color:${THEME.subtle};font-size:13px;">Loading…</div>`;
+
+    const dups = buildCard('taDupPanel', 'Duplicates', '#b8860b');
+    const refresh = document.createElement('button');
+    refresh.textContent = '⟳';
+    refresh.title = 'Re-run duplicate search';
+    refresh.style.cssText = 'background:none;border:none;font-size:13px;color:#bbb;cursor:pointer;margin-right:4px;';
+    refresh.onclick = () => loadDuplicates(true);
+    dups.controls.insertBefore(refresh, dups.controls.firstChild);
+    dups.body.id = 'taDuplicates';
+
+    rail.appendChild(booking.card);
+    rail.appendChild(dups.card);
+    document.body.appendChild(rail);
+    makeDraggable(rail, booking.header);
   }
 
   function panelBody() {
@@ -524,14 +549,12 @@
           <button id="taChangeFetch" style="flex:0 0 auto;padding:6px 10px;border:1px solid #d3d8de;border-radius:4px;background:#fff;cursor:pointer;font-size:12px;">Fetch</button>
         </div>
         ${openBookingHtml}
-        <div id="taDuplicates"></div>
       `;
       document.getElementById('taPostNote').addEventListener('click', onPostNote);
       document.getElementById('taViewNote').addEventListener('click', onViewNote);
       const supBtn = document.getElementById('taSupplierEmailBtn');
       if (supBtn) supBtn.addEventListener('click', onSupplierEmail);
       wireChangeBooking();
-      loadDuplicates();
     } else {
       body.innerHTML = `<div style="color:${THEME.subtle};font-size:13px;">No booking reference found in this ticket.</div>
         <div style="display:flex;gap:6px;margin-top:10px;">
@@ -871,7 +894,11 @@
     }
   }
 
-  function normalizeSearchRow(t, matchedBy) {
+  // A match carries both WHAT matched and the VALUE it matched on, because the
+  // value is what an agent actually needs to see — "booking ID" tells them
+  // nothing, "412468" tells them why this ticket surfaced. Mirrors the Freshdesk
+  // strip, which showed the matched value rather than the label.
+  function normalizeSearchRow(t, label, value) {
     const a = t.assignee;
     return {
       id: String(t.id),
@@ -879,9 +906,10 @@
       subject: t.subject || '',
       status: t.status || null,
       statusType: t.statusType || null,
+      priority: t.priority || null,
       assignee: a ? [a.firstName, a.lastName].filter(Boolean).join(' ') : null,
       createdTime: t.createdTime || null,
-      matchedBy: [matchedBy],
+      matchedBy: [{ label, value: value == null ? label : String(value) }],
       linked: false,
     };
   }
@@ -893,9 +921,10 @@
       subject: r.subject || '',
       status: r.status || null,
       statusType: null,          // unknown until enriched
+      priority: null,
       assignee: null,
       createdTime: r.created_at || null,
-      matchedBy: ['linked booking'],
+      matchedBy: [{ label: 'linked booking', value: String(r.booking_id || '') }],
       linked: true,
     };
   }
@@ -907,10 +936,14 @@
         if (String(row.id) === String(currentTicketId)) return;
         const existing = seen.get(row.id);
         if (!existing) { seen.set(row.id, row); return; }
-        row.matchedBy.forEach((m) => { if (!existing.matchedBy.includes(m)) existing.matchedBy.push(m); });
+        row.matchedBy.forEach((m) => {
+          if (!existing.matchedBy.some((x) => x.label === m.label && x.value === m.value)) {
+            existing.matchedBy.push(m);
+          }
+        });
         existing.linked = existing.linked || row.linked;
         // Search rows carry richer data than DB rows; let them fill the gaps.
-        ['ticketNumber', 'subject', 'status', 'statusType', 'assignee'].forEach((k) => {
+        ['ticketNumber', 'subject', 'status', 'statusType', 'priority', 'assignee'].forEach((k) => {
           if (!existing[k] && row[k]) existing[k] = row[k];
         });
       });
@@ -929,9 +962,38 @@
         r.subject = r.subject || t.subject || '';
         r.status = t.status || r.status;
         r.statusType = t.statusType || null;
+        r.priority = r.priority || t.priority || null;
       } catch (e) { /* leave unenriched; it still renders */ }
     }));
     return rows;
+  }
+
+  // Every term we can search this ticket on. The contact email comes from the
+  // ticket itself, so duplicate detection still works when no booking reference
+  // was ever found — which is precisely when an agent is most likely to miss
+  // that the ticket is a repeat.
+  function collectDuplicateTerms() {
+    const bd = ticketBookingCache[currentTicketId];
+    const booking = bd && bd.booking;
+    const user = getDisplayUser();
+    const meta = currentTicketMeta || {};
+
+    const terms = [
+      { label: 'booking ID',   value: booking && booking.internalBookingId },
+      { label: 'supplier ref', value: booking && booking.supplierId },
+      { label: 'member email', value: user && user.email },
+      { label: 'contact email', value: meta.email },
+    ].filter((t) => t.value);
+
+    // The booking's member and the ticket's contact are usually the same person;
+    // searching the same address twice would double-badge every row.
+    const seen = new Set();
+    return terms.filter((t) => {
+      const k = String(t.value).toLowerCase();
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
   }
 
   async function loadDuplicates(force) {
@@ -939,29 +1001,25 @@
     if (!host || !currentTicketId) return;
     if (!force && duplicateCache[currentTicketId]) { renderDuplicates(); return; }
 
-    const bd = ticketBookingCache[currentTicketId];
-    const booking = bd && bd.booking;
-    const user = getDisplayUser();
-    const internalId = booking && booking.internalBookingId;
-    const supplierRef = booking && booking.supplierId;
-    const email = user && user.email;
+    const terms = collectDuplicateTerms();
+    if (!terms.length) {
+      host.innerHTML = `<div style="color:${THEME.subtle};font-size:11px;">Nothing to search on yet.</div>`;
+      return;
+    }
 
-    if (!internalId && !supplierRef && !email) { host.innerHTML = ''; return; }
+    host.innerHTML = `<div style="color:${THEME.subtle};font-size:11px;">⏳ Searching ${terms.length} reference${terms.length === 1 ? '' : 's'}…</div>`;
 
-    host.innerHTML = `<div style="margin-top:12px;padding-top:10px;border-top:1px solid ${THEME.border};color:${THEME.subtle};font-size:11px;">⏳ Checking for duplicates…</div>`;
+    const searches = terms.map((t) =>
+      zdSearchTickets(t.value).then((rs) => rs.map((row) => normalizeSearchRow(row, t.label, t.value)))
+    );
+    const dbLookup = currentBookingId
+      ? api.bookingTickets(currentBookingId, currentTicketId)
+          .then((r) => (r.ok ? (r.data.tickets || []).map(normalizeDbRow) : []))
+          .catch(() => [])
+      : Promise.resolve([]);
 
-    const [dbRows, byInternal, bySupplier, byEmail] = await Promise.all([
-      currentBookingId
-        ? api.bookingTickets(currentBookingId, currentTicketId)
-            .then((r) => (r.ok ? (r.data.tickets || []).map(normalizeDbRow) : []))
-            .catch(() => [])
-        : Promise.resolve([]),
-      internalId  ? zdSearchTickets(internalId).then((rs) => rs.map((t) => normalizeSearchRow(t, 'booking ID'))) : [],
-      supplierRef ? zdSearchTickets(supplierRef).then((rs) => rs.map((t) => normalizeSearchRow(t, 'supplier ref'))) : [],
-      email       ? zdSearchTickets(email).then((rs) => rs.map((t) => normalizeSearchRow(t, 'member email'))) : [],
-    ]);
-
-    const merged = await enrichLinkedRows(mergeDuplicates([dbRows, byInternal, bySupplier, byEmail]));
+    const groups = await Promise.all([dbLookup, ...searches]);
+    const merged = await enrichLinkedRows(mergeDuplicates(groups));
     duplicateCache[currentTicketId] = merged;
     renderDuplicates();
   }
@@ -971,7 +1029,7 @@
     const existing = duplicateCache[currentTicketId] || [];
     duplicateCache[currentTicketId] = mergeDuplicates([
       existing,
-      rows.map((t) => normalizeSearchRow(t, 'manual search')),
+      rows.map((t) => normalizeSearchRow(t, 'manual search', term)),
     ]);
     renderDuplicates();
   }
@@ -984,51 +1042,63 @@
     // filtered server-side, so the toggle is applied here.
     const rows = dupIncludeClosed ? all : all.filter((r) => r.statusType !== 'Closed');
 
-    const badge = (m) => {
-      const colors = {
-        'linked booking': THEME.success,
-        'booking ID': THEME.primary,
-        'supplier ref': THEME.info,
-        'member email': '#fd7e14',
-        'manual search': THEME.muted,
-      };
-      return `<span style="display:inline-block;padding:1px 5px;border-radius:8px;background:${colors[m] || THEME.muted};color:#fff;font-size:9px;margin-right:3px;">${escapeHtml(m)}</span>`;
+    const statusChip = (r) => {
+      if (!r.status) return '';
+      const closed = r.statusType === 'Closed';
+      const c = closed ? { bg: '#f1f3f5', fg: '#6c757d' }
+              : r.status === 'Open' ? { bg: '#e8f4ff', fg: '#0056d2' }
+              : { bg: '#fff3cd', fg: '#856404' };
+      return `<span style="background:${c.bg};color:${c.fg};font-size:9px;font-weight:600;padding:1px 6px;border-radius:7px;white-space:nowrap;">${escapeHtml(r.status)}</span>`;
+    };
+
+    const priorityChip = (r) => {
+      if (!r.priority) return '';
+      const c = { Low: { bg: '#f1f3f5', fg: '#6c757d' }, Medium: { bg: '#e8f4ff', fg: '#0056d2' },
+                  High: { bg: '#ffe8d6', fg: '#b35200' }, Urgent: { bg: '#fde2e2', fg: '#c82333' } }[r.priority];
+      if (!c) return '';
+      return `<span title="Priority" style="background:${c.bg};color:${c.fg};font-size:9px;font-weight:600;padding:1px 6px;border-radius:7px;white-space:nowrap;">${escapeHtml(r.priority)}</span>`;
+    };
+
+    // Show the matched VALUE, not the label — this is what the Freshdesk strip
+    // did, and it is what tells an agent why a ticket surfaced.
+    const matchChip = (r) => {
+      const values = r.matchedBy.map((m) => m.value).filter(Boolean);
+      if (!values.length) return '';
+      const title = r.matchedBy.map((m) => `${m.label}: ${m.value}`).join(' · ');
+      return `<span title="${escapeHtml(title)}" style="background:#fff3cd;color:#856404;font-size:9px;font-weight:600;padding:2px 6px;border-radius:7px;display:inline-block;margin-top:3px;word-break:break-all;">🔗 ${escapeHtml(values.join(' · '))}</span>`;
     };
 
     const items = rows.map((r) => {
       const label = r.ticketNumber ? '#' + escapeHtml(r.ticketNumber) : escapeHtml(r.id);
       const subj = r.subject ? escapeHtml(String(r.subject).slice(0, 70)) : '';
       const closed = r.statusType === 'Closed';
-      const status = r.status
-        ? `<span style="color:${closed ? THEME.muted : THEME.success};font-size:10px;">${escapeHtml(r.status)}</span>`
-        : '';
-      const who = r.assignee ? `<span style="color:${THEME.subtle};font-size:9px;">${escapeHtml(r.assignee)}</span>` : '';
-      return `<a href="${ticketUrl(r.id)}" style="display:block;padding:5px 7px;border:1px solid ${THEME.border};border-radius:4px;margin-bottom:4px;text-decoration:none;color:${THEME.text};background:${closed ? '#fafafa' : '#fff'};">
-        <div style="display:flex;justify-content:space-between;gap:6px;align-items:center;"><strong style="font-size:11px;">${label}</strong>${status}</div>
-        <div style="color:#666;font-size:10px;margin:2px 0;">${subj}</div>
-        <div>${r.matchedBy.map(badge).join('')}${who}</div></a>`;
+      const who = r.assignee ? `<span style="color:${THEME.primary};font-size:9px;font-weight:500;" title="Assigned to">${escapeHtml(r.assignee)}</span>` : '';
+      return `<a href="${ticketUrl(r.id)}" style="display:block;padding:6px 7px;border:1px solid ${THEME.border};border-radius:4px;margin-bottom:5px;text-decoration:none;color:${THEME.text};background:${closed ? '#fafafa' : '#fff'};">
+        <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;">
+          <strong style="font-size:11px;color:#007bff;">${label}</strong>${statusChip(r)}${priorityChip(r)}${who}
+        </div>
+        <div style="color:#666;font-size:10px;margin:2px 0 0;">${subj}</div>
+        <div>${matchChip(r)}</div></a>`;
     }).join('');
 
     const hiddenCount = all.length - rows.length;
+    const searched = (collectDuplicateTerms() || []).map((t) => t.label).join(', ');
+
     host.innerHTML = `
-      <div style="margin-top:12px;padding-top:10px;border-top:1px solid ${THEME.border};">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-          <span style="font-weight:600;font-size:11px;color:${rows.length ? '#b8860b' : THEME.muted};text-transform:uppercase;letter-spacing:.04em;">
-            ${rows.length ? '⚠ ' + rows.length + ' possible duplicate' + (rows.length === 1 ? '' : 's') : 'No duplicates'}</span>
-          <button id="taDupRefresh" title="Re-run search" style="background:none;border:none;color:${THEME.subtle};font-size:11px;cursor:pointer;">⟳</button>
-        </div>
-        ${items}
-        <label style="display:flex;align-items:center;gap:5px;color:${THEME.subtle};font-size:10px;margin-top:4px;cursor:pointer;">
-          <input type="checkbox" id="taDupClosed" ${dupIncludeClosed ? 'checked' : ''} style="margin:0;" />
-          incl. closed${hiddenCount > 0 ? ` (${hiddenCount} hidden)` : ''}
-        </label>
-        <div style="display:flex;gap:5px;margin-top:6px;">
-          <input id="taDupQuery" type="text" placeholder="Search tickets…" style="flex:1;min-width:0;padding:5px 8px;border:1px solid #ddd;border-radius:4px;font-size:11px;" />
-          <button id="taDupGo" style="flex:0 0 auto;padding:5px 9px;border:1px solid #d3d8de;border-radius:4px;background:#fff;cursor:pointer;font-size:11px;">🔍</button>
-        </div>
+      <div style="font-weight:600;font-size:11px;color:${rows.length ? '#b8860b' : THEME.muted};margin-bottom:6px;">
+        ${rows.length ? '⚠ ' + rows.length + ' possible duplicate' + (rows.length === 1 ? '' : 's') : 'No duplicates found'}
+      </div>
+      ${searched ? `<div style="color:${THEME.subtle};font-size:9px;margin-bottom:7px;">searched: ${escapeHtml(searched)}</div>` : ''}
+      ${items}
+      <label style="display:flex;align-items:center;gap:5px;color:${THEME.subtle};font-size:10px;margin-top:4px;cursor:pointer;">
+        <input type="checkbox" id="taDupClosed" ${dupIncludeClosed ? 'checked' : ''} style="margin:0;" />
+        incl. closed${hiddenCount > 0 ? ` (${hiddenCount} hidden)` : ''}
+      </label>
+      <div style="display:flex;gap:5px;margin-top:6px;">
+        <input id="taDupQuery" type="text" placeholder="Search tickets…" style="flex:1;min-width:0;padding:5px 8px;border:1px solid #ddd;border-radius:4px;font-size:11px;" />
+        <button id="taDupGo" style="flex:0 0 auto;padding:5px 9px;border:1px solid #d3d8de;border-radius:4px;background:#fff;cursor:pointer;font-size:11px;">🔍</button>
       </div>`;
 
-    document.getElementById('taDupRefresh').onclick = () => loadDuplicates(true);
     document.getElementById('taDupClosed').onchange = (e) => {
       dupIncludeClosed = e.target.checked;
       renderDuplicates();
@@ -1245,32 +1315,49 @@
     currentTicketId = ticketId;
     panelUserOverride = null;
     currentTicketMeta = null;
-    injectBookingPanel();
+    currentBookingId = null;
+    injectPanels();
 
-    const titleEl = document.getElementById('taPanelTitle');
-    if (titleEl) titleEl.textContent = 'TA Booking';
-
-    if (ticketBookingCache[ticketId]) {
-      const cached = ticketBookingCache[ticketId];
+    const cached = ticketBookingCache[ticketId];
+    const haveBooking = cached !== undefined;   // null means "looked, found none"
+    if (haveBooking) {
       currentBookingId = cached && cached.booking ? cached.booking.internalBookingId : null;
       renderBookingPanel();
-      return;
+    } else {
+      renderPanelMessage(`<div style="color:${THEME.subtle};font-size:13px;">Reading ticket…</div>`);
     }
+
+    // The ticket read serves both halves, so it happens before either. It needs
+    // no backend key — it is a same-origin Desk call.
+    let ctx = null;
+    try {
+      ctx = await fetchTicketContext(ticketId);
+      currentTicketMeta = {
+        ticketNumber: ctx.ticket.ticketNumber || null,
+        subject: ctx.ticket.subject || null,
+        status: ctx.ticket.status || null,
+        email: ctx.ticket.email || null,
+      };
+    } catch (err) {
+      console.error('[ta] ticket read failed:', err);
+      if (!haveBooking) {
+        renderPanelMessage(`<div style="color:${THEME.danger};font-size:13px;">${escapeHtml(err.message)}</div>`);
+      }
+    }
+
+    // Duplicates run on EVERY ticket, whether or not a booking is ever found and
+    // whether or not a backend key is set: the search half is same-origin, and a
+    // ticket with no booking reference is exactly where a repeat goes unnoticed.
+    loadDuplicates(true);
+
+    if (haveBooking || !ctx) return;
 
     if (!getSecret()) {
       renderPanelMessage(`<div style="color:${THEME.subtle};font-size:13px;">No backend key set. Click ⚙ above to enter it.</div>`);
       return;
     }
 
-    renderPanelMessage(`<div style="color:${THEME.subtle};font-size:13px;">Reading ticket…</div>`);
     try {
-      const ctx = await fetchTicketContext(ticketId);
-      currentTicketMeta = {
-        ticketNumber: ctx.ticket.ticketNumber || null,
-        subject: ctx.ticket.subject || null,
-        status: ctx.ticket.status || null,
-      };
-
       renderPanelMessage(`<div style="color:${THEME.subtle};font-size:13px;">Finding booking reference…</div>`);
       const ext = await api.extract({ subject: ctx.subject, description: ctx.description });
       if (!ext.ok) {
@@ -1294,6 +1381,8 @@
       currentBookingId = bookingId;
       ticketBookingCache[ticketId] = res.data.bookingData;
       renderBookingPanel();
+      // Re-runs the duplicate search now that booking ID and supplier ref are
+      // available as additional terms.
       recordBookingLink(bookingId, 'auto');
     } catch (err) {
       console.error('[ta] load failed:', err);
