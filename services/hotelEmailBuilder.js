@@ -2,8 +2,15 @@ const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</
 
 /**
  * Builds the HTML body for a hotel prepaid confirmation email.
+ *
+ * `agentName` names the sender in both the greeting and the signature. It
+ * defaults to 'Ivan K.' so the Freshdesk path renders byte-identically to
+ * before; the Zoho overlay passes the acting agent so that 40 agents do not all
+ * sign as one person.
  */
-function buildHotelEmailHtml(booking, details = {}) {
+function buildHotelEmailHtml(booking, details = {}, agentName = 'Ivan K.') {
+  const fullName = String(agentName || 'Ivan K.').trim();
+  const firstName = fullName.split(/\s+/)[0] || fullName;
   const v = (val) => esc(val || '—');
 
   let roomLine = null;
@@ -34,7 +41,7 @@ function buildHotelEmailHtml(booking, details = {}) {
   const signature = `
 <br>
 <p>Sincerely,<br>
-Ivan K.<br>
+${esc(fullName)}<br>
 Travel Advantage Support<br>
 <span style="border-top:1px solid #ccc;display:block;padding-top:6px;margin-top:6px;">
 member@traveladvantage.com<br>
@@ -52,7 +59,7 @@ USA: +1 857 763 2085<br>
 
   return `
 <p>Hi, dear hotel team,</p>
-<p>My name is Ivan, and I'm here with TravelAdvantage support team. I'm contacting you to confirm the prepaid reservation.</p>
+<p>My name is ${esc(firstName)}, and I'm here with TravelAdvantage support team. I'm contacting you to confirm the prepaid reservation.</p>
 <p>The details are as follows:</p>
 <p>${lines.join('<br>')}</p>
 <p>Kindly double-check and confirm the reservation, including the room and bed type, and please make a note of the customer arrival time or special requests (if listed).</p>

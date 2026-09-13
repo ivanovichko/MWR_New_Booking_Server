@@ -11,7 +11,7 @@ const { aiAssist, findHotelEmail, translateText } = require('./services/aiServic
 const { getAuthHeader, fdGet, addNote, addNoteWithImages, sendEmail, sendEmailWithAttachments, setTicketPending, setTicketSubject, searchDuplicates, getTicketContext } = require('./services/freshdeskService');
 const { fetchAgentMap, fetchAllAgents, fillMissingAgentNames } = require('./services/agentService');
 const { fetchTicket } = require('./services/ticketService');
-const { initDb, getCachedBooking, cacheBooking, storeSession, getPrompts, createPrompt, updatePrompt, deletePrompt, storeFreshdeskSession } = require('./services/dbService');
+const { initDb, getCachedBooking, cacheBooking, storeSession, getPrompts, createPrompt, updatePrompt, deletePrompt, storeFreshdeskSession, linkTicketBooking, getTicketBooking, getTicketsForBooking, unlinkTicket } = require('./services/dbService');
 const { fetchAndCacheBooking, extractBookingId, checkPendings } = require('./services/prewarmService');
 const { taGet, taPost }                  = require('./services/taAuthService');
 const { buildHotelEmailHtml }            = require('./services/hotelEmailBuilder');
@@ -169,6 +169,78 @@ app.post('/zoho/member-note', safeRoute(async (req, res) => {
   await postComment(ticketId, noteHtml, false);
   console.log(`[zoho] posted member note to ticket ${ticketId}`);
   res.json({ success: true });
+}));
+
+// ─── Ticket ↔ booking link ───────────────────────────────────────────────────
+// The overlay records the link as soon as a booking is established for a ticket,
+// so the booking becomes a first-class key rather than something re-derived from
+// the ticket text on every visit. A booking maps to many tickets, which is what
+// makes /zoho/booking-tickets a reliable duplicate lookup — far better than
+// matching subject strings.
+app.post('/zoho/ticket-booking', safeRoute(async (req, res) => {
+  requireZohoSecret(req);
+  const { ticketId, bookingId, ticketNumber, subject, status, linkedBy, source } = req.body;
+  if (!ticketId || !bookingId) throw new HttpError('ticketId and bookingId are required');
+  const link = await linkTicketBooking({
+    ticketId, bookingId, ticketNumber, subject, status, linkedBy,
+    source: source || 'auto',
+  });
+  console.log(`[zoho] linked ticket ${ticketId} → booking ${bookingId} (${source || 'auto'})`);
+  res.json({ success: true, link });
+}));
+
+app.get('/zoho/ticket-booking/:ticketId', safeRoute(async (req, res) => {
+  requireZohoSecret(req);
+  const link = await getTicketBooking(req.params.ticketId);
+  res.json({ success: true, link });
+}));
+
+// Every other ticket already linked to this booking — the duplicate set.
+app.get('/zoho/booking-tickets/:bookingId', safeRoute(async (req, res) => {
+  requireZohoSecret(req);
+  const tickets = await getTicketsForBooking(req.params.bookingId, req.query.exclude || null);
+  res.json({ success: true, tickets });
+}));
+
+app.delete('/zoho/ticket-booking/:ticketId', safeRoute(async (req, res) => {
+  requireZohoSecret(req);
+  await unlinkTicket(req.params.ticketId);
+  console.log(`[zoho] unlinked ticket ${req.params.ticketId}`);
+  res.json({ success: true });
+}));
+
+// ─── Supplier/hotel email: lookup + preview ──────────────────────────────────
+// Phase 1 only. Unlike the Freshdesk twin (ticketActionService.lookupHotelEmail)
+// this does NOT tag the ticket — tags are not part of the Zoho workflow — and it
+// does NOT send. Sending happens in the overlay via Desk's own sendReply so the
+// mail is attributed to the acting agent rather than a shared OAuth identity,
+// which also means the backend never needs Zoho write access for this flow.
+app.post('/zoho/hotel-email/lookup', safeRoute(async (req, res) => {
+  requireZohoSecret(req);
+  const { bookingId, agentName } = req.body;
+  if (!bookingId) throw new HttpError('bookingId is required');
+
+  const cached = await getCachedBooking(bookingId);
+  if (!cached || !cached.parsed) throw new HttpError('Booking not cached', 404);
+  const { booking, details } = cached.parsed;
+
+  const emailResult = await findHotelEmail(
+    (details && details.hotelName) || booking.supplierName,
+    booking.locationTo,
+    booking.destinationCountry
+  );
+
+  const emailHtmlPreview = buildHotelEmailHtml(booking, details || {}, agentName);
+  const subject = `Prepaid Reservation Confirmation — ${booking.guestName} / ${booking.checkIn}`;
+
+  console.log(`[zoho] hotel-email lookup ${bookingId} → ${(emailResult && emailResult.email) || 'none'}`);
+  res.json({
+    success: true,
+    emailResult,
+    hotelName: (details && details.hotelName) || booking.supplierName,
+    subject,
+    emailHtmlPreview,
+  });
 }));
 
 

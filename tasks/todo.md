@@ -896,3 +896,98 @@ Backend: **no changes** — reuse existing `GET /guided-prewarm/analyse/:id` for
 ## Review
 
 _To be filled in after implementation._
+
+---
+
+# Session 22 — Zoho Desk overlay (replaces the blocked widget)
+
+Full plan: `~/.claude/plans/tranquil-riding-pumpkin.md`.
+
+Scope this release: widget parity + duplicates + reply composer. Freshdesk code
+untouched (full deprecation is a separate refactor). Writes must be attributed to
+the **acting agent**, which forces the in-page same-origin path over backend OAuth.
+
+## Phase 0 — live endpoint capture (blocks everything else)
+- [x] Arm fetch/XHR capture harness on a test ticket (v1 lost to a page reload;
+      v2 persists captures to `sessionStorage`)
+- [x] Capture internal-comment POST → **resolved differently and better**: rather
+      than hardcoding a token source, the overlay observes `X-ZCSRF-TOKEN` off
+      Desk's own writes at `document-start` and reuses it. Verified live: probe
+      write returned `404 URL_NOT_FOUND`, not `401` — auth passes.
+- [ ] ~~Capture Reply send~~ → deferred; `sendReply` shape taken from public REST v1
+      docs, verify at test time
+- [ ] ~~Capture merge~~ → **deferred: no disposable tickets available 2026-09-13.**
+      Duplicate strip ships with preview + link-out, no merge button, until two
+      scratch tickets can be merged with the harness armed
+- [x] Write findings to `tasks/zoho-endpoints.md`
+
+## Phase 1 — widget parity
+- [ ] `frontend/MWR Zoho Tools.user.js` skeleton (@match desk.zoho.com/agent/*)
+- [ ] Secret prompt + `GM_setValue` storage (repo is public — nothing hardcoded)
+- [ ] `zdGet`/`zdPost` (same-origin, `orgId: 914515468`, CSRF on writes)
+- [ ] `api` object over `GM_xmlhttpRequest` to the Render backend
+- [ ] SPA nav hook + `getZohoTicketId()`
+- [ ] Booking flow: ticket fetch -> `/zoho/extract` -> `/guided-prewarm/booking/:id`
+- [ ] `renderBookingPanel` (port from `TA_Zoho_beta/app/widget.js`)
+- [ ] Post Note via `POST /tickets/{id}/comments` (agent-attributed)
+- [ ] View Note modal + Change Booking
+- [ ] Member section: Profile / Reservations / Find Member / Post Member Note
+
+## Phase 1b — ticket ↔ booking link (DB)
+- [x] `ticket_bookings` table in `services/dbService.js` — `ticket_id` PK,
+      `booking_id` + index (one booking → many tickets), plus `ticket_number`,
+      `subject`, `status`, `linked_by`, `source` ('auto' | 'manual')
+- [x] `linkTicketBooking` / `getTicketBooking` / `getTicketsForBooking` /
+      `unlinkTicket`
+- [x] Routes: `POST /zoho/ticket-booking`, `GET /zoho/ticket-booking/:ticketId`,
+      `GET /zoho/booking-tickets/:bookingId?exclude=`, `DELETE /zoho/ticket-booking/:ticketId`
+- [x] Overlay records the link on every booking establish (auto extraction,
+      Change Booking, reservation click) and renders an "N other tickets on this
+      booking" block in the panel
+- [ ] **UNVERIFIED — no DB access locally** (no `.env`, no local Postgres, no
+      docker perms). The SQL has never been executed. Confirm on first deploy:
+      `initDb` should create the table, then link two tickets to one booking and
+      check `GET /zoho/booking-tickets/:id` returns the sibling.
+
+## Phase 2 — duplicate search
+- [x] Merged search: `ticket_bookings` (exact, seen tickets only) UNION Zoho
+      `/search` by booking ID + supplier ref + member email. Neither source is
+      sufficient alone — unviewed duplicates are absent from the DB.
+- [x] Containment verification against subject/description/lastThread — Zoho
+      search is fuzzy (a short numeric returned 20 noise rows)
+- [x] Dedupe by ticket id, union `matchedBy` badges per row
+- [x] Client-side open/closed filter (`statusType` is rejected as a query param)
+      + "incl. closed" toggle showing the hidden count
+- [x] Manual search box (unverified — the agent typed it deliberately) + refresh
+- [x] Renders in the booking panel
+- [ ] Move to a strip above the reply bar (needs the composer anchor, Phase 0)
+- [ ] Duplicates for tickets with **no** booking (currently the panel only renders
+      the block when a booking resolved)
+- [ ] Preview modal; Merge + Merge-out (merge shape still uncaptured)
+- [ ] Port `renderDuplicates` / `buildStripDupRow`, remap FD int codes -> Zoho strings
+- [ ] Preview modal; Merge + Merge-out
+
+## Phase 2b — supplier (hotel) email
+- [x] `POST /zoho/hotel-email/lookup` — Groq address lookup + body preview, no
+      tagging, no sending (the Freshdesk twin tags via Freshdesk and sends itself)
+- [x] `buildHotelEmailHtml` takes an `agentName` (defaults to 'Ivan K.', so the
+      Freshdesk path is byte-identical) — used in greeting AND signature
+- [x] Agent name stored per-agent in `GM_setValue`; Desk exposes no current-agent
+      endpoint (`/agents/me` 404s, `/myPreferences` carries no identity)
+- [x] `✉ Supplier` button on hotel/getaway bookings; confirm modal with editable
+      To / Subject / body, "signing as … change", confirm-before-send
+- [x] Send via `POST /tickets/{id}/sendReply` from the agent's session; `from`
+      taken from the ticket's own latest outbound thread
+- [ ] **Never sent a real email through this path** — verify on a test ticket
+- [ ] Non-hotel suppliers: the body says "dear hotel team", so the button is
+      hidden for flights. Needs a generic template if flight suppliers are wanted
+
+## Phase 3 — reply composer
+- [ ] Reply Customer / Reply Supplier buttons on captured anchors
+- [ ] Port `showReplyComposer` + `buildReplySignature` + attachments
+- [ ] Send via `POST /tickets/{id}/sendReply`
+- [ ] Real agent signature from `GET /agents` (retires hardcoded "Ivan K.")
+
+## Review
+
+_To be filled in after implementation._

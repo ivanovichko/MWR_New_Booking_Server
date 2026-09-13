@@ -67,6 +67,25 @@ async function initDb() {
       processed_at TIMESTAMPTZ DEFAULT NOW()
     );
 
+    -- Ticket ↔ booking link. One ticket resolves to at most one booking (hence
+    -- ticket_id as PK), but a booking commonly spans several tickets — the guest
+    -- writes again, replies land as new tickets, a supplier thread forks. That
+    -- one-to-many side is the duplicate signal: siblings of the same booking_id
+    -- are far more reliable than matching on subject text.
+    CREATE TABLE IF NOT EXISTS ticket_bookings (
+      ticket_id     TEXT PRIMARY KEY,
+      booking_id    TEXT NOT NULL,
+      helpdesk      TEXT NOT NULL DEFAULT 'zoho',
+      ticket_number TEXT,
+      subject       TEXT,
+      status        TEXT,
+      linked_by     TEXT,
+      source        TEXT NOT NULL DEFAULT 'auto',
+      created_at    TIMESTAMPTZ DEFAULT NOW(),
+      updated_at    TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_ticket_bookings_booking_id ON ticket_bookings (booking_id);
+
     CREATE TABLE IF NOT EXISTS agent_prompts (
       id         SERIAL PRIMARY KEY,
       label      TEXT NOT NULL,
@@ -182,6 +201,43 @@ async function getTicketSummaries() {
   return res.rows;
 }
 
+// ─── Ticket ↔ booking link ────────────────────────────────────────────────────
+// Written whenever the overlay establishes a booking for a ticket, whether by
+// extraction (source 'auto') or by an agent picking one (source 'manual'). A
+// re-link overwrites rather than accumulating, so the row always reflects the
+// booking currently shown in the panel.
+async function linkTicketBooking({ ticketId, bookingId, helpdesk = 'zoho', ticketNumber = null, subject = null, status = null, linkedBy = null, source = 'auto' }) {
+  const res = await pool.query(`
+    INSERT INTO ticket_bookings (ticket_id, booking_id, helpdesk, ticket_number, subject, status, linked_by, source, updated_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+    ON CONFLICT (ticket_id) DO UPDATE
+      SET booking_id = $2, helpdesk = $3, ticket_number = $4, subject = $5,
+          status = $6, linked_by = COALESCE($7, ticket_bookings.linked_by),
+          source = $8, updated_at = NOW()
+    RETURNING *
+  `, [String(ticketId), String(bookingId), helpdesk, ticketNumber, subject, status, linkedBy, source]);
+  return res.rows[0];
+}
+
+async function getTicketBooking(ticketId) {
+  const res = await pool.query(`SELECT * FROM ticket_bookings WHERE ticket_id = $1`, [String(ticketId)]);
+  return res.rows[0] || null;
+}
+
+// The duplicate query: every other ticket already linked to this booking.
+async function getTicketsForBooking(bookingId, excludeTicketId = null) {
+  const res = await pool.query(`
+    SELECT * FROM ticket_bookings
+    WHERE booking_id = $1 AND ($2::text IS NULL OR ticket_id <> $2)
+    ORDER BY updated_at DESC
+  `, [String(bookingId), excludeTicketId ? String(excludeTicketId) : null]);
+  return res.rows;
+}
+
+async function unlinkTicket(ticketId) {
+  await pool.query(`DELETE FROM ticket_bookings WHERE ticket_id = $1`, [String(ticketId)]);
+}
+
 // ─── Agent prompts ────────────────────────────────────────────────────────────
 async function getPrompts() {
   const res = await pool.query(`SELECT * FROM agent_prompts ORDER BY created_at ASC`);
@@ -199,4 +255,4 @@ async function deletePrompt(id) {
   await pool.query(`DELETE FROM agent_prompts WHERE id=$1`, [id]);
 }
 
-module.exports = { initDb, storeSession, getSession, cacheBooking, getCachedBooking, storeTicketSummary, getTicketSummaries, pool, getPrompts, createPrompt, updatePrompt, deletePrompt, storeFreshdeskSession, getFreshdeskSession, getFreshdeskCsrfToken, storeZohoSession, getZohoSession, updateZohoAccessToken };
+module.exports = { initDb, storeSession, getSession, cacheBooking, getCachedBooking, storeTicketSummary, getTicketSummaries, pool, getPrompts, createPrompt, updatePrompt, deletePrompt, storeFreshdeskSession, getFreshdeskSession, getFreshdeskCsrfToken, storeZohoSession, getZohoSession, updateZohoAccessToken, linkTicketBooking, getTicketBooking, getTicketsForBooking, unlinkTicket };
