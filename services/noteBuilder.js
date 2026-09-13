@@ -1,3 +1,6 @@
+// NOTE: booking IDs are rendered WITHOUT a leading '#'. Zoho Desk auto-links any
+// '#<number>' in a note body as a ticket reference, so '#412468' turned a booking
+// ID into a link to an unrelated ticket 412468. Do not reintroduce the '#'.
 // Render TA's AI reconfirmation badge as a styled chip. TA's icon-clock font
 // isn't loaded inside Freshdesk's note iframe so we build our own glyph.
 function renderAiReconfirmBadge(r) {
@@ -172,7 +175,7 @@ function buildNoteHtml(booking, cleanHtml, details, user, supplier = null) {
     '<div style="font-family:system-ui,-apple-system,sans-serif;font-size:13px;color:#222;max-width:900px;">' +
 
     '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">' +
-      '<h3 style="margin:0;font-size:16px;color:#1a1a1a;">📦 ' + v(booking.productType) + ' — #' + v(booking.internalBookingId) + '</h3>' +
+      '<h3 style="margin:0;font-size:16px;color:#1a1a1a;">📦 ' + v(booking.productType) + ' — ' + v(booking.internalBookingId) + '</h3>' +
       '<div>' + adminLink + '</div>' +
     '</div>' +
 
@@ -237,7 +240,7 @@ function buildShortNoteHtml(booking, details) {
   return (
     '<div style="font-family:system-ui,-apple-system,sans-serif;font-size:13px;color:#222;max-width:900px;">' +
     '<h4 style="margin:0 0 10px;font-size:14px;color:#1a1a1a;border-bottom:2px solid #17a2b8;padding-bottom:4px;">📌 ' +
-      v(booking.productType) + ' — #' + v(booking.internalBookingId) +
+      v(booking.productType) + ' — ' + v(booking.internalBookingId) +
     '</h4>' +
     tableHtml +
     '</div>'
