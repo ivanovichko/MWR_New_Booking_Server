@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         MWR Zoho Tools
 // @namespace    https://traveladvantage.com
-// @version      0.7.2
+// @version      0.8.0
 // @description  TA booking tools for Zoho Desk — booking panel, duplicates, notes, supplier email, chat translation
 // @match        https://desk.zoho.com/agent/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        unsafeWindow
 // @connect      mwr-new-booking-server.onrender.com
 // @run-at       document-start
 // ==/UserScript==
@@ -52,6 +53,10 @@
     warn:    '#ffc107',
     info:    '#17a2b8',
   };
+
+  // Tampermonkey sandboxes `window` whenever @grant is used, so page globals such
+  // as desk_urls are only reachable through unsafeWindow.
+  const pageWindow = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
 
   // ===== STATE =====
   // Keyed by Zoho ticket id; survives SPA navigation, resets on full reload.
@@ -108,7 +113,7 @@
 
   function resolveOrgId() {
     try {
-      const du = window.desk_urls;
+      const du = pageWindow.desk_urls;
       if (du) {
         for (const k of ['orgId', 'orgid', 'organizationId', 'zdOrgId']) {
           if (du[k]) return String(du[k]);
@@ -130,6 +135,11 @@
   // or storage. Desk POSTs a "recent items" record every time a ticket is opened,
   // so the header is normally observed before the agent can click anything.
   const CSRF_HEADER = 'X-ZCSRF-TOKEN';
+  // Verified against every write endpoint: the parameter is crmcsrfparam (shared
+  // Zoho CRM infrastructure), NOT deskcsrfparam, and the token is the page's own
+  // desk_urls.csrf_token. With this, comments, sendReply and PATCH all return 404
+  // against a nonexistent ticket — i.e. authentication passes.
+  const CSRF_PARAM = 'crmcsrfparam';
   let observedCsrfHeader = null;
 
   function installTokenObserver() {
@@ -145,8 +155,8 @@
       return origSet.apply(this, arguments);
     };
 
-    const origFetch = window.fetch;
-    window.fetch = function (input, init) {
+    const origFetch = pageWindow.fetch;
+    pageWindow.fetch = function (input, init) {
       try {
         if (!(init && init.__taOwn)) {
           const h = (init && init.headers) || (input && input.headers);
@@ -160,7 +170,14 @@
     };
   }
 
+  // Read fresh from the page on every write. The previous approach — observing the
+  // header on Desk's own writes — was unreliable: Desk emits it only when it
+  // happens to write, so the cached copy went stale and produced
+  // "You are not authenticated to perform this operation". The observer is kept
+  // only as a fallback in case Zoho renames desk_urls.
   function getCsrfHeader() {
+    const tok = (pageWindow.desk_urls || {}).csrf_token;
+    if (tok) return CSRF_PARAM + '=' + tok;
     return observedCsrfHeader;
   }
 
@@ -171,9 +188,7 @@
     if (method !== 'GET') {
       const token = getCsrfHeader();
       if (!token) {
-        throw new Error(
-          'Zoho Desk write token not seen yet — open or reload a ticket once, then retry.'
-        );
+        throw new Error('Zoho Desk write token unavailable — reload the ticket page and retry.');
       }
       headers[CSRF_HEADER] = token;
     }

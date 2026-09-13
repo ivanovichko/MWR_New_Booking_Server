@@ -107,32 +107,37 @@ established by probing the validator, not from docs** (2026-09-13):
 
 ## Write token — how writes are authorised
 
-Desk rejects any write without `X-ZCSRF-TOKEN`. The value format is
-`deskcsrfparam=<token>` (a raw token 422s on format; a wrong token 401s), but the
-token is **not** in the `CSRF_TOKEN` cookie or `desk_urls.csrf_token`, and its real
-home was never established.
+Every write needs:
 
-**We do not need to know.** The overlay installs a `document-start` observer that
-patches `XMLHttpRequest.prototype.setRequestHeader` and `window.fetch`, records the
-`X-ZCSRF-TOKEN` header off Desk's *own* outgoing writes, and reuses it verbatim.
-Desk POSTs a "recent items" record whenever a ticket is opened, so the header is
-normally observed before the agent can click anything.
+```
+X-ZCSRF-TOKEN: crmcsrfparam=<window.desk_urls.csrf_token>
+```
 
-Why this rather than reading the source directly:
+**The parameter is `crmcsrfparam`, not `deskcsrfparam`** (shared Zoho CRM
+infrastructure). That single detail is the difference between working writes and
+`401 "You are not authenticated to perform this operation"`. Verified against a
+nonexistent ticket id, where auth passing shows up as `404 URL_NOT_FOUND`:
 
-- It is source-agnostic, so it keeps working if Zoho moves the token.
-- The script never rummages through cookies or storage.
-- `@run-at document-start` is **required** — patch after Desk's bundle captures its
-  own `fetch`/XHR references and its writes bypass the observer, so the token is
-  never seen.
+| call | with `deskcsrfparam=` | with `crmcsrfparam=` |
+|---|---|---|
+| `POST /tickets/{id}/comments` | 401 | **404** |
+| `POST /tickets/{id}/sendReply` | 401 | **404** |
+| `PATCH /tickets/{id}` | 401 | **404** |
 
-Mark our own requests with `__taOwn: true` so the observer does not re-capture the
-header it just set.
+A raw token with no `param=` prefix returns `422` complaining about the format of
+`x-zcsrf-token`, which is how the header name was confirmed in the first place.
 
-**Verified end-to-end 2026-09-13:** with an observed header, a POST to
-`/tickets/000000000000000001/comments` (a deliberately nonexistent id) returned
-`404 URL_NOT_FOUND` rather than `401 UNAUTHORIZED` — auth passed, and the only
-failure was the fake ticket. Writes are unblocked.
+**Read the token fresh from the page on every write.** An earlier implementation
+observed the header on Desk's own outgoing writes and cached it. That is
+unreliable: Desk emits the header only when it happens to write, so the cached
+copy goes stale — measured at zero captures across a full ticket navigation — and
+writes then fail with 401 long after they had been working.
+
+**`unsafeWindow` is required.** Tampermonkey sandboxes `window` whenever `@grant`
+is used, so `window.desk_urls` is undefined inside the script and only
+`unsafeWindow.desk_urls` reaches the page global. The same applies to `orgId`,
+which had been silently falling through to a hardcoded constant that happened to
+be correct.
 
 ## Open items
 
