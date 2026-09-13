@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Zoho Tools
 // @namespace    https://traveladvantage.com
-// @version      0.4.2
+// @version      0.5.0
 // @description  TA booking tools for Zoho Desk — booking panel, duplicates, notes, supplier email
 // @match        https://desk.zoho.com/agent/*
 // @grant        GM_xmlhttpRequest
@@ -63,6 +63,8 @@
   let currentTicketMeta = null;   // { ticketNumber, subject, status } for the link row
   const duplicateCache  = {};     // ticketId -> merged duplicate rows
   let dupIncludeClosed  = false;  // Zoho returns Closed tickets by default
+  let panelNotice       = null;   // { text, bookingId } when a lookup did not land
+  let pendingMemberQuery = null;  // consumed by the Member section to auto-search
   const fromAddressCache = {};    // departmentId -> active+verified sender addresses
 
   // ===== SECRET =====
@@ -563,15 +565,22 @@
       if (supBtn) supBtn.addEventListener('click', onSupplierEmail);
       wireChangeBooking();
     } else {
-      body.innerHTML = `<div style="color:${THEME.subtle};font-size:13px;">No booking reference found in this ticket.</div>
+      // A failed lookup is a starting point, not a dead end: the agent still
+      // needs to find the booking by hand or work from the member instead.
+      const notice = panelNotice
+        ? `<div style="background:#fff3cd;border:1px solid #ffe08a;border-radius:5px;padding:7px 9px;color:#856404;font-size:12px;line-height:1.5;">${escapeHtml(panelNotice.text)}</div>`
+        : `<div style="color:${THEME.subtle};font-size:13px;">No booking reference found in this ticket.</div>`;
+      body.innerHTML = `${notice}
         <div style="display:flex;gap:6px;margin-top:10px;">
-          <button id="taChangeBooking" style="flex:1;padding:7px 6px;border:1px solid #d3d8de;border-radius:5px;background:#fff;color:${THEME.text};font-size:12px;cursor:pointer;">Enter booking ID</button>
+          <button id="taChangeBooking" style="flex:1;padding:7px 6px;border:1px solid ${THEME.primary};border-radius:5px;background:#fff;color:${THEME.primary};font-size:12px;font-weight:600;cursor:pointer;">🔍 Fetch booking</button>
+          <button id="taFetchUser" style="flex:1;padding:7px 6px;border:1px solid #007bff;border-radius:5px;background:#fff;color:#007bff;font-size:12px;font-weight:600;cursor:pointer;">👤 Fetch user</button>
         </div>
         <div id="taChangeRow" style="display:none;gap:6px;margin-top:8px;">
           <input id="taChangeInput" type="text" placeholder="Booking ID…" style="flex:1;min-width:0;padding:6px 9px;border:1px solid #d3d8de;border-radius:4px;font-size:13px;" />
           <button id="taChangeFetch" style="flex:0 0 auto;padding:6px 10px;border:1px solid #d3d8de;border-radius:4px;background:#fff;cursor:pointer;font-size:12px;">Fetch</button>
         </div>`;
       wireChangeBooking();
+      document.getElementById('taFetchUser').addEventListener('click', onFetchUser);
     }
 
     appendMemberSection(body, getDisplayUser());
@@ -583,7 +592,7 @@
     const input = document.getElementById('taChangeInput');
     const fetchBtn = document.getElementById('taChangeFetch');
     if (!toggle || !row || !input || !fetchBtn) return;
-    input.value = currentBookingId || '';
+    input.value = currentBookingId || (panelNotice && panelNotice.bookingId) || '';
     toggle.addEventListener('click', () => {
       const open = row.style.display !== 'none';
       row.style.display = open ? 'none' : 'flex';
@@ -606,6 +615,20 @@
     };
     fetchBtn.addEventListener('click', doFetch);
     input.addEventListener('keydown', (e) => { if (e.key === 'Enter') doFetch(); });
+  }
+
+  // Fetch user — the second route forward when there is no booking. Defaults to
+  // the ticket's own contact address, which is almost always the member, and
+  // hands the query to the Member section's existing search rather than building
+  // a second results UI.
+  function onFetchUser(e) {
+    const fromTicket = (currentTicketMeta && currentTicketMeta.email) || '';
+    const query = fromTicket
+      || window.prompt('Find TA member by email or name:', '');
+    if (!query) return;
+    pendingMemberQuery = query;
+    renderBookingPanel();
+    if (e && e.currentTarget) e.currentTarget.blur();
   }
 
   // ===== MEMBER SECTION (ported from TA_Zoho_beta/app/widget.js) =====
@@ -834,6 +857,15 @@
     sec.appendChild(findResults);
 
     container.appendChild(sec);
+
+    // Seeded by "Fetch user": open the search, prefill it and run it once.
+    if (pendingMemberQuery) {
+      const q = pendingMemberQuery;
+      pendingMemberQuery = null;
+      findRow.style.display = 'flex';
+      findInput.value = q;
+      doFind();
+    }
   }
 
   // ===== TICKET ↔ BOOKING LINK =====
@@ -1651,6 +1683,8 @@
     panelUserOverride = null;
     currentTicketMeta = null;
     currentBookingId = null;
+    panelNotice = null;
+    pendingMemberQuery = null;
     injectPanels();
 
     const cached = ticketBookingCache[ticketId];
@@ -1677,7 +1711,9 @@
     } catch (err) {
       console.error('[ta] ticket read failed:', err);
       if (!haveBooking) {
-        renderPanelMessage(`<div style="color:${THEME.danger};font-size:13px;">${escapeHtml(err.message)}</div>`);
+        panelNotice = { text: 'Could not read the ticket: ' + err.message };
+        ticketBookingCache[ticketId] = null;
+        renderBookingPanel();
       }
     }
 
@@ -1697,7 +1733,9 @@
       renderPanelMessage(`<div style="color:${THEME.subtle};font-size:13px;">Finding booking reference…</div>`);
       const ext = await api.extract({ subject: ctx.subject, description: ctx.description });
       if (!ext.ok) {
-        renderPanelMessage(`<div style="color:${THEME.danger};font-size:13px;">${escapeHtml(ext.data.error || 'Extraction failed')}</div>`);
+        ticketBookingCache[ticketId] = null;
+        panelNotice = { text: 'Could not read a booking reference: ' + ((ext.data && ext.data.error) || 'extraction failed') };
+        renderBookingPanel();
         return;
       }
       const bookingId = ext.data.bookingId;
@@ -1711,7 +1749,14 @@
       renderPanelMessage(`<div style="color:${THEME.subtle};font-size:13px;">Loading booking ${escapeHtml(bookingId)}…</div>`);
       const res = await api.booking(bookingId);
       if (!res.ok || !res.data.success) {
-        renderPanelMessage(`<div style="color:${THEME.danger};font-size:13px;">${escapeHtml((res.data && res.data.error) || 'Booking lookup failed')}</div>`);
+        // The reference was read from the ticket but TA has no such booking —
+        // a common, recoverable state (typo, supplier ref, cancelled record).
+        ticketBookingCache[ticketId] = null;
+        panelNotice = {
+          text: `Reference "${bookingId}" was found in the ticket but no matching booking exists in TA.`,
+          bookingId,
+        };
+        renderBookingPanel();
         return;
       }
       currentBookingId = bookingId;
@@ -1722,7 +1767,9 @@
       recordBookingLink(bookingId, 'auto');
     } catch (err) {
       console.error('[ta] load failed:', err);
-      renderPanelMessage(`<div style="color:${THEME.danger};font-size:13px;">${escapeHtml(err.message)}</div>`);
+      ticketBookingCache[ticketId] = null;
+      panelNotice = { text: 'Booking lookup failed: ' + err.message };
+      renderBookingPanel();
     }
   }
 
