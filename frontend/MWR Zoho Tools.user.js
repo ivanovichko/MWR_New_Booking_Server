@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Zoho Tools
 // @namespace    https://traveladvantage.com
-// @version      0.8.1
+// @version      0.9.0
 // @description  TA booking tools for Zoho Desk — booking panel, duplicates, notes, supplier email, chat translation
 // @match        https://desk.zoho.com/agent/*
 // @grant        GM_xmlhttpRequest
@@ -70,6 +70,7 @@
   let dupIncludeClosed  = false;  // Zoho returns Closed tickets by default
   let panelNotice       = null;   // { text, bookingId } when a lookup did not land
   let pendingMemberQuery = null;  // consumed by the Member section to auto-search
+  let pendingMemberAuto  = false; // true = seeded automatically, so auto-pick a lone hit
   let currentChatThreadId = null; // set when the ticket carries an ONLINE_CHAT thread
   const chatCache       = {};     // ticketId -> { lines, translated, trimmedMetadata }
   const fromAddressCache = {};    // departmentId -> active+verified sender addresses
@@ -646,6 +647,19 @@
     input.addEventListener('keydown', (e) => { if (e.key === 'Enter') doFetch(); });
   }
 
+  // When no booking resolves, the ticket's own contact address is the only handle
+  // on who this is, so the member lookup runs automatically rather than waiting
+  // for a click. When a booking DOES resolve it already carries its member and
+  // this never fires.
+  function seedMemberLookupFromTicket() {
+    if (panelUserOverride) return false;
+    const email = currentTicketMeta && currentTicketMeta.email;
+    if (!email) return false;
+    pendingMemberQuery = email;
+    pendingMemberAuto = true;
+    return true;
+  }
+
   // Fetch user — the second route forward when there is no booking. Defaults to
   // the ticket's own contact address, which is almost always the member, and
   // hands the query to the Member section's existing search rather than building
@@ -656,6 +670,7 @@
       || window.prompt('Find TA member by email or name:', '');
     if (!query) return;
     pendingMemberQuery = query;
+    pendingMemberAuto = false;
     renderBookingPanel();
     if (e && e.currentTarget) e.currentTarget.blur();
   }
@@ -833,7 +848,19 @@
     const findResults = document.createElement('div');
     findResults.style.cssText = 'margin-top:6px;font-size:12px;';
 
-    const doFind = async () => {
+    const selectMember = (u) => {
+      const primary = !u.type || u.type === 'primary';
+      panelUserOverride = primary
+        ? Object.assign({}, u, {
+            loginLink: `${TA_BASE}/admin/account/webadminCustomerLogin/${u.id}`,
+            profileLink: `${TA_BASE}/admin/account/viewCustomer/${u.id}`,
+          })
+        : Object.assign({}, u);
+      if (!primary) showToast('Secondary traveler — no Login-as-User available.', 'warning');
+      renderBookingPanel();
+    };
+
+    const doFind = async (auto) => {
       const q = findInput.value.trim();
       if (!q) return;
       await withButtonLoading(findBtn, '⏳', async () => {
@@ -841,7 +868,14 @@
         findResults.innerHTML = '';
         if (!res.ok) { findResults.textContent = 'Search failed: ' + (res.data.error || ''); return; }
         const results = res.data.results || [];
-        if (!results.length) { findResults.textContent = 'No results.'; return; }
+        if (!results.length) {
+          findResults.textContent = auto ? 'No TA member matches the ticket contact.' : 'No results.';
+          return;
+        }
+        // A single hit on an automatic lookup is unambiguous, so take it. Several
+        // hits stay a choice — guessing which traveller is the right one is
+        // exactly the judgement an agent should make.
+        if (auto && results.length === 1) { selectMember(results[0]); return; }
         results.slice(0, 5).forEach((u) => {
           const item = document.createElement('div');
           item.style.cssText = 'padding:5px 0;border-bottom:1px solid #f0f0f0;display:flex;align-items:center;justify-content:space-between;gap:8px;';
@@ -851,25 +885,15 @@
           const pickBtn = document.createElement('button');
           pickBtn.textContent = 'Select';
           pickBtn.style.cssText = `flex:0 0 auto;padding:3px 8px;border:1px solid ${THEME.primary};border-radius:3px;background:#fff;color:${THEME.primary};font-size:11px;cursor:pointer;`;
-          pickBtn.onclick = () => {
-            const primary = !u.type || u.type === 'primary';
-            panelUserOverride = primary
-              ? Object.assign({}, u, {
-                  loginLink: `${TA_BASE}/admin/account/webadminCustomerLogin/${u.id}`,
-                  profileLink: `${TA_BASE}/admin/account/viewCustomer/${u.id}`,
-                })
-              : Object.assign({}, u);
-            if (!primary) showToast('Secondary traveler — no Login-as-User available.', 'warning');
-            renderBookingPanel();
-          };
+          pickBtn.onclick = () => selectMember(u);
           item.appendChild(lbl);
           item.appendChild(pickBtn);
           findResults.appendChild(item);
         });
       });
     };
-    findBtn.addEventListener('click', doFind);
-    findInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doFind(); });
+    findBtn.addEventListener('click', () => doFind(false));
+    findInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doFind(false); });
     findRow.appendChild(findInput);
     findRow.appendChild(findBtn);
 
@@ -890,10 +914,12 @@
     // Seeded by "Fetch user": open the search, prefill it and run it once.
     if (pendingMemberQuery) {
       const q = pendingMemberQuery;
+      const auto = pendingMemberAuto;
       pendingMemberQuery = null;
+      pendingMemberAuto = false;
       findRow.style.display = 'flex';
       findInput.value = q;
-      doFind();
+      doFind(auto);
     }
   }
 
@@ -1972,6 +1998,12 @@
     // ticket with no booking reference is exactly where a repeat goes unnoticed.
     loadDuplicates(true);
 
+    // Known from cache to have no booking: still identify the member from the
+    // ticket contact, since the panel was rendered before the ticket was read.
+    if (ctx && ticketBookingCache[ticketId] === null) {
+      if (seedMemberLookupFromTicket()) renderBookingPanel();
+    }
+
     if (haveBooking || !ctx) return;
 
     if (!getSecret()) {
@@ -1985,6 +2017,7 @@
       if (!ext.ok) {
         ticketBookingCache[ticketId] = null;
         panelNotice = { text: 'Could not read a booking reference: ' + ((ext.data && ext.data.error) || 'extraction failed') };
+        seedMemberLookupFromTicket();
         renderBookingPanel();
         return;
       }
@@ -1992,6 +2025,7 @@
       if (!bookingId) {
         ticketBookingCache[ticketId] = null;
         currentBookingId = null;
+        seedMemberLookupFromTicket();
         renderBookingPanel();
         return;
       }
@@ -2006,6 +2040,7 @@
           text: `Reference "${bookingId}" was found in the ticket but no matching booking exists in TA.`,
           bookingId,
         };
+        seedMemberLookupFromTicket();
         renderBookingPanel();
         return;
       }
@@ -2019,6 +2054,7 @@
       console.error('[ta] load failed:', err);
       ticketBookingCache[ticketId] = null;
       panelNotice = { text: 'Booking lookup failed: ' + err.message };
+      seedMemberLookupFromTicket();
       renderBookingPanel();
     }
   }
