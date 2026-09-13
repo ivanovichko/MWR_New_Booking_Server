@@ -87,8 +87,16 @@ established by probing the validator, not from docs** (2026-09-13):
   against a fake ticket id — i.e. the body validated and only the ticket was
   missing.
 - **`to` is NOT mandatory** — it defaults to the ticket's contact. That is exactly
-  why the supplier-email flow must set it explicitly, or the hotel mail would go
-  to the customer.
+  why the supplier-email flow must set it explicitly, or the mail would go to the
+  customer.
+- **`to` and `cc` are comma-separated STRINGS.** Passing an array returns
+  `INVALID_DATA → /to:invalid` (or `/cc:invalid`).
+- **`subject` is not a parameter at all** — `422 "An extra parameter 'subject' is
+  found"`. Zoho takes the subject from the ticket. A supplier that demands an exact
+  subject format (goglobal, w2m, priceline, restel) therefore needs the ticket
+  subject renamed before sending.
+- **`fromEmailAddress` must be the bare address**, not `"Name"<addr>` — see
+  Sender addresses below.
 - Probing technique: **body validation runs before the ticket-existence check**,
   so posting to `000000000000000001` reports missing fields one at a time with no
   possibility of sending mail. Errors come back as
@@ -237,8 +245,10 @@ one of those (`events@mwrlife.com`) is unverified — so 2 are actually usable:
 | `support@mwrlife.com` | MWR Life Support |
 | `member@traveladvantage.com` | Travel Advantage Support |
 
-Desk's own outbound threads carry the composite form `"Display Name"<address>`, so
-that is what the overlay sends.
+**Send the BARE address.** Threads *display* the composite form
+`"Display Name"<address>`, but sendReply rejects it with
+`INVALID_DATA → /fromEmailAddress:invalid`. Only `member@traveladvantage.com`
+style validates. Use the display name for the picker label only.
 
 **Do NOT derive the From address from the ticket's threads.** The first
 implementation took the latest outbound thread's `fromEmailAddress` and fell back

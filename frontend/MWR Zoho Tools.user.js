@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Zoho Tools
 // @namespace    https://traveladvantage.com
-// @version      0.4.1
+// @version      0.4.2
 // @description  TA booking tools for Zoho Desk — booking panel, duplicates, notes, supplier email
 // @match        https://desk.zoho.com/agent/*
 // @grant        GM_xmlhttpRequest
@@ -1464,8 +1464,6 @@
         address: r.address,
         displayName: r.displayName || '',
         isDefault: !!r.isDepartmentDefault,
-        // Desk's own outbound threads carry the composite form, so match it.
-        composite: r.displayName ? `"${r.displayName}"<${r.address}>` : r.address,
       }));
     fromAddressCache[departmentId] = rows;
     return rows;
@@ -1577,7 +1575,7 @@
       ${unknown}${noteBanner}${urlLine}
       <label style="display:block;font-size:11px;color:${THEME.muted};margin-bottom:3px;">From</label>
       <select id="taSupFrom" style="width:100%;box-sizing:border-box;padding:7px 10px;border:1px solid #d3d8de;border-radius:4px;font-size:13px;margin-bottom:10px;background:#fff;">
-        ${from.options.map((o) => `<option value="${escapeHtml(o.composite)}" ${o === from.chosen ? 'selected' : ''}>${escapeHtml(o.displayName)} &lt;${escapeHtml(o.address)}&gt;</option>`).join('')}
+        ${from.options.map((o) => `<option value="${escapeHtml(o.address)}" ${o === from.chosen ? 'selected' : ''}>${escapeHtml(o.displayName)} &lt;${escapeHtml(o.address)}&gt;</option>`).join('')}
       </select>
       <label style="display:block;font-size:11px;color:${THEME.muted};margin-bottom:3px;">To</label>
       <input id="taSupTo" type="text" value="${escapeHtml(to)}" placeholder="supplier@example.com"
@@ -1585,9 +1583,7 @@
       <label style="display:block;font-size:11px;color:${THEME.muted};margin-bottom:3px;">CC <span style="color:${THEME.subtle};">(check the note above — some suppliers require it)</span></label>
       <input id="taSupCc" type="text" value="" placeholder="optional"
         style="width:100%;box-sizing:border-box;padding:7px 10px;border:1px solid #d3d8de;border-radius:4px;font-size:13px;margin-bottom:10px;" />
-      <label style="display:block;font-size:11px;color:${THEME.muted};margin-bottom:3px;">Subject <span style="color:${THEME.subtle};">(blank = the ticket's own subject)</span></label>
-      <input id="taSupSubject" type="text" value=""
-        style="width:100%;box-sizing:border-box;padding:7px 10px;border:1px solid #d3d8de;border-radius:4px;font-size:13px;margin-bottom:10px;" />
+      <div style="font-size:11px;color:${THEME.subtle};margin-bottom:10px;">Subject is set by Zoho from the ticket — sendReply rejects a custom one. Suppliers needing an exact subject format (goglobal, w2m, priceline) need the ticket subject renamed first.</div>
       <label style="display:block;font-size:11px;color:${THEME.muted};margin-bottom:3px;">
         Body — signing as ${escapeHtml(agentName)}
         <button id="taSupRename" style="background:none;border:none;color:${THEME.primary};font-size:11px;cursor:pointer;text-decoration:underline;">change</button>
@@ -1615,7 +1611,6 @@
     sendBtn.onclick = async () => {
       const to = document.getElementById('taSupTo').value.trim();
       const cc = document.getElementById('taSupCc').value.trim();
-      const subject = document.getElementById('taSupSubject').value.trim();
       const content = document.getElementById('taSupBody').innerHTML;
       if (!to) { showToast('Enter a recipient address.', 'error'); return; }
       if (content.includes(SUPPLIER_PLACEHOLDER)) {
@@ -1638,8 +1633,7 @@
             fromEmailAddress,
             to,
           };
-          if (cc) payload.cc = cc;
-          if (subject) payload.subject = subject;
+          if (cc) payload.cc = cc;   // comma-separated string; an array is rejected
           await zdPost(`/tickets/${currentTicketId}/sendReply`, payload);
           showToast('Supplier email sent.', 'success');
           document.getElementById('taSupplierEmail').remove();
