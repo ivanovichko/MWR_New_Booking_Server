@@ -209,12 +209,19 @@ app.delete('/zoho/ticket-booking/:ticketId', safeRoute(async (req, res) => {
   res.json({ success: true });
 }));
 
-// ─── Supplier/hotel email: lookup + preview ──────────────────────────────────
-// Phase 1 only. Unlike the Freshdesk twin (ticketActionService.lookupHotelEmail)
-// this does NOT tag the ticket — tags are not part of the Zoho workflow — and it
-// does NOT send. Sending happens in the overlay via Desk's own sendReply so the
-// mail is attributed to the acting agent rather than a shared OAuth identity,
-// which also means the backend never needs Zoho write access for this flow.
+// ─── HOTEL email: address lookup + preview ───────────────────────────────────
+// This is the port of Freshdesk's *Hotel Email* feature — the AI-resolved hotel
+// address and prepaid-confirmation body. It is NOT the supplier-email flow: that
+// one takes its recipient from services/supplierService.js's SUPPLIER_MAP and is
+// built entirely in the overlay (bookingData.supplier already ships with the
+// booking payload), so it needs no route here.
+//
+// NOT CURRENTLY CALLED by the overlay — kept because Hotel Email is a real
+// Freshdesk feature still to be ported. Delete it if that port is abandoned.
+//
+// Unlike the Freshdesk twin (ticketActionService.lookupHotelEmail) this does NOT
+// tag the ticket and does NOT send; sending would happen in the overlay via
+// Desk's own sendReply, so the backend never needs Zoho write access.
 app.post('/zoho/hotel-email/lookup', safeRoute(async (req, res) => {
   requireZohoSecret(req);
   const { bookingId, agentName } = req.body;

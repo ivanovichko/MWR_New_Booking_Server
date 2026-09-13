@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Zoho Tools
 // @namespace    https://traveladvantage.com
-// @version      0.3.0
+// @version      0.4.0
 // @description  TA booking tools for Zoho Desk — booking panel, duplicates, notes, supplier email
 // @match        https://desk.zoho.com/agent/*
 // @grant        GM_xmlhttpRequest
@@ -227,7 +227,6 @@
     findUser:         (query)  => gmPost(`${BACKEND_URL}/find-user`, { query }),
     userReservations: (userId) => gmGet(`${BACKEND_URL}/user/${encodeURIComponent(userId)}/reservations`),
     translate:        (text, target = 'en') => gmPost(`${BACKEND_URL}/translate`, { text, target }),
-    hotelEmailLookup: (body)   => gmPost(`${BACKEND_URL}/zoho/hotel-email/lookup`, body),
     linkTicketBooking: (body)  => gmPost(`${BACKEND_URL}/zoho/ticket-booking`, body),
     bookingTickets:   (bookingId, exclude) =>
       gmGet(`${BACKEND_URL}/zoho/booking-tickets/${encodeURIComponent(bookingId)}` +
@@ -542,7 +541,7 @@
           <button id="taViewNote" style="flex:1;padding:7px 6px;border:1px solid #d3d8de;border-radius:5px;background:#fff;color:${THEME.text};font-size:12px;cursor:pointer;">View Note</button>
         </div>
         <div style="display:flex;gap:6px;margin-top:6px;">
-          ${isHotel ? `<button id="taSupplierEmailBtn" style="flex:1;padding:7px 6px;border:1px solid ${THEME.info};border-radius:5px;background:#fff;color:${THEME.info};font-size:12px;font-weight:600;cursor:pointer;">✉ Supplier</button>` : ''}
+          <button id="taSupplierEmailBtn" style="flex:1;padding:7px 6px;border:1px solid ${THEME.info};border-radius:5px;background:#fff;color:${THEME.info};font-size:12px;font-weight:600;cursor:pointer;">✉ Supplier</button>
           <button id="taChangeBooking" style="flex:1;padding:7px 6px;border:1px solid #d3d8de;border-radius:5px;background:#fff;color:${THEME.text};font-size:12px;cursor:pointer;">Change</button>
         </div>
         <div id="taChangeRow" style="display:none;gap:6px;margin-top:8px;">
@@ -1188,6 +1187,7 @@
   // same-origin and both attributed to the acting agent.
 
   const MSG_FETCH_MAX = 15;   // thread bodies pulled per ticket
+  const SUPPLIER_PLACEHOLDER = '[your message here]';
 
   function fmtDate(iso) {
     if (!iso) return '';
@@ -1454,61 +1454,101 @@
     return from;
   }
 
-  async function runSupplierEmailLookup() {
+  // Body structure is a port of the Freshdesk composer's supplier template
+  // (buildReplySignature with recipientType 'supplier'): greeting addressed to
+  // the supplier team, opener, a reference block identifying the booking, then
+  // a placeholder for the agent's actual message, then the support signature.
+  function buildSupplierEmailHtml(booking, details, user, agentName) {
+    const stripHtml = (x) => (x ? String(x).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : '');
+    const supplierName = booking && booking.supplierName
+      ? stripHtml(booking.supplierName).replace(/\s*\(\d+\)\s*$/, '')
+      : 'team';
+    const hotelDisplay = (details && details.hotelName) || (booking && stripHtml(booking.supplierName)) || null;
+
+    const ref = [
+      booking && booking.supplierId ? 'This is in reference to ' + escapeHtml(booking.supplierId) : null,
+      hotelDisplay ? escapeHtml(hotelDisplay) : null,
+      booking && booking.guestName ? escapeHtml(booking.guestName) : null,
+      (booking && booking.checkIn && booking.checkOut) ? escapeHtml(booking.checkIn + ' — ' + booking.checkOut) : null,
+      booking && booking.mwrRoomType ? escapeHtml(booking.mwrRoomType) : null,
+    ].filter(Boolean).join('<br>');
+
+    const sig = [
+      'Sincerely,', escapeHtml(agentName || 'Travel Advantage Support'), 'Travel Advantage Support',
+      '--------------------------------', 'member@traveladvantage.com',
+      'Belgium: +32 71-96-32-66', 'Colombia: +571 514-1218', 'France: +33 27-68-63-387',
+      'Germany: +49 911 96 959 007', 'Italy: +39 02-94-755-846', 'Peru: +511 707-3968',
+      'Portugal: +35 13-0880-2148', 'Spain: +34 95-156-81-76', 'USA: +1 857 763 2085',
+      '<a href="https://www.traveladvantage.com/">https://www.traveladvantage.com/</a>',
+    ].join('<br>');
+
+    return `<p>Hello dear ${escapeHtml(supplierName)} team,</p>`
+      + `<p>I hope this email finds you well.</p>`
+      + (ref ? `<p>${ref}</p>` : '')
+      + `<p>${SUPPLIER_PLACEHOLDER}</p>`
+      + `<p>${sig}</p>`;
+  }
+
+  function openSupplierEmail() {
     const bd = ticketBookingCache[currentTicketId];
     if (!bd || !bd.booking) { showToast('No booking loaded.', 'error'); return; }
     const agentName = promptForAgentName(false);
     if (!agentName) { showToast('A sender name is needed to send supplier email.', 'warning'); return; }
-
-    const res = await api.hotelEmailLookup({
-      bookingId: currentBookingId || bd.booking.internalBookingId,
-      agentName,
-    });
-    if (!res.ok || !res.data.success) {
-      showToast('Lookup failed: ' + ((res.data && res.data.error) || res.status), 'error');
-      return;
-    }
-    showSupplierEmailModal(res.data);
+    showSupplierEmailModal(bd, agentName);
   }
 
-  function onSupplierEmail(e) {
-    return withButtonLoading(e.currentTarget, '⏳', runSupplierEmailLookup);
+  function onSupplierEmail() {
+    openSupplierEmail();
   }
 
-  function showSupplierEmailModal(data) {
-    const found = (data.emailResult && (data.emailResult.email || data.emailResult.hotelEmail)) || '';
-    const confidence = data.emailResult && data.emailResult.confidence;
-    const source = data.emailResult && (data.emailResult.source || data.emailResult.url);
+  function showSupplierEmailModal(bd, agentName) {
+    const { booking, details, user, supplier } = bd;
+    const stripHtml = (x) => (x ? String(x).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : '');
+    const supplierName = stripHtml(booking.supplierName).replace(/\s*\(\d+\)\s*$/, '');
+    const to = (supplier && supplier.email) || '';
+    const contactUrl = supplier && supplier.contactUrl;
+    const note = supplier && supplier.note;
 
-    const { body } = createModal('taSupplierEmail', '✉ Email supplier', {
-      style: 'top:50%;left:50%;transform:translate(-50%,-50%);width:720px;max-height:84vh;',
+    const { body } = createModal('taSupplierEmail', `✉ Email supplier — ${supplierName}`, {
+      style: 'top:50%;left:50%;transform:translate(-50%,-50%);width:720px;max-width:94vw;max-height:86vh;',
     });
+
+    // Several suppliers carry hard requirements here — mandatory CC addresses,
+    // exact subject formats, separate emergency/post-travel inboxes. Showing it
+    // as a prominent banner rather than a footnote is deliberate.
+    const noteBanner = note
+      ? `<div style="background:#fff3cd;border:1px solid #ffe08a;border-radius:5px;padding:8px 10px;font-size:12px;color:#856404;margin-bottom:10px;line-height:1.5;"><strong>⚠ ${escapeHtml(supplierName)}:</strong> ${escapeHtml(note)}</div>`
+      : '';
+    const urlLine = contactUrl
+      ? `<div style="font-size:12px;color:${THEME.muted};margin-bottom:10px;">No email on file — contact via <a href="${escapeHtml(contactUrl)}" target="_blank" rel="noopener">${escapeHtml(contactUrl)}</a></div>`
+      : '';
+    const unknown = !supplier
+      ? `<div style="background:#f8d7da;border:1px solid #f5c2c7;border-radius:5px;padding:8px 10px;font-size:12px;color:#721c24;margin-bottom:10px;">No entry in the supplier list for "<strong>${escapeHtml(supplierName)}</strong>". Enter the address manually.</div>`
+      : '';
 
     body.innerHTML = `
-      <div style="font-size:12px;color:${THEME.muted};margin-bottom:10px;">
-        ${escapeHtml(data.hotelName || '')}
-        ${confidence ? ` · confidence: <strong>${escapeHtml(String(confidence))}</strong>` : ''}
-        ${source ? ` · <a href="${escapeHtml(String(source))}" target="_blank" rel="noopener">source</a>` : ''}
-      </div>
+      ${unknown}${noteBanner}${urlLine}
       <label style="display:block;font-size:11px;color:${THEME.muted};margin-bottom:3px;">To</label>
-      <input id="taSupTo" type="text" value="${escapeHtml(found)}" placeholder="hotel@example.com"
-        style="width:100%;box-sizing:border-box;padding:7px 10px;border:1px solid ${found ? '#d3d8de' : THEME.danger};border-radius:4px;font-size:13px;margin-bottom:10px;" />
-      <label style="display:block;font-size:11px;color:${THEME.muted};margin-bottom:3px;">Subject</label>
-      <input id="taSupSubject" type="text" value="${escapeHtml(data.subject || '')}"
+      <input id="taSupTo" type="text" value="${escapeHtml(to)}" placeholder="supplier@example.com"
+        style="width:100%;box-sizing:border-box;padding:7px 10px;border:1px solid ${to ? '#d3d8de' : THEME.danger};border-radius:4px;font-size:13px;margin-bottom:10px;" />
+      <label style="display:block;font-size:11px;color:${THEME.muted};margin-bottom:3px;">CC <span style="color:${THEME.subtle};">(check the note above — some suppliers require it)</span></label>
+      <input id="taSupCc" type="text" value="" placeholder="optional"
+        style="width:100%;box-sizing:border-box;padding:7px 10px;border:1px solid #d3d8de;border-radius:4px;font-size:13px;margin-bottom:10px;" />
+      <label style="display:block;font-size:11px;color:${THEME.muted};margin-bottom:3px;">Subject <span style="color:${THEME.subtle};">(blank = the ticket's own subject)</span></label>
+      <input id="taSupSubject" type="text" value=""
         style="width:100%;box-sizing:border-box;padding:7px 10px;border:1px solid #d3d8de;border-radius:4px;font-size:13px;margin-bottom:10px;" />
       <label style="display:block;font-size:11px;color:${THEME.muted};margin-bottom:3px;">
-        Body — signing as ${escapeHtml(getAgentName())}
+        Body — signing as ${escapeHtml(agentName)}
         <button id="taSupRename" style="background:none;border:none;color:${THEME.primary};font-size:11px;cursor:pointer;text-decoration:underline;">change</button>
       </label>
       <div id="taSupBody" contenteditable="true"
-        style="border:1px solid #d3d8de;border-radius:4px;padding:10px;max-height:38vh;overflow-y:auto;font-size:13px;line-height:1.5;background:#fff;"></div>
+        style="border:1px solid #d3d8de;border-radius:4px;padding:10px;max-height:34vh;overflow-y:auto;font-size:13px;line-height:1.5;background:#fff;"></div>
       <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px;">
         <button id="taSupCancel" style="padding:8px 14px;border:1px solid #d3d8de;border-radius:5px;background:#fff;cursor:pointer;font-size:13px;">Cancel</button>
         <button id="taSupSend" style="padding:8px 18px;border:none;border-radius:5px;background:${THEME.success};color:#fff;font-weight:600;cursor:pointer;font-size:13px;">Send</button>
       </div>`;
 
-    document.getElementById('taSupBody').innerHTML = data.emailHtmlPreview || '';
-    if (!found) showToast('No hotel address found — enter one before sending.', 'warning');
+    document.getElementById('taSupBody').innerHTML = buildSupplierEmailHtml(booking, details, user, agentName);
 
     document.getElementById('taSupCancel').onclick = () => document.getElementById('taSupplierEmail').remove();
     document.getElementById('taSupRename').onclick = (ev) => {
@@ -1516,18 +1556,22 @@
       const name = promptForAgentName(true);
       if (name) {
         document.getElementById('taSupplierEmail').remove();
-        // Re-run the lookup so the rebuilt body carries the new signature.
-        runSupplierEmailLookup();
+        showSupplierEmailModal(bd, name);
       }
     };
 
     const sendBtn = document.getElementById('taSupSend');
     sendBtn.onclick = async () => {
       const to = document.getElementById('taSupTo').value.trim();
+      const cc = document.getElementById('taSupCc').value.trim();
       const subject = document.getElementById('taSupSubject').value.trim();
       const content = document.getElementById('taSupBody').innerHTML;
       if (!to) { showToast('Enter a recipient address.', 'error'); return; }
-      if (!window.confirm(`Send this email to ${to}?`)) return;
+      if (content.includes(SUPPLIER_PLACEHOLDER)) {
+        showToast('Replace the "[your message here]" placeholder first.', 'error');
+        return;
+      }
+      if (!window.confirm(`Send this email to ${to}${cc ? ' (cc ' + cc + ')' : ''}?`)) return;
 
       await withButtonLoading(sendBtn, 'Sending…', async () => {
         try {
@@ -1536,17 +1580,16 @@
             showToast('Could not determine a From address for this ticket.', 'error');
             return;
           }
-          // Field set established by probing sendReply's validator: content,
-          // channel and fromEmailAddress are mandatory; `to` defaults to the
-          // contact when omitted, which is exactly why it must be set here.
-          await zdPost(`/tickets/${currentTicketId}/sendReply`, {
+          const payload = {
             content,
             contentType: 'html',
             channel: 'EMAIL',
             fromEmailAddress,
             to,
-            subject,
-          });
+          };
+          if (cc) payload.cc = cc;
+          if (subject) payload.subject = subject;
+          await zdPost(`/tickets/${currentTicketId}/sendReply`, payload);
           showToast('Supplier email sent.', 'success');
           document.getElementById('taSupplierEmail').remove();
         } catch (err) {
