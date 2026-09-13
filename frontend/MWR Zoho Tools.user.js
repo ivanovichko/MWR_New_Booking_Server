@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Zoho Tools
 // @namespace    https://traveladvantage.com
-// @version      0.8.0
+// @version      0.8.1
 // @description  TA booking tools for Zoho Desk — booking panel, duplicates, notes, supplier email, chat translation
 // @match        https://desk.zoho.com/agent/*
 // @grant        GM_xmlhttpRequest
@@ -444,7 +444,17 @@
   }
 
   function injectPanels() {
-    if (document.getElementById('taRail')) return;
+    // Self-healing rather than a bare existence check: if the rail survived but a
+    // card inside it did not, rebuild the whole thing. A half-built rail used to
+    // be unrecoverable, and because checkTicketChange keys off the booking card
+    // it re-entered loadTicket every tick — a silent request loop.
+    const existing = document.getElementById('taRail');
+    const intact = existing
+      && document.getElementById('taBookingPanel')
+      && document.getElementById('taDupPanel');
+    if (intact) return;
+    if (existing) existing.remove();
+
     const rail = document.createElement('div');
     rail.id = 'taRail';
     rail.style.cssText = `position:fixed;top:80px;right:18px;width:345px;max-height:calc(100vh - 100px);z-index:999998;font-family:${THEME.font};display:flex;flex-direction:column;gap:10px;overflow-y:auto;`;
@@ -1901,7 +1911,22 @@
   }
 
   // ===== LOAD =====
+  let loadInFlight = null;
+
   async function loadTicket(ticketId) {
+    // A load costs a ticket read, a Groq extraction, a booking lookup and four
+    // duplicate searches. Never allow two to overlap, so a repair bug can cost at
+    // most one redundant pass rather than an unbounded pile-up.
+    if (loadInFlight === ticketId) return;
+    loadInFlight = ticketId;
+    try {
+      await loadTicketInner(ticketId);
+    } finally {
+      if (loadInFlight === ticketId) loadInFlight = null;
+    }
+  }
+
+  async function loadTicketInner(ticketId) {
     currentTicketId = ticketId;
     panelUserOverride = null;
     currentTicketMeta = null;
@@ -2014,12 +2039,18 @@
   function checkTicketChange() {
     const id = getZohoTicketId();
     if (!id) {
-      const panel = document.getElementById('taBookingPanel');
-      if (panel) panel.remove();
+      // Remove the rail entirely. Removing only the booking card left a rail that
+      // injectPanels considered present and would not repair.
+      const rail = document.getElementById('taRail');
+      if (rail) rail.remove();
       currentTicketId = null;
       return;
     }
-    if (id === currentTicketId && document.getElementById('taBookingPanel')) return;
+    // Repair the rail every tick — injectPanels is a no-op when it is intact — and
+    // gate the expensive reload purely on the ticket changing. Keying the reload
+    // off a DOM element is what turned a missing card into a request loop.
+    injectPanels();
+    if (id === currentTicketId) return;
     loadTicket(id);
   }
 
