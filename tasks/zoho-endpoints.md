@@ -292,9 +292,26 @@ A chat ticket has `ticket.channel === 'Chat'` and exactly one thread with
 message, translating line by line preserves attribution and ordering for free —
 which is what most of Freshdesk's `TRANSLATE_CHAT_PROMPT` rules existed to
 protect. Timestamps are passed through untouched (Google reformats them);
-everything else is batched under 1200 chars per `/translate` call. A batch is
-only trusted if the returned line count matches what was sent, else the overlay
-falls back to one call per line so nothing can be misaligned.
+everything else is batched under 1200 chars per `/translate` call.
+
+**Google 429s routinely** from Render's shared egress IP — a live check returned
+`provider:"groq"`, i.e. the LLM fallback answered. An LLM does **not** reliably
+preserve line counts, so a batch is only trusted when the returned count matches
+what was sent; otherwise the overlay retries one line at a time, so a merged line
+can never reattribute text to a different speaker.
+
+Lines that fail to translate keep their original text, and this is **reported**:
+a toast plus a count in the header. An early version fell back silently and
+labelled untranslated French as "Translated", which is worse than an error.
+
+**Placement:** the control is injected per message in the conversation list, not
+in a side panel. Anchors (semantic suffixes, never build hashes):
+`-conversationlist-listContainer` is one conversation entry,
+`-richtextcontent-` its body, `-iconbutton-icon_button_center` Desk's own icon
+button, and `-commentlistitemcommon-contentWrapper` the flex row the button is
+appended to. Desk's own action holder is `-subtablistitemwebcommon-visibleOnHover`
+and only appears on hover, so the button goes in the wrapper instead to stay
+visible. Re-applied on a 1.5s interval because Desk re-renders the list.
 
 Verified: the extractor returns exactly the 7 conversation lines from #578243
 with the visitor-info table trimmed.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Zoho Tools
 // @namespace    https://traveladvantage.com
-// @version      0.6.0
+// @version      0.7.1
 // @description  TA booking tools for Zoho Desk — booking panel, duplicates, notes, supplier email, chat translation
 // @match        https://desk.zoho.com/agent/*
 // @grant        GM_xmlhttpRequest
@@ -452,12 +452,7 @@
     dups.controls.insertBefore(refresh, dups.controls.firstChild);
     dups.body.id = 'taDuplicates';
 
-    const chat = buildCard('taChatPanel', '💬 Chat', '#0056d2');
-    chat.body.id = 'taChatBody';
-    chat.card.style.display = 'none';   // only for tickets that actually have a chat
-
     rail.appendChild(booking.card);
-    rail.appendChild(chat.card);
     rail.appendChild(dups.card);
     document.body.appendChild(rail);
     makeDraggable(rail, booking.header);
@@ -1280,26 +1275,39 @@
   async function translateChatLines(lines) {
     const idx = [];
     lines.forEach((l, i) => { if (!isTimestampLine(l)) idx.push(i); });
-    if (!idx.length) return lines.slice();
+    if (!idx.length) return { out: lines.slice(), translated: 0, failed: 0, provider: null };
 
     const out = lines.slice();
     let batch = [];
     let batchIdx = [];
+    let translated = 0;
+    let failed = 0;
+    let provider = null;
 
     const flush = async () => {
       if (!batch.length) return;
-      const joined = batch.join('\n');
-      const res = await api.translate(joined, 'en');
-      if (res.ok && res.data && res.data.text) {
-        const back = String(res.data.text).split('\n');
-        // Only trust a batch whose line count survived the round trip;
-        // otherwise fall back to one call per line so nothing is misaligned.
-        if (back.length === batch.length) {
-          batchIdx.forEach((target, k) => { out[target] = back[k].trim() || lines[target]; });
-        } else {
-          for (let k = 0; k < batch.length; k++) {
-            const one = await api.translate(batch[k], 'en');
-            if (one.ok && one.data && one.data.text) out[batchIdx[k]] = String(one.data.text).trim();
+      const res = await api.translate(batch.join('\n'), 'en');
+      const back = (res.ok && res.data && res.data.text) ? String(res.data.text).split('\n') : null;
+      if (res.ok && res.data && res.data.provider) provider = res.data.provider;
+
+      // Google routinely 429s from Render's shared egress IP, so the Groq
+      // fallback usually answers — and an LLM does not reliably preserve line
+      // counts. Only trust a batch whose count survived; otherwise translate one
+      // line at a time so a merge can never reattribute text to another speaker.
+      if (back && back.length === batch.length) {
+        batchIdx.forEach((target, k) => {
+          const t = back[k].trim();
+          if (t) { out[target] = t; translated++; } else { failed++; }
+        });
+      } else {
+        for (let k = 0; k < batch.length; k++) {
+          const one = await api.translate(batch[k], 'en');
+          if (one.ok && one.data && one.data.text) {
+            out[batchIdx[k]] = String(one.data.text).trim();
+            translated++;
+            if (one.data.provider) provider = one.data.provider;
+          } else {
+            failed++;   // leave the original in place, but say so
           }
         }
       }
@@ -1313,86 +1321,103 @@
       batchIdx.push(i);
     }
     await flush();
-    return out;
+    return { out, translated, failed, provider };
   }
 
-  function renderChatPanel() {
-    const host = document.getElementById('taChatBody');
-    const card = document.getElementById('taChatPanel');
-    if (!host || !card) return;
-    if (!currentChatThreadId) { card.style.display = 'none'; return; }
-    card.style.display = 'flex';
-    if (chatCache[currentTicketId]) { renderChatResult(chatCache[currentTicketId]); return; }
-    host.innerHTML = `<button id="taChatGo" style="width:100%;padding:7px 6px;border:1px solid ${THEME.primary};border-radius:5px;background:#fff;color:${THEME.primary};font-size:12px;font-weight:600;cursor:pointer;">🌐 Translate chat</button>`;
-    document.getElementById('taChatGo').onclick = (e) => withButtonLoading(e.currentTarget, '⏳ Translating…', onTranslateChat);
-  }
+  // ===== PER-CONVERSATION TRANSLATE =====
+  // Injected next to Desk's own per-message icon button, on every entry in the
+  // conversation list — the Zoho counterpart of the Freshdesk script's
+  // injectConversationControls.
+  //
+  // Anchored on the semantic class suffixes, never the build hashes. The action
+  // holder Desk uses is -subtablistitemwebcommon-visibleOnHover, so the button is
+  // placed as a flex sibling in the -commentlistitemcommon-contentWrapper instead:
+  // same position, but visible without hovering.
+  const CONV_BLOCK_SEL = '[class*="-conversationlist-listContainer"]';
+  const CONV_ICON_SEL  = '[class*="-iconbutton-icon_button_center"]';
+  const CONV_BODY_SEL  = '[class*="-richtextcontent-"]';
+  const CONV_WRAP_SEL  = '[class*="-commentlistitemcommon-contentWrapper"]';
 
-  async function onTranslateChat() {
-    try {
-      const detail = await zdGet(`/tickets/${currentTicketId}/threads/${currentChatThreadId}`);
-      const { lines, trimmedMetadata } = extractChatLines(detail.content || detail.summary || '');
-      if (!lines.length) { showToast('No transcript text found in this chat.', 'warning'); return; }
-      const translated = await translateChatLines(lines);
-      chatCache[currentTicketId] = { lines, translated, trimmedMetadata };
-      renderChatResult(chatCache[currentTicketId]);
-    } catch (err) {
-      showToast('Chat translation failed: ' + err.message, 'error');
-      console.error('[ta] chat translate failed:', err);
-    }
-  }
+  function injectConversationTranslate() {
+    document.querySelectorAll(CONV_BLOCK_SEL).forEach((block) => {
+      if (block.querySelector('.ta-conv-translate')) return;
+      const body = block.querySelector(CONV_BODY_SEL);
+      if (!body || !(body.innerText || '').trim()) return;
 
-  function chatTranscriptHtml(data) {
-    return data.translated.map((l, i) => {
-      const ts = isTimestampLine(data.lines[i]);
-      return ts
-        ? `<div style="color:#888;font-size:11px;margin-top:6px;">${escapeHtml(l)}</div>`
-        : `<div>${escapeHtml(l)}</div>`;
-    }).join('');
-  }
+      const icon = block.querySelector(CONV_ICON_SEL);
+      const host = (icon && icon.closest(CONV_WRAP_SEL))
+        || (icon && icon.closest('button') && icon.closest('button').parentElement);
+      if (!host) return;
 
-  function renderChatResult(data) {
-    const host = document.getElementById('taChatBody');
-    if (!host) return;
-    host.innerHTML = `
-      <div style="font-size:11px;color:${THEME.subtle};margin-bottom:6px;">
-        ${data.lines.length} lines${data.trimmedMetadata ? ' · visitor-info table trimmed' : ''}
-        · <a href="#" id="taChatOrig">show original</a>
-      </div>
-      <div id="taChatOut" contenteditable="true" style="border:1px solid ${THEME.border};border-radius:4px;padding:8px;max-height:240px;overflow-y:auto;font-size:12px;line-height:1.55;background:#fff;">${chatTranscriptHtml(data)}</div>
-      <div style="display:flex;gap:6px;margin-top:7px;">
-        <button id="taChatPost" style="flex:1;padding:6px;border:1px solid ${THEME.success};border-radius:5px;background:#fff;color:${THEME.success};font-size:12px;font-weight:600;cursor:pointer;">📋 Post as Note</button>
-        <button id="taChatRedo" style="flex:0 0 auto;padding:6px 9px;border:1px solid #d3d8de;border-radius:5px;background:#fff;font-size:12px;cursor:pointer;">⟳</button>
-      </div>`;
-
-    let showingOriginal = false;
-    document.getElementById('taChatOrig').onclick = (e) => {
-      e.preventDefault();
-      showingOriginal = !showingOriginal;
-      const out = document.getElementById('taChatOut');
-      out.innerHTML = showingOriginal
-        ? data.lines.map((l) => `<div>${escapeHtml(l)}</div>`).join('')
-        : chatTranscriptHtml(data);
-      e.target.textContent = showingOriginal ? 'show translation' : 'show original';
-    };
-    document.getElementById('taChatRedo').onclick = (e) => {
-      delete chatCache[currentTicketId];
-      withButtonLoading(e.currentTarget, '⏳', onTranslateChat);
-    };
-    document.getElementById('taChatPost').onclick = async (e) => {
-      const html = document.getElementById('taChatOut').innerHTML;
-      await withButtonLoading(e.currentTarget, '⏳ Posting…', async () => {
-        try {
-          await zdPost(`/tickets/${currentTicketId}/comments`, {
-            content: `<div style="font-family:system-ui,sans-serif;font-size:13px;line-height:1.6;"><h4 style="margin:0 0 8px;">🌐 Translated chat</h4>${html}</div>`,
-            contentType: 'html',
-            isPublic: false,
-          });
-          showToast('Chat note posted.', 'success');
-        } catch (err) {
-          showToast('Failed to post: ' + err.message, 'error');
-        }
+      const btn = document.createElement('button');
+      btn.className = 'ta-conv-translate';
+      btn.type = 'button';
+      btn.textContent = '🌐';
+      btn.title = 'Translate this message to English';
+      btn.style.cssText = 'flex:0 0 auto;align-self:flex-start;margin-left:6px;width:26px;height:26px;line-height:1;padding:0;border:1px solid #d3d8de;border-radius:5px;background:#fff;cursor:pointer;font-size:13px;';
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleConversationTranslation(block, body, btn);
       });
-    };
+      host.appendChild(btn);
+    });
+  }
+
+  async function toggleConversationTranslation(block, body, btn) {
+    const existing = block.querySelector('.ta-conv-translation');
+    if (existing) {
+      const hidden = existing.style.display === 'none';
+      existing.style.display = hidden ? 'block' : 'none';
+      btn.style.background = hidden ? '#eef5ff' : '#fff';
+      return;
+    }
+
+    await withButtonLoading(btn, '⏳', async () => {
+      // extractChatLines also trims a chat's "Visitor's Info" metadata table; on
+      // an ordinary email or note there is no marker and it simply returns the
+      // lines.
+      const { lines, trimmedMetadata } = extractChatLines(body.innerHTML);
+      if (!lines.length) { showToast('Nothing to translate in this message.', 'warning'); return; }
+
+      const result = await translateChatLines(lines);
+      const translated = result.out;
+      if (!result.translated) {
+        showToast('Translation failed — showing the original text.', 'error');
+      } else if (result.failed) {
+        showToast(`${result.failed} of ${result.translated + result.failed} lines could not be translated.`, 'warning');
+      }
+      const box = document.createElement('div');
+      box.className = 'ta-conv-translation';
+      box.style.cssText = `margin-top:8px;padding:8px 10px;border-left:3px solid ${THEME.primary};background:#f7f4fd;border-radius:4px;font-size:13px;line-height:1.55;`;
+      box.innerHTML =
+        `<div style="font-size:10px;color:${THEME.muted};margin-bottom:5px;text-transform:uppercase;letter-spacing:.04em;">🌐 Translated${result.provider ? ' · ' + escapeHtml(result.provider) : ''}${result.failed ? ` · ${result.failed} line(s) untranslated` : ''}${trimmedMetadata ? ' · visitor-info trimmed' : ''}</div>`
+        + translated.map((l, i) => (isTimestampLine(lines[i])
+            ? `<div style="color:#888;font-size:11px;margin-top:5px;">${escapeHtml(l)}</div>`
+            : `<div>${escapeHtml(l)}</div>`)).join('')
+        + `<div style="margin-top:7px;"><button class="ta-conv-post" style="padding:3px 9px;border:1px solid ${THEME.success};border-radius:4px;background:#fff;color:${THEME.success};font-size:11px;font-weight:600;cursor:pointer;">📋 Post as note</button></div>`;
+
+      body.insertAdjacentElement('afterend', box);
+      btn.style.background = '#eef5ff';
+
+      box.querySelector('.ta-conv-post').addEventListener('click', async (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const lineHtml = translated.map((l) => `<div>${escapeHtml(l)}</div>`).join('');
+        await withButtonLoading(ev.currentTarget, '⏳', async () => {
+          try {
+            await zdPost(`/tickets/${currentTicketId}/comments`, {
+              content: `<div style="font-family:system-ui,sans-serif;font-size:13px;line-height:1.6;"><h4 style="margin:0 0 8px;">🌐 Translated message</h4>${lineHtml}</div>`,
+              contentType: 'html',
+              isPublic: false,
+            });
+            showToast('Translation posted as a note.', 'success');
+          } catch (err) {
+            showToast('Failed to post: ' + err.message, 'error');
+          }
+        });
+      });
+    });
   }
 
   // ===== MERGE =====
@@ -1864,7 +1889,6 @@
     pendingMemberQuery = null;
     currentChatThreadId = null;
     injectPanels();
-    renderChatPanel();
 
     const cached = ticketBookingCache[ticketId];
     const haveBooking = cached !== undefined;   // null means "looked, found none"
@@ -1896,7 +1920,6 @@
       }
     }
 
-    renderChatPanel();
 
     // Duplicates run on EVERY ticket, whether or not a booking is ever found and
     // whether or not a backend key is set: the search half is same-origin, and a
@@ -1990,6 +2013,9 @@
   function start() {
     hookNavigation();
     checkTicketChange();
+    // Desk re-renders the conversation list on SPA nav and lazy load, so the
+    // per-message buttons have to be re-applied, as the Freshdesk mount loop did.
+    setInterval(injectConversationTranslate, 1500);
   }
 
   if (document.readyState === 'loading') {
