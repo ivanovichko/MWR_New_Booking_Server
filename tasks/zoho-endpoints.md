@@ -135,17 +135,10 @@ failure was the fake ticket. Writes are unblocked.
   closed it. The overlay reproduces exactly that, so merge needs only `comments` +
   a status update — both same-origin and agent-attributed. Zoho's own undocumented
   merge is not involved.
-- **Closing a ticket is the one unverified step.** `PATCH /tickets/{id}` with
-  `{status:'Closed'}` passed body validation (404 on a fake id, not 422), but `PUT`
-  returned the same 404, so the 404 does not prove PATCH is the accepted verb — a
-  disambiguating probe was cut short when the browser renderer froze. PATCH is what
-  Zoho's REST v1 documents, and `"Closed"` is the literal status seen on real
-  tickets in search results. **Verify on the first real merge.** The close runs last
-  and reports separately, so if it fails the merged content is already safe.
-- ~~`sendReply` body~~ — **RESOLVED** by validator probing, see Writes above. Still
-  unproven end-to-end: no real email has been sent through this path yet.
-- **Composer DOM anchors** — the reply editor is absent from the DOM until Reply is
-  clicked, so anchors must be read from an open composer.
+- **Closing a ticket — VERIFIED LIVE 2026-09-13.** `PATCH /tickets/{id}` with
+  `{status:'Closed'}` works. Confirmed by a real merge: ticket #577860 came back
+  `status:'Closed'`, `statusType:'Closed'`, `closedTime:'2026-09-13T06:45:04Z'`.
+  PATCH is the verb; `"Closed"` is the literal status string for this org.
 
 ## DOM anchoring rule
 

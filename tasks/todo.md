@@ -975,9 +975,9 @@ the **acting agent**, which forces the in-page same-origin path over backend OAu
       comments + a status PATCH
 - [x] `fetchTicketMessages` merges Zoho's split threads/comments collections into
       one chronological list, so both modals get the Freshdesk shape
-- [ ] **Unverified: closing a ticket.** `PATCH /tickets/{id}` `{status:'Closed'}`
-      validated but the verb is unproven (PUT 404s identically). Verify on the
-      first real merge; the close runs last so a failure cannot lose content
+- [x] **Merge verified end-to-end on production 2026-09-13.** A real merge-in
+      posted the note and closed the source: #577860 → `status:'Closed'`,
+      `closedTime:'2026-09-13T06:45:04Z'`. `PATCH {status:'Closed'}` is correct.
 - [ ] Port `renderDuplicates` / `buildStripDupRow`, remap FD int codes -> Zoho strings
 - [ ] Preview modal; Merge + Merge-out
 
