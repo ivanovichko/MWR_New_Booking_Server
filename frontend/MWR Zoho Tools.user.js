@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Zoho Tools
 // @namespace    https://traveladvantage.com
-// @version      0.7.1
+// @version      0.7.2
 // @description  TA booking tools for Zoho Desk — booking panel, duplicates, notes, supplier email, chat translation
 // @match        https://desk.zoho.com/agent/*
 // @grant        GM_xmlhttpRequest
@@ -1354,7 +1354,8 @@
       btn.type = 'button';
       btn.textContent = '🌐';
       btn.title = 'Translate this message to English';
-      btn.style.cssText = 'flex:0 0 auto;align-self:flex-start;margin-left:6px;width:26px;height:26px;line-height:1;padding:0;border:1px solid #d3d8de;border-radius:5px;background:#fff;cursor:pointer;font-size:13px;';
+      btn.style.cssText = 'flex:0 0 auto;align-self:flex-start;margin-left:6px;width:26px;height:26px;line-height:1;padding:0;'
+        + 'border:1px solid rgba(128,128,128,0.45);border-radius:5px;background:transparent;color:inherit;cursor:pointer;font-size:13px;';
       btn.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -1369,7 +1370,7 @@
     if (existing) {
       const hidden = existing.style.display === 'none';
       existing.style.display = hidden ? 'block' : 'none';
-      btn.style.background = hidden ? '#eef5ff' : '#fff';
+      btn.style.background = hidden ? 'rgba(111,66,193,0.18)' : 'transparent';
       return;
     }
 
@@ -1389,16 +1390,21 @@
       }
       const box = document.createElement('div');
       box.className = 'ta-conv-translation';
-      box.style.cssText = `margin-top:8px;padding:8px 10px;border-left:3px solid ${THEME.primary};background:#f7f4fd;border-radius:4px;font-size:13px;line-height:1.55;`;
+      // Theme-agnostic on purpose. Zoho ships light and dark themes and this box
+      // sits inside their message body, so it inherits their text colour and
+      // tints the background translucently rather than hardcoding a palette —
+      // a fixed light background inherited white text and became unreadable.
+      box.style.cssText = `margin-top:8px;padding:8px 10px;border-left:3px solid ${THEME.primary};`
+        + `background:rgba(111,66,193,0.12);border-radius:4px;font-size:13px;line-height:1.55;color:inherit;`;
       box.innerHTML =
-        `<div style="font-size:10px;color:${THEME.muted};margin-bottom:5px;text-transform:uppercase;letter-spacing:.04em;">🌐 Translated${result.provider ? ' · ' + escapeHtml(result.provider) : ''}${result.failed ? ` · ${result.failed} line(s) untranslated` : ''}${trimmedMetadata ? ' · visitor-info trimmed' : ''}</div>`
+        `<div style="font-size:10px;opacity:.65;margin-bottom:5px;text-transform:uppercase;letter-spacing:.04em;">🌐 Translated${result.provider ? ' · ' + escapeHtml(result.provider) : ''}${result.failed ? ` · ${result.failed} line(s) untranslated` : ''}${trimmedMetadata ? ' · visitor-info trimmed' : ''}</div>`
         + translated.map((l, i) => (isTimestampLine(lines[i])
-            ? `<div style="color:#888;font-size:11px;margin-top:5px;">${escapeHtml(l)}</div>`
+            ? `<div style="opacity:.6;font-size:11px;margin-top:5px;">${escapeHtml(l)}</div>`
             : `<div>${escapeHtml(l)}</div>`)).join('')
-        + `<div style="margin-top:7px;"><button class="ta-conv-post" style="padding:3px 9px;border:1px solid ${THEME.success};border-radius:4px;background:#fff;color:${THEME.success};font-size:11px;font-weight:600;cursor:pointer;">📋 Post as note</button></div>`;
+        + `<div style="margin-top:7px;"><button class="ta-conv-post" style="padding:3px 9px;border:1px solid ${THEME.success};border-radius:4px;background:transparent;color:${THEME.success};font-size:11px;font-weight:600;cursor:pointer;">📋 Post as note</button></div>`;
 
       body.insertAdjacentElement('afterend', box);
-      btn.style.background = '#eef5ff';
+      btn.style.background = 'rgba(111,66,193,0.18)';
 
       box.querySelector('.ta-conv-post').addEventListener('click', async (ev) => {
         ev.preventDefault();
