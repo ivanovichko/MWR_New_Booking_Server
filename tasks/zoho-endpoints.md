@@ -267,3 +267,38 @@ can override, because the active identities are meaningfully different.
 `INVALID_DATA` responses carry `errors:[{fieldName:'/x', errorType:'missing'}]`.
 The top-level message is only "The data is invalid due to validation
 restrictions", which is undiagnosable on its own — always surface `errors[]`.
+
+
+## Chat tickets
+
+A chat ticket has `ticket.channel === 'Chat'` and exactly one thread with
+`channel === 'ONLINE_CHAT'`. The transcript lives in that thread's `content`
+(fetch the thread detail — the list only has a truncated summary).
+
+**Structure**, measured on #578243 (84 lines / 1927 chars):
+
+- The first handful of lines are the conversation, already one line per
+  speaker / timestamp / message:
+  `Question` · `le cote sncf …` · `12 Sep, 9:13 PM` · `il y a t il …` ·
+  `Taha N` · `9:46 PM` · `De quelle destination …`
+- Everything from a line matching `/^visitor'?s info\b/i` onward is a metadata
+  table (Chat Duration, In Time, End Time, Waiting Time, Brand). That was ~90% of
+  the content here. **Cut there** — it must not be translated or posted.
+- The speaker/timestamp/message cycle is NOT strictly regular (a label line like
+  "Question" can precede a message with no timestamp), so do not model it as a
+  fixed repeating unit.
+
+**Translation approach.** Because lines already separate speaker, time and
+message, translating line by line preserves attribution and ordering for free —
+which is what most of Freshdesk's `TRANSLATE_CHAT_PROMPT` rules existed to
+protect. Timestamps are passed through untouched (Google reformats them);
+everything else is batched under 1200 chars per `/translate` call. A batch is
+only trusted if the returned line count matches what was sent, else the overlay
+falls back to one call per line so nothing can be misaligned.
+
+Verified: the extractor returns exactly the 7 conversation lines from #578243
+with the visitor-info table trimmed.
+
+**Not yet seen in the wild:** bot greetings repeated in several languages
+separated by `-`, which Freshdesk's prompt deduplicated. If the new chat widget
+produces them, line-by-line will emit the duplicates and a dedup pass is needed.

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MWR Zoho Tools
 // @namespace    https://traveladvantage.com
-// @version      0.5.0
-// @description  TA booking tools for Zoho Desk — booking panel, duplicates, notes, supplier email
+// @version      0.6.0
+// @description  TA booking tools for Zoho Desk — booking panel, duplicates, notes, supplier email, chat translation
 // @match        https://desk.zoho.com/agent/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -65,6 +65,8 @@
   let dupIncludeClosed  = false;  // Zoho returns Closed tickets by default
   let panelNotice       = null;   // { text, bookingId } when a lookup did not land
   let pendingMemberQuery = null;  // consumed by the Member section to auto-search
+  let currentChatThreadId = null; // set when the ticket carries an ONLINE_CHAT thread
+  const chatCache       = {};     // ticketId -> { lines, translated, trimmedMetadata }
   const fromAddressCache = {};    // departmentId -> active+verified sender addresses
 
   // ===== SECRET =====
@@ -366,6 +368,8 @@
     try {
       const threads = await zdGet(`/tickets/${ticketId}/threads?limit=10`);
       const list = (threads && threads.data) || [];
+      const chat = list.find((t) => t.channel === 'ONLINE_CHAT');
+      currentChatThreadId = chat ? chat.id : null;
       if (list.length) {
         const inbound = list.filter((t) => t.direction === 'in');
         const pick = (inbound.length ? inbound : list)[(inbound.length ? inbound : list).length - 1];
@@ -448,7 +452,12 @@
     dups.controls.insertBefore(refresh, dups.controls.firstChild);
     dups.body.id = 'taDuplicates';
 
+    const chat = buildCard('taChatPanel', '💬 Chat', '#0056d2');
+    chat.body.id = 'taChatBody';
+    chat.card.style.display = 'none';   // only for tickets that actually have a chat
+
     rail.appendChild(booking.card);
+    rail.appendChild(chat.card);
     rail.appendChild(dups.card);
     document.body.appendChild(rail);
     makeDraggable(rail, booking.header);
@@ -1218,6 +1227,174 @@
     body.innerHTML = bd.noteHtml;
   }
 
+  // ===== CHAT TRANSLATION =====
+  // Zoho stores an online-chat ticket as a single ONLINE_CHAT thread whose HTML
+  // holds the transcript followed by a "Visitor's Info" metadata table (chat
+  // duration, brand, waiting time). The metadata is ~90% of the content and must
+  // not be translated or posted.
+  //
+  // Lines already arrive one per speaker / timestamp / message, so translating
+  // line by line preserves attribution and ordering for free. That is what the
+  // Freshdesk LLM prompt spent most of its rules defending; Google cannot
+  // reorder or invent lines, so the rules become unnecessary.
+  const CHAT_METADATA_MARKER = /^visitor'?s info\b/i;
+  const CHAT_CHUNK_CHARS = 1200;   // Google's endpoint is a GET; keep q short
+
+  function isTimestampLine(t) {
+    return /^\d{1,2}:\d{2}\s?(am|pm)?$/i.test(t)
+      || /^\d{1,2}\s\w{3},?\s+\d{1,2}:\d{2}/i.test(t)
+      || /^\d{1,2}\s\w{3}\s\d{4}/i.test(t);
+  }
+
+  // Flattens the transcript HTML to ordered logical lines, stopping at the
+  // metadata table.
+  function extractChatLines(html) {
+    const host = document.createElement('div');
+    host.innerHTML = html || '';
+    const parts = [];
+    const walk = (node) => {
+      node.childNodes.forEach((n) => {
+        if (n.nodeType === 3) {
+          const t = n.textContent.replace(/\s+/g, ' ').trim();
+          if (t) parts.push(t);
+        } else if (n.nodeType === 1) {
+          walk(n);
+          if (['div', 'tr', 'p', 'br', 'td', 'li'].includes(n.tagName.toLowerCase())) parts.push('\u0000');
+        }
+      });
+    };
+    walk(host);
+
+    let lines = parts.join(' ').split('\u0000')
+      .map((x) => x.replace(/\s+/g, ' ').trim())
+      .filter(Boolean);
+
+    const cut = lines.findIndex((l) => CHAT_METADATA_MARKER.test(l));
+    const trimmed = cut !== -1;
+    if (trimmed) lines = lines.slice(0, cut);
+    return { lines, trimmedMetadata: trimmed };
+  }
+
+  // Translates only the lines that carry language. Timestamps pass through
+  // untouched — Google would happily reformat them.
+  async function translateChatLines(lines) {
+    const idx = [];
+    lines.forEach((l, i) => { if (!isTimestampLine(l)) idx.push(i); });
+    if (!idx.length) return lines.slice();
+
+    const out = lines.slice();
+    let batch = [];
+    let batchIdx = [];
+
+    const flush = async () => {
+      if (!batch.length) return;
+      const joined = batch.join('\n');
+      const res = await api.translate(joined, 'en');
+      if (res.ok && res.data && res.data.text) {
+        const back = String(res.data.text).split('\n');
+        // Only trust a batch whose line count survived the round trip;
+        // otherwise fall back to one call per line so nothing is misaligned.
+        if (back.length === batch.length) {
+          batchIdx.forEach((target, k) => { out[target] = back[k].trim() || lines[target]; });
+        } else {
+          for (let k = 0; k < batch.length; k++) {
+            const one = await api.translate(batch[k], 'en');
+            if (one.ok && one.data && one.data.text) out[batchIdx[k]] = String(one.data.text).trim();
+          }
+        }
+      }
+      batch = [];
+      batchIdx = [];
+    };
+
+    for (const i of idx) {
+      if (batch.join('\n').length + lines[i].length > CHAT_CHUNK_CHARS) await flush();
+      batch.push(lines[i]);
+      batchIdx.push(i);
+    }
+    await flush();
+    return out;
+  }
+
+  function renderChatPanel() {
+    const host = document.getElementById('taChatBody');
+    const card = document.getElementById('taChatPanel');
+    if (!host || !card) return;
+    if (!currentChatThreadId) { card.style.display = 'none'; return; }
+    card.style.display = 'flex';
+    if (chatCache[currentTicketId]) { renderChatResult(chatCache[currentTicketId]); return; }
+    host.innerHTML = `<button id="taChatGo" style="width:100%;padding:7px 6px;border:1px solid ${THEME.primary};border-radius:5px;background:#fff;color:${THEME.primary};font-size:12px;font-weight:600;cursor:pointer;">🌐 Translate chat</button>`;
+    document.getElementById('taChatGo').onclick = (e) => withButtonLoading(e.currentTarget, '⏳ Translating…', onTranslateChat);
+  }
+
+  async function onTranslateChat() {
+    try {
+      const detail = await zdGet(`/tickets/${currentTicketId}/threads/${currentChatThreadId}`);
+      const { lines, trimmedMetadata } = extractChatLines(detail.content || detail.summary || '');
+      if (!lines.length) { showToast('No transcript text found in this chat.', 'warning'); return; }
+      const translated = await translateChatLines(lines);
+      chatCache[currentTicketId] = { lines, translated, trimmedMetadata };
+      renderChatResult(chatCache[currentTicketId]);
+    } catch (err) {
+      showToast('Chat translation failed: ' + err.message, 'error');
+      console.error('[ta] chat translate failed:', err);
+    }
+  }
+
+  function chatTranscriptHtml(data) {
+    return data.translated.map((l, i) => {
+      const ts = isTimestampLine(data.lines[i]);
+      return ts
+        ? `<div style="color:#888;font-size:11px;margin-top:6px;">${escapeHtml(l)}</div>`
+        : `<div>${escapeHtml(l)}</div>`;
+    }).join('');
+  }
+
+  function renderChatResult(data) {
+    const host = document.getElementById('taChatBody');
+    if (!host) return;
+    host.innerHTML = `
+      <div style="font-size:11px;color:${THEME.subtle};margin-bottom:6px;">
+        ${data.lines.length} lines${data.trimmedMetadata ? ' · visitor-info table trimmed' : ''}
+        · <a href="#" id="taChatOrig">show original</a>
+      </div>
+      <div id="taChatOut" contenteditable="true" style="border:1px solid ${THEME.border};border-radius:4px;padding:8px;max-height:240px;overflow-y:auto;font-size:12px;line-height:1.55;background:#fff;">${chatTranscriptHtml(data)}</div>
+      <div style="display:flex;gap:6px;margin-top:7px;">
+        <button id="taChatPost" style="flex:1;padding:6px;border:1px solid ${THEME.success};border-radius:5px;background:#fff;color:${THEME.success};font-size:12px;font-weight:600;cursor:pointer;">📋 Post as Note</button>
+        <button id="taChatRedo" style="flex:0 0 auto;padding:6px 9px;border:1px solid #d3d8de;border-radius:5px;background:#fff;font-size:12px;cursor:pointer;">⟳</button>
+      </div>`;
+
+    let showingOriginal = false;
+    document.getElementById('taChatOrig').onclick = (e) => {
+      e.preventDefault();
+      showingOriginal = !showingOriginal;
+      const out = document.getElementById('taChatOut');
+      out.innerHTML = showingOriginal
+        ? data.lines.map((l) => `<div>${escapeHtml(l)}</div>`).join('')
+        : chatTranscriptHtml(data);
+      e.target.textContent = showingOriginal ? 'show translation' : 'show original';
+    };
+    document.getElementById('taChatRedo').onclick = (e) => {
+      delete chatCache[currentTicketId];
+      withButtonLoading(e.currentTarget, '⏳', onTranslateChat);
+    };
+    document.getElementById('taChatPost').onclick = async (e) => {
+      const html = document.getElementById('taChatOut').innerHTML;
+      await withButtonLoading(e.currentTarget, '⏳ Posting…', async () => {
+        try {
+          await zdPost(`/tickets/${currentTicketId}/comments`, {
+            content: `<div style="font-family:system-ui,sans-serif;font-size:13px;line-height:1.6;"><h4 style="margin:0 0 8px;">🌐 Translated chat</h4>${html}</div>`,
+            contentType: 'html',
+            isPublic: false,
+          });
+          showToast('Chat note posted.', 'success');
+        } catch (err) {
+          showToast('Failed to post: ' + err.message, 'error');
+        }
+      });
+    };
+  }
+
   // ===== MERGE =====
   // Freshdesk had no native merge either — /merge-ticket posted a note on the
   // surviving ticket carrying the chosen message, posted a pointer note on the
@@ -1685,7 +1862,9 @@
     currentBookingId = null;
     panelNotice = null;
     pendingMemberQuery = null;
+    currentChatThreadId = null;
     injectPanels();
+    renderChatPanel();
 
     const cached = ticketBookingCache[ticketId];
     const haveBooking = cached !== undefined;   // null means "looked, found none"
@@ -1716,6 +1895,8 @@
         renderBookingPanel();
       }
     }
+
+    renderChatPanel();
 
     // Duplicates run on EVERY ticket, whether or not a booking is ever found and
     // whether or not a backend key is set: the search half is same-origin, and a
