@@ -405,7 +405,7 @@ so this only bites migrated tickets — a large historical set. Preferring the
 contact is harmless on new tickets, where both values agree.
 
 
-## Writing back to Zoho from TA
+## Reassigning a ticket's contact
 
 Both writes are supported (probed against nonexistent ids, which fail on the id
 rather than the body):
@@ -419,13 +419,29 @@ rather than the body):
 member's real address. On migrated tickets this is what replaces the inherited
 Freshdesk routing address.
 
-**Write-back is gated on how the member was identified.** `panelUserSource` is
-one of `booking`, `email`, `manual` or `name`; the first three sync
-automatically, `name` never does and offers the manual button instead. A
-name-only match is exactly the case that could rename the wrong contact and
-redirect a customer's replies to a stranger, so it requires a human decision.
+### Shared mailboxes create placeholder contacts
 
-Other guards: it runs at most once per ticket, skips fields that already match,
-and reports what changed. TA stores names in caps, so they are title-cased on the
-way in — verified against hyphens, apostrophes, particles and accents
-(`jean-luc` → `Jean-Luc`, `o'brien` → `O'Brien`, `ÉLODIE` → `Élodie`).
+Mail relayed through `member@traveladvantage.com` lands on a contact whose own
+`lastName` is literally that address — confirmed, and the address matches two
+contacts. Every such ticket therefore hangs off one placeholder record, so
+replies and history attach to the wrong person.
+
+Those addresses must never be treated as a customer identity. `SHARED_MAILBOXES`
+covers `member|support|info|help|noreply|bookings@traveladvantage.com|mwrlife.com`
+alongside the helpdesk system domains.
+
+### Find or create, then repoint
+
+| step | call | notes |
+|---|---|---|
+| find | `GET /contacts/search?email=…` | `searchStr` is rejected; an unknown address returns **204 No Content**, not an empty 200 |
+| create | `POST /contacts` | only `lastName` is mandatory (`422 /lastName:missing` on an empty body) |
+| repoint | `PATCH /tickets/{id}` | `{contactId, email}` |
+
+**Contact names are never written.** They are cosmetic and may have been curated;
+the name is only used when creating a contact that does not exist yet.
+
+Automatic reassignment runs only when the ticket currently sits on a placeholder
+contact — the genuinely broken state — and only when the member was identified
+from a booking, an exact email match, or an explicit agent pick. Everything else
+waits for the button.

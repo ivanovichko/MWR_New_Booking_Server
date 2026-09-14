@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Zoho Tools
 // @namespace    https://traveladvantage.com
-// @version      0.11.1
+// @version      0.12.0
 // @description  TA booking tools for Zoho Desk — booking panel, duplicates, notes, supplier email, chat translation
 // @match        https://desk.zoho.com/agent/*
 // @grant        GM_xmlhttpRequest
@@ -424,11 +424,23 @@
   // for duplicates — they match either nothing or everything.
   const SYSTEM_EMAIL_DOMAINS = /@([a-z0-9-]+\.)*(freshdesk|zohodesk)\.com$/i;
 
+  // Shared company mailboxes. Mail forwarded through member@traveladvantage.com
+  // lands on a contact whose own lastName is that address, so treating it as a
+  // customer identity searches TA for the mailbox instead of the member and
+  // leaves every such ticket attached to the same placeholder contact.
+  const SHARED_MAILBOXES = /^(member|support|info|help|noreply|no-reply|bookings?)@(traveladvantage\.com|mwrlife\.com)$/i;
+
+  function isPlaceholderEmail(email) {
+    const e = String(email || '').trim();
+    if (!e) return true;
+    return SYSTEM_EMAIL_DOMAINS.test(e) || SHARED_MAILBOXES.test(e);
+  }
+
   function usableEmail(email) {
     if (!email || typeof email !== 'string') return null;
     const e = email.trim();
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) return null;
-    if (SYSTEM_EMAIL_DOMAINS.test(e)) return null;
+    if (isPlaceholderEmail(e)) return null;
     return e;
   }
 
@@ -493,6 +505,7 @@
       subject: ticket.subject || '', description, ticket, email, contactName,
       contactFirstName: contact ? (contact.firstName || null) : null,
       contactLastName: contact ? (contact.lastName || null) : null,
+      contactEmailRaw: contact ? (contact.email || null) : (ticket.email || null),
     };
   }
 
@@ -897,11 +910,11 @@
           actionRow.appendChild(a);
         }
         const syncBtn = document.createElement('button');
-        syncBtn.textContent = '⇪ Update Zoho from TA';
-        syncBtn.title = 'Set the contact name and the ticket reply-to address from this TA member';
+        syncBtn.textContent = '⇪ Fix ticket contact';
+        syncBtn.title = 'Point this ticket at the TA member\u2019s contact and reply-to address';
         syncBtn.style.cssText = `padding:6px 10px;border:1px solid ${THEME.primary};border-radius:4px;background:#fff;color:${THEME.primary};font-size:12px;cursor:pointer;font-weight:500;`;
         syncBtn.addEventListener('click', (e) =>
-          withButtonLoading(e.currentTarget, '⏳', () => syncMemberToZoho(user, false)));
+          withButtonLoading(e.currentTarget, '⏳', () => syncTicketContact(user, false)));
         actionRow.appendChild(syncBtn);
 
         const memberNoteBtn = document.createElement('button');
@@ -1444,61 +1457,83 @@
   }
 
   // Only write back when the member was identified on strong evidence. A
-  // name-only fallback match is precisely the case that could rename the wrong
-  // contact and redirect a customer's replies to a stranger.
+  // name-only fallback match is precisely the case that could hand a ticket to
+  // the wrong contact and redirect a customer's replies to a stranger.
   function mayAutoSync() {
     return panelUserSource === 'booking' || panelUserSource === 'email' || panelUserSource === 'manual';
   }
 
-  // Fires at most once per ticket, and never on weak evidence.
+  // The ticket's contact is often wrong rather than merely untidy: mail relayed
+  // through a shared mailbox attaches every such ticket to one placeholder
+  // contact, so replies and history land on the wrong record. Once TA identifies
+  // the real member we point the ticket at that person's contact, creating it if
+  // Zoho has never seen them.
+  //
+  // Contact NAMES are deliberately never written. They are cosmetic and may have
+  // been curated by a human.
+  async function findOrCreateContact(user, email) {
+    const found = await zdGet(`/contacts/search?email=${encodeURIComponent(email)}`);
+    const hit = ((found && found.data) || [])[0];
+    if (hit && hit.id) return { id: hit.id, created: false };
+
+    // lastName is the only mandatory field on creation.
+    const { first, last } = splitMemberName(user);
+    const created = await zdPost('/contacts', {
+      lastName: last || first || email,
+      firstName: first || undefined,
+      email,
+    });
+    if (!created || !created.id) throw new Error('contact creation returned no id');
+    return { id: created.id, created: true };
+  }
+
+  async function syncTicketContact(user, silent) {
+    const meta = currentTicketMeta || {};
+    const memberEmail = usableEmail(user && user.email);
+    if (!memberEmail) {
+      if (!silent) showToast('This TA member has no usable email address.', 'warning');
+      return [];
+    }
+
+    const changed = [];
+    try {
+      const { id: contactId, created } = await findOrCreateContact(user, memberEmail);
+      const patch = {};
+      if (contactId && String(contactId) !== String(meta.contactId)) patch.contactId = contactId;
+      if (memberEmail.toLowerCase() !== String(meta.ticketEmail || '').toLowerCase()) patch.email = memberEmail;
+
+      if (!Object.keys(patch).length) {
+        if (!silent) showToast('Ticket already points at this member.', 'info');
+        return changed;
+      }
+
+      await zdPatch(`/tickets/${currentTicketId}`, patch);
+      if (patch.contactId) {
+        meta.contactId = patch.contactId;
+        changed.push(created ? 'contact created + linked' : 'contact → the member');
+      }
+      if (patch.email) { meta.ticketEmail = patch.email; changed.push('reply-to → ' + patch.email); }
+
+      showToast('Ticket updated: ' + changed.join(' · ') + ' (reload to see it in Desk)', 'success');
+      return changed;
+    } catch (err) {
+      showToast('Could not update the ticket contact: ' + err.message, 'error');
+      console.error('[ta] contact reassign failed:', err);
+      return changed;
+    }
+  }
+
+  // Automatic only when the ticket is sitting on a placeholder contact — that is
+  // the broken state worth repairing without being asked. Anything else is a
+  // judgement call and waits for the button.
   let syncedForTicket = null;
   function maybeSyncMember(user) {
     if (!user || !mayAutoSync()) return;
     if (syncedForTicket === currentTicketId) return;
-    syncedForTicket = currentTicketId;
-    syncMemberToZoho(user, true);
-  }
-
-  // Automatic contact renaming is OFF. The reply-to correction still runs
-  // automatically because it fixes migrated tickets that would otherwise send
-  // replies to a dead Freshdesk routing address. Renaming is cosmetic by
-  // comparison and overwrites data a human may have curated, so it now happens
-  // only when an agent presses the button. Flip this to re-enable.
-  const AUTO_SYNC_CONTACT_NAME = false;
-
-  async function syncMemberToZoho(user, silent) {
     const meta = currentTicketMeta || {};
-    const changed = [];
-    const allowName = AUTO_SYNC_CONTACT_NAME || !silent;   // silent === automatic run
-    try {
-      const { first, last } = splitMemberName(user);
-      const contactPatch = {};
-      if (allowName && first && first !== meta.contactFirstName) contactPatch.firstName = first;
-      if (allowName && last && last !== meta.contactLastName) contactPatch.lastName = last;
-      if (meta.contactId && Object.keys(contactPatch).length) {
-        await zdPatch(`/contacts/${meta.contactId}`, contactPatch);
-        if (contactPatch.firstName) meta.contactFirstName = contactPatch.firstName;
-        if (contactPatch.lastName) meta.contactLastName = contactPatch.lastName;
-        changed.push('name → ' + [contactPatch.firstName, contactPatch.lastName].filter(Boolean).join(' '));
-      }
-
-      // Point replies at the member's real address rather than whatever the
-      // channel recorded.
-      const memberEmail = usableEmail(user.email);
-      if (memberEmail && memberEmail.toLowerCase() !== String(meta.ticketEmail || '').toLowerCase()) {
-        await zdPatch(`/tickets/${currentTicketId}`, { email: memberEmail });
-        meta.ticketEmail = memberEmail;
-        changed.push('reply-to → ' + memberEmail);
-      }
-
-      if (changed.length) showToast('Zoho updated: ' + changed.join(' · '), 'success');
-      else if (!silent) showToast('Zoho already matches TA — nothing to update.', 'info');
-      return changed;
-    } catch (err) {
-      showToast('Could not update Zoho: ' + err.message, 'error');
-      console.error('[ta] contact sync failed:', err);
-      return changed;
-    }
+    if (!isPlaceholderEmail(meta.contactEmailRaw)) return;
+    syncedForTicket = currentTicketId;
+    syncTicketContact(user, true);
   }
 
   // ===== ACTIONS =====
@@ -2249,6 +2284,7 @@
         email: ctx.email || null,             // contact's real address, not the channel's
         contactName: ctx.contactName || null,
         contactId: ctx.ticket.contactId || null,
+        contactEmailRaw: ctx.contactEmailRaw || null,
         contactFirstName: ctx.contactFirstName || null,
         contactLastName: ctx.contactLastName || null,
         ticketEmail: ctx.ticket.email || null,
