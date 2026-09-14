@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Zoho Tools
 // @namespace    https://traveladvantage.com
-// @version      0.12.0
+// @version      0.12.1
 // @description  TA booking tools for Zoho Desk — booking panel, duplicates, notes, supplier email, chat translation
 // @match        https://desk.zoho.com/agent/*
 // @grant        GM_xmlhttpRequest
@@ -267,6 +267,8 @@
         method,
         url,
         headers,
+        timeout: 60000,   // Render free tier can take ~30s to wake
+        ontimeout: () => resolve({ ok: false, status: 0, data: { error: 'Request timed out' } }),
         data: data !== undefined ? JSON.stringify(data) : undefined,
         onload: (res) => {
           try {
@@ -290,7 +292,20 @@
     findUser:         (query)  => gmPost(`${BACKEND_URL}/find-user`, { query }),
     user:             (userId) => gmGet(`${BACKEND_URL}/user/${encodeURIComponent(userId)}`),
     userReservations: (userId) => gmGet(`${BACKEND_URL}/user/${encodeURIComponent(userId)}/reservations`),
-    translate:        (text, target = 'en') => gmPost(`${BACKEND_URL}/translate`, { text, target }),
+    // Retried because it is idempotent and because Render's free tier sleeps: the
+    // first call after an idle spell answers with a wake-up page rather than
+    // JSON, which otherwise surfaces as a translation failure. Note, reply and
+    // merge calls are deliberately NOT retried — repeating those would post
+    // twice.
+    translate: async (text, target = 'en') => {
+      let last = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        last = await gmPost(`${BACKEND_URL}/translate`, { text, target });
+        if (last.ok && last.data && last.data.text) return last;
+        if (attempt < 2) await new Promise((r) => setTimeout(r, attempt === 0 ? 1500 : 4000));
+      }
+      return last;
+    },
     linkTicketBooking: (body)  => gmPost(`${BACKEND_URL}/zoho/ticket-booking`, body),
     bookingTickets:   (bookingId, exclude) =>
       gmGet(`${BACKEND_URL}/zoho/booking-tickets/${encodeURIComponent(bookingId)}` +
