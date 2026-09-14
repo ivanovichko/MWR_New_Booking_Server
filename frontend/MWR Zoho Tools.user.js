@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Zoho Tools
 // @namespace    https://traveladvantage.com
-// @version      0.9.3
+// @version      0.9.4
 // @description  TA booking tools for Zoho Desk — booking panel, duplicates, notes, supplier email, chat translation
 // @match        https://desk.zoho.com/agent/*
 // @grant        GM_xmlhttpRequest
@@ -396,6 +396,20 @@
     return m ? m[1] : null;
   }
 
+  // Migrated tickets carry the old Freshdesk routing address in ticket.email
+  // (e.g. traveladvantagecommember@mwrlife.freshdesk.com), not the customer's.
+  // Helpdesk system addresses must never be used to identify a member or to hunt
+  // for duplicates — they match either nothing or everything.
+  const SYSTEM_EMAIL_DOMAINS = /@([a-z0-9-]+\.)*(freshdesk|zohodesk)\.com$/i;
+
+  function usableEmail(email) {
+    if (!email || typeof email !== 'string') return null;
+    const e = email.trim();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) return null;
+    if (SYSTEM_EMAIL_DOMAINS.test(e)) return null;
+    return e;
+  }
+
   function htmlToText(html) {
     const div = document.createElement('div');
     div.innerHTML = String(html || '');
@@ -415,6 +429,22 @@
   //     thread (threads come back newest-first), not by that flag.
   async function fetchTicketContext(ticketId) {
     const ticket = await zdGet(`/tickets/${ticketId}`);
+
+    // The contact record is the authoritative source for the customer's address;
+    // ticket.email is whatever the channel recorded, which after the Freshdesk
+    // migration is often a routing address.
+    let contact = null;
+    if (ticket.contactId) {
+      try { contact = await zdGet(`/contacts/${ticket.contactId}`); } catch (e) { /* optional */ }
+    }
+    const contactEmail = contact
+      ? (usableEmail(contact.email) || usableEmail(contact.secondaryEmail))
+      : null;
+    const email = contactEmail || usableEmail(ticket.email);
+    const contactName = contact
+      ? [contact.firstName, contact.lastName].filter(Boolean).join(' ').trim() || null
+      : null;
+
     let description = htmlToText(ticket.description);
 
     try {
@@ -437,7 +467,7 @@
     // and signatures. Capping keeps the extraction call cheap and focused.
     if (description.length > 4000) description = description.slice(0, 4000);
 
-    return { subject: ticket.subject || '', description, ticket };
+    return { subject: ticket.subject || '', description, ticket, email, contactName };
   }
 
   // ===== PANELS =====
@@ -689,9 +719,12 @@
   // this never fires.
   function seedMemberLookupFromTicket() {
     if (panelUserOverride) return false;
-    const email = currentTicketMeta && currentTicketMeta.email;
-    if (!email) return false;
-    pendingMemberQuery = email;
+    const meta = currentTicketMeta || {};
+    // Name is a weaker key than email, but on a migrated ticket whose only
+    // address is a routing one it is all there is.
+    const query = meta.email || meta.contactName;
+    if (!query) return false;
+    pendingMemberQuery = query;
     pendingMemberAuto = true;
     return true;
   }
@@ -2016,7 +2049,8 @@
         ticketNumber: ctx.ticket.ticketNumber || null,
         subject: ctx.ticket.subject || null,
         status: ctx.ticket.status || null,
-        email: ctx.ticket.email || null,
+        email: ctx.email || null,             // contact's real address, not the channel's
+        contactName: ctx.contactName || null,
         departmentId: ctx.ticket.departmentId || null,
       };
     } catch (err) {

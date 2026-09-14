@@ -380,3 +380,26 @@ Not the cause, for the record: `PATCH /tickets/{id}` with `{status:'Closed'}`
 returns **200** on a real ticket, `"Closed"` is a valid status for this org, and
 there are no mandatory-on-close fields (only `contactId`, `subject` and `status`
 are mandatory at all).
+
+
+## Customer email — use the CONTACT, not the ticket
+
+`ticket.email` is whatever the channel recorded. On tickets **migrated from
+Freshdesk** that is the old routing address, e.g.
+`traveladvantagecommember@mwrlife.freshdesk.com`, while the customer's real
+address sits on the contact record.
+
+Observed on #567300: `ticket.email` was the Freshdesk routing address, while
+`GET /contacts/{contactId}` gave `tachkinova@inbox.ru` for TATIANA TASHKINOVA.
+Seeding the member lookup and the duplicate search from `ticket.email` therefore
+searched a system address — matching nothing, or worse, matching every migrated
+ticket.
+
+**Resolution order:** `contact.email` → `contact.secondaryEmail` →
+`ticket.email`, each rejected if it fails a basic address shape or matches a
+helpdesk system domain (`*.freshdesk.com`, `*.zohodesk.com`). If nothing usable
+remains, the member lookup falls back to the contact's name.
+
+Scope: across the 12 most recent tickets `ticket.email` was genuine every time,
+so this only bites migrated tickets — a large historical set. Preferring the
+contact is harmless on new tickets, where both values agree.
