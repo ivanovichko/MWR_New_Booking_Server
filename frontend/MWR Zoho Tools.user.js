@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Zoho Tools
 // @namespace    https://traveladvantage.com
-// @version      0.10.1
+// @version      0.11.0
 // @description  TA booking tools for Zoho Desk — booking panel, duplicates, notes, supplier email, chat translation
 // @match        https://desk.zoho.com/agent/*
 // @grant        GM_xmlhttpRequest
@@ -679,6 +679,16 @@
           <input id="taChangeInput" type="text" placeholder="Booking ID…" style="flex:1;min-width:0;padding:6px 9px;border:1px solid #d3d8de;border-radius:4px;font-size:13px;" />
           <button id="taChangeFetch" style="flex:0 0 auto;padding:6px 10px;border:1px solid #d3d8de;border-radius:4px;background:#fff;cursor:pointer;font-size:12px;">Fetch</button>
         </div>
+        <div style="margin-top:8px;padding-top:8px;border-top:1px dashed ${THEME.border};">
+          <div style="display:flex;gap:5px;">
+            <select id="taIssueSel" style="flex:1;min-width:0;padding:6px 8px;border:1px solid #d3d8de;border-radius:4px;font-size:12px;background:#fff;color:${THEME.text};">
+              ${SUBJECT_ISSUES.map((o) => `<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`).join('')}
+            </select>
+            <button id="taRenameBtn" style="flex:0 0 auto;padding:6px 9px;border:1px solid ${THEME.primary};border-radius:4px;background:#fff;color:${THEME.primary};font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;">✏️ Rename</button>
+          </div>
+          <input id="taIssueOther" type="text" placeholder="Custom issue…" style="display:none;width:100%;box-sizing:border-box;margin-top:5px;padding:6px 8px;border:1px solid #d3d8de;border-radius:4px;font-size:12px;" />
+          <div id="taRenamePreview" style="font-size:10px;color:${THEME.muted};margin-top:4px;word-break:break-word;"></div>
+        </div>
         ${openBookingHtml}
       `;
       document.getElementById('taPostNote').addEventListener('click', onPostNote);
@@ -686,6 +696,7 @@
       const supBtn = document.getElementById('taSupplierEmailBtn');
       if (supBtn) supBtn.addEventListener('click', onSupplierEmail);
       wireChangeBooking();
+      wireRenameSubject(booking);
     } else {
       // A failed lookup is a starting point, not a dead end: the agent still
       // needs to find the booking by hand or work from the member instead.
@@ -706,6 +717,53 @@
     }
 
     appendMemberSection(body, getDisplayUser());
+  }
+
+  // Rebuilds the subject as "bookingId / supplierId / Issue" — the Freshdesk
+  // convention, which the duplicate search still relies on to match by reference.
+  const SUBJECT_ISSUES = ['Reconfirmation', 'Cancellation', 'Modification', 'Complaint', 'Question',
+                          'GuaranteeClaim', 'InfoRequest', 'Voucher', 'Info', 'Other'];
+
+  function wireRenameSubject(booking) {
+    const sel = document.getElementById('taIssueSel');
+    const other = document.getElementById('taIssueOther');
+    const btn = document.getElementById('taRenameBtn');
+    const preview = document.getElementById('taRenamePreview');
+    if (!sel || !other || !btn || !preview) return;
+
+    const currentIssue = () => (sel.value === 'Other' ? other.value.trim() : sel.value);
+    const buildSubject = () =>
+      [booking.internalBookingId, booking.supplierId, currentIssue()].filter(Boolean).join(' / ');
+
+    const sync = () => {
+      other.style.display = sel.value === 'Other' ? '' : 'none';
+      const noBooking = !booking.internalBookingId;
+      const needsOther = sel.value === 'Other' && !other.value.trim();
+      btn.disabled = noBooking || needsOther;
+      btn.style.opacity = btn.disabled ? '0.5' : '1';
+      btn.style.cursor = btn.disabled ? 'not-allowed' : 'pointer';
+      preview.textContent = noBooking ? '⚠️ No booking ID — rename disabled' : '→ ' + buildSubject();
+    };
+    sel.onchange = sync;
+    other.oninput = sync;
+    sync();
+
+    btn.onclick = async () => {
+      if (btn.disabled) return;
+      const subject = buildSubject();
+      await withButtonLoading(btn, '⏳', async () => {
+        try {
+          // classification 'Reservations' is Zoho's counterpart to the ticket
+          // type Freshdesk stamped on rename.
+          await zdPatch(`/tickets/${currentTicketId}`, { subject, classification: 'Reservations' });
+          if (currentTicketMeta) currentTicketMeta.subject = subject;
+          showToast('Subject renamed — reload the ticket to see it in Desk.', 'success');
+        } catch (err) {
+          showToast('Rename failed: ' + err.message, 'error');
+        }
+      });
+      sync();
+    };
   }
 
   function wireChangeBooking() {
