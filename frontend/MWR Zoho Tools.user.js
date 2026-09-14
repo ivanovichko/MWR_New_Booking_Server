@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Zoho Tools
 // @namespace    https://traveladvantage.com
-// @version      0.10.0
+// @version      0.10.1
 // @description  TA booking tools for Zoho Desk — booking panel, duplicates, notes, supplier email, chat translation
 // @match        https://desk.zoho.com/agent/*
 // @grant        GM_xmlhttpRequest
@@ -302,6 +302,27 @@
     return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
       { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
     ));
+  }
+
+  // navigator.clipboard needs a secure context and can be absent inside the
+  // userscript sandbox, so fall back to the legacy path rather than failing.
+  async function copyText(text) {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (e) { /* fall through */ }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.cssText = 'position:fixed;top:-1000px;left:-1000px;opacity:0;';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      return ok;
+    } catch (e) { return false; }
   }
 
   function showToast(message, type = 'success', duration = 4000) {
@@ -1273,7 +1294,8 @@
       const who = r.assignee ? `<span style="color:${THEME.primary};font-size:9px;font-weight:500;" title="Assigned to">${escapeHtml(r.assignee)}</span>` : '';
       return `<div style="padding:6px 7px;border:1px solid ${THEME.border};border-radius:4px;margin-bottom:5px;color:${THEME.text};background:${closed ? '#fafafa' : '#fff'};">
         <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;">
-          <a href="${ticketUrl(r.id)}" style="font-size:11px;color:#007bff;font-weight:700;text-decoration:none;">${label}</a>${statusChip(r)}${priorityChip(r)}${who}
+          <a href="${ticketUrl(r.id)}" style="font-size:11px;color:#007bff;font-weight:700;text-decoration:none;">${label}</a>
+          <button data-tacopy="${escapeHtml(r.id)}" title="Copy link to this ticket" style="flex:0 0 auto;padding:0 4px;height:18px;line-height:1;border:1px solid rgba(128,128,128,0.4);border-radius:3px;background:transparent;color:inherit;font-size:10px;cursor:pointer;">🔗</button>${statusChip(r)}${priorityChip(r)}${who}
         </div>
         <div style="color:#666;font-size:10px;margin:2px 0 0;">${subj}</div>
         <div>${matchChip(r)}</div>
@@ -1301,6 +1323,22 @@
         <input id="taDupQuery" type="text" placeholder="Search tickets…" style="flex:1;min-width:0;padding:5px 8px;border:1px solid #ddd;border-radius:4px;font-size:11px;" />
         <button id="taDupGo" style="flex:0 0 auto;padding:5px 9px;border:1px solid #d3d8de;border-radius:4px;background:#fff;cursor:pointer;font-size:11px;">🔍</button>
       </div>`;
+
+    host.querySelectorAll('[data-tacopy]').forEach((btn) => {
+      btn.onclick = async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const url = location.origin + ticketUrl(btn.dataset.tacopy);
+        const ok = await copyText(url);
+        if (ok) {
+          const prev = btn.textContent;
+          btn.textContent = '✓';
+          setTimeout(() => { btn.textContent = prev; }, 1200);
+        } else {
+          showToast('Could not copy — the link is ' + url, 'warning', 6000);
+        }
+      };
+    });
 
     host.querySelectorAll('[data-taact]').forEach((btn) => {
       btn.onclick = () => {
