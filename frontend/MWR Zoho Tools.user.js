@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Zoho Tools
 // @namespace    https://traveladvantage.com
-// @version      0.9.0
+// @version      0.9.1
 // @description  TA booking tools for Zoho Desk — booking panel, duplicates, notes, supplier email, chat translation
 // @match        https://desk.zoho.com/agent/*
 // @grant        GM_xmlhttpRequest
@@ -252,6 +252,7 @@
     extract:          (body)   => gmPost(`${BACKEND_URL}/zoho/extract`, body),
     booking:          (id)     => gmGet(`${BACKEND_URL}/guided-prewarm/booking/${encodeURIComponent(id)}`),
     findUser:         (query)  => gmPost(`${BACKEND_URL}/find-user`, { query }),
+    user:             (userId) => gmGet(`${BACKEND_URL}/user/${encodeURIComponent(userId)}`),
     userReservations: (userId) => gmGet(`${BACKEND_URL}/user/${encodeURIComponent(userId)}/reservations`),
     translate:        (text, target = 'en') => gmPost(`${BACKEND_URL}/translate`, { text, target }),
     linkTicketBooking: (body)  => gmPost(`${BACKEND_URL}/zoho/ticket-booking`, body),
@@ -691,7 +692,11 @@
       // the wrong record. bookingData.user is always primary, so absent type =
       // primary.
       const isPrimary = !user.type || user.type === 'primary';
-      if (isPrimary && user.id && !user.loginLink)   user.loginLink   = `${TA_BASE}/admin/account/webadminCustomerLogin/${user.id}`;
+      // profileLink is derivable from the id; the LOGIN url is NOT. TA's real
+      // one is /webadminCustomerLogin/<opaque token>, not the numeric id, so it
+      // can only come from the member's own profile page (parseUserHtml reads it).
+      // Synthesising it from the id produced a link to nothing — and only on
+      // members resolved by search, which is why it looked intermittent.
       if (isPrimary && user.id && !user.profileLink) user.profileLink = `${TA_BASE}/admin/account/viewCustomer/${user.id}`;
 
       const tabBar = document.createElement('div');
@@ -851,13 +856,25 @@
     const selectMember = (u) => {
       const primary = !u.type || u.type === 'primary';
       panelUserOverride = primary
-        ? Object.assign({}, u, {
-            loginLink: `${TA_BASE}/admin/account/webadminCustomerLogin/${u.id}`,
-            profileLink: `${TA_BASE}/admin/account/viewCustomer/${u.id}`,
-          })
+        ? Object.assign({}, u, { profileLink: `${TA_BASE}/admin/account/viewCustomer/${u.id}` })
         : Object.assign({}, u);
       if (!primary) showToast('Secondary traveler — no Login-as-User available.', 'warning');
       renderBookingPanel();
+
+      // Search results carry no login URL. Pull the member's profile so the
+      // genuine token-based link (and the fuller field set) replaces the stub.
+      if (primary && u.id) {
+        api.user(u.id).then((res) => {
+          if (!res.ok || !res.data || !res.data.user) return;
+          if (!panelUserOverride || String(panelUserOverride.id) !== String(u.id)) return;
+          const full = res.data.user;
+          panelUserOverride = Object.assign({}, panelUserOverride, full, {
+            id: panelUserOverride.id,
+            profileLink: full.profileLink || panelUserOverride.profileLink,
+          });
+          renderBookingPanel();
+        }).catch(() => { /* the stub profile link still works */ });
+      }
     };
 
     const doFind = async (auto) => {

@@ -324,3 +324,33 @@ with the visitor-info table trimmed.
 **Not yet seen in the wild:** bot greetings repeated in several languages
 separated by `-`, which Freshdesk's prompt deduplicated. If the new chat widget
 produces them, line-by-line will emit the duplicates and a dedup pass is needed.
+
+
+## TA member links — one is derivable, one is not
+
+| link | pattern | derivable from the numeric id? |
+|---|---|---|
+| Open Full Profile | `/admin/account/viewCustomer/<numeric id>` | **yes** |
+| Login as User | `/admin/account/webadminCustomerLogin/<opaque 32-char token>` | **NO** |
+
+The login URL takes a per-customer token, not the id. `webadminCustomerLogin/{id}`
+was a long-standing guess (an open item in the Freshdesk backlog) and links to
+nothing.
+
+**Why it looked intermittent:** it depends on where the member came from.
+
+- From a **booking** — `userService.parseUserHtml` scrapes the real link out of
+  the profile page (`a[href*="webadminCustomerLogin"]`), so it is correct.
+- From a **search** — `findUser` results have no login link, so the overlay used
+  to synthesise the numeric form. Wrong every time, but only on this path.
+
+The automatic email fallback added in 0.9.0 made the broken path far more common,
+which is what surfaced it.
+
+**Rule: never synthesise the login URL.** After picking a member from search,
+fetch `GET /user/:id` (already exists, returns `parseUserHtml` output) and take
+the genuine `loginLink` from there. Verified live: that route returns a 32-char
+token link. `viewCustomer/{id}` may still be built from the id.
+
+Note `server.js` bulk-confirm still synthesises the numeric form for the
+Freshdesk path — obsolete, but the same bug if that code is ever revived.
