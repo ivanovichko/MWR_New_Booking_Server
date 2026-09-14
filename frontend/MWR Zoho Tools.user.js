@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Zoho Tools
 // @namespace    https://traveladvantage.com
-// @version      0.11.0
+// @version      0.11.1
 // @description  TA booking tools for Zoho Desk — booking panel, duplicates, notes, supplier email, chat translation
 // @match        https://desk.zoho.com/agent/*
 // @grant        GM_xmlhttpRequest
@@ -1459,14 +1459,22 @@
     syncMemberToZoho(user, true);
   }
 
+  // Automatic contact renaming is OFF. The reply-to correction still runs
+  // automatically because it fixes migrated tickets that would otherwise send
+  // replies to a dead Freshdesk routing address. Renaming is cosmetic by
+  // comparison and overwrites data a human may have curated, so it now happens
+  // only when an agent presses the button. Flip this to re-enable.
+  const AUTO_SYNC_CONTACT_NAME = false;
+
   async function syncMemberToZoho(user, silent) {
     const meta = currentTicketMeta || {};
     const changed = [];
+    const allowName = AUTO_SYNC_CONTACT_NAME || !silent;   // silent === automatic run
     try {
       const { first, last } = splitMemberName(user);
       const contactPatch = {};
-      if (first && first !== meta.contactFirstName) contactPatch.firstName = first;
-      if (last && last !== meta.contactLastName) contactPatch.lastName = last;
+      if (allowName && first && first !== meta.contactFirstName) contactPatch.firstName = first;
+      if (allowName && last && last !== meta.contactLastName) contactPatch.lastName = last;
       if (meta.contactId && Object.keys(contactPatch).length) {
         await zdPatch(`/contacts/${meta.contactId}`, contactPatch);
         if (contactPatch.firstName) meta.contactFirstName = contactPatch.firstName;
