@@ -403,3 +403,29 @@ remains, the member lookup falls back to the contact's name.
 Scope: across the 12 most recent tickets `ticket.email` was genuine every time,
 so this only bites migrated tickets — a large historical set. Preferring the
 contact is harmless on new tickets, where both values agree.
+
+
+## Writing back to Zoho from TA
+
+Both writes are supported (probed against nonexistent ids, which fail on the id
+rather than the body):
+
+| call | body | result on fake id |
+|---|---|---|
+| `PATCH /contacts/{id}` | `{firstName, lastName}` or `{email}` | 422 "This contact ID is invalid" — body accepted |
+| `PATCH /tickets/{id}` | `{email}` | 404 — body accepted |
+
+`ticket.email` is the reply-to address, so setting it repoints replies at the
+member's real address. On migrated tickets this is what replaces the inherited
+Freshdesk routing address.
+
+**Write-back is gated on how the member was identified.** `panelUserSource` is
+one of `booking`, `email`, `manual` or `name`; the first three sync
+automatically, `name` never does and offers the manual button instead. A
+name-only match is exactly the case that could rename the wrong contact and
+redirect a customer's replies to a stranger, so it requires a human decision.
+
+Other guards: it runs at most once per ticket, skips fields that already match,
+and reports what changed. TA stores names in caps, so they are title-cased on the
+way in — verified against hyphens, apostrophes, particles and accents
+(`jean-luc` → `Jean-Luc`, `o'brien` → `O'Brien`, `ÉLODIE` → `Élodie`).

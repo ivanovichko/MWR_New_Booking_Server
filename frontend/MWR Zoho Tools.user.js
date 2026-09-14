@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Zoho Tools
 // @namespace    https://traveladvantage.com
-// @version      0.9.4
+// @version      0.10.0
 // @description  TA booking tools for Zoho Desk — booking panel, duplicates, notes, supplier email, chat translation
 // @match        https://desk.zoho.com/agent/*
 // @grant        GM_xmlhttpRequest
@@ -73,6 +73,7 @@
   let panelNotice       = null;   // { text, bookingId } when a lookup did not land
   let pendingMemberQuery = null;  // consumed by the Member section to auto-search
   let pendingMemberAuto  = false; // true = seeded automatically, so auto-pick a lone hit
+  let panelUserSource    = null;  // 'booking' | 'email' | 'name' | 'manual' — gates write-back
   let currentChatThreadId = null; // set when the ticket carries an ONLINE_CHAT thread
   const chatCache       = {};     // ticketId -> { lines, translated, trimmedMetadata }
   const fromAddressCache = {};    // departmentId -> active+verified sender addresses
@@ -467,7 +468,11 @@
     // and signatures. Capping keeps the extraction call cheap and focused.
     if (description.length > 4000) description = description.slice(0, 4000);
 
-    return { subject: ticket.subject || '', description, ticket, email, contactName };
+    return {
+      subject: ticket.subject || '', description, ticket, email, contactName,
+      contactFirstName: contact ? (contact.firstName || null) : null,
+      contactLastName: contact ? (contact.lastName || null) : null,
+    };
   }
 
   // ===== PANELS =====
@@ -812,6 +817,14 @@
           a.style.cssText = 'display:block;background:#0056d2;color:#fff;padding:6px 10px;border-radius:4px;text-decoration:none;font-size:12px;text-align:center;';
           actionRow.appendChild(a);
         }
+        const syncBtn = document.createElement('button');
+        syncBtn.textContent = '⇪ Update Zoho from TA';
+        syncBtn.title = 'Set the contact name and the ticket reply-to address from this TA member';
+        syncBtn.style.cssText = `padding:6px 10px;border:1px solid ${THEME.primary};border-radius:4px;background:#fff;color:${THEME.primary};font-size:12px;cursor:pointer;font-weight:500;`;
+        syncBtn.addEventListener('click', (e) =>
+          withButtonLoading(e.currentTarget, '⏳', () => syncMemberToZoho(user, false)));
+        actionRow.appendChild(syncBtn);
+
         const memberNoteBtn = document.createElement('button');
         memberNoteBtn.textContent = '📋 Post Member Note';
         memberNoteBtn.style.cssText = `padding:6px 10px;border:1px solid ${THEME.success};border-radius:4px;background:#fff;color:${THEME.success};font-size:12px;cursor:pointer;font-weight:500;`;
@@ -921,8 +934,13 @@
     const findResults = document.createElement('div');
     findResults.style.cssText = 'margin-top:6px;font-size:12px;';
 
-    const selectMember = (u) => {
+    const selectMember = (u, viaAuto) => {
       const primary = !u.type || u.type === 'primary';
+      // 'email' only when an automatic lookup matched on an address; a name-based
+      // auto-match is the weak case that must not trigger write-back.
+      panelUserSource = viaAuto
+        ? (/^[^@\s]+@[^@\s]+$/.test(findInput.value.trim()) ? 'email' : 'name')
+        : 'manual';
       panelUserOverride = primary
         ? Object.assign({}, u, { profileLink: `${TA_BASE}/admin/account/viewCustomer/${u.id}` })
         : Object.assign({}, u);
@@ -941,6 +959,7 @@
             profileLink: full.profileLink || panelUserOverride.profileLink,
           });
           renderBookingPanel();
+          maybeSyncMember(panelUserOverride);
         }).catch(() => { /* the stub profile link still works */ });
       }
     };
@@ -960,7 +979,7 @@
         // A single hit on an automatic lookup is unambiguous, so take it. Several
         // hits stay a choice — guessing which traveller is the right one is
         // exactly the judgement an agent should make.
-        if (auto && results.length === 1) { selectMember(results[0]); return; }
+        if (auto && results.length === 1) { selectMember(results[0], true); return; }
         results.slice(0, 5).forEach((u) => {
           const item = document.createElement('div');
           item.style.cssText = 'padding:5px 0;border-bottom:1px solid #f0f0f0;display:flex;align-items:center;justify-content:space-between;gap:8px;';
@@ -970,7 +989,7 @@
           const pickBtn = document.createElement('button');
           pickBtn.textContent = 'Select';
           pickBtn.style.cssText = `flex:0 0 auto;padding:3px 8px;border:1px solid ${THEME.primary};border-radius:3px;background:#fff;color:${THEME.primary};font-size:11px;cursor:pointer;`;
-          pickBtn.onclick = () => selectMember(u);
+          pickBtn.onclick = () => selectMember(u, false);
           item.appendChild(lbl);
           item.appendChild(pickBtn);
           findResults.appendChild(item);
@@ -1304,6 +1323,78 @@
     };
     go.onclick = run;
     q.onkeydown = (e) => { if (e.key === 'Enter') run(); };
+  }
+
+  // ===== WRITE BACK TO ZOHO =====
+  // Once the TA member is known, Zoho's own record is often the stale one —
+  // shouty imported names, and on migrated tickets a Freshdesk routing address
+  // that sends replies nowhere useful.
+
+  // TA stores names in caps ("TATIANA"). Title-case them, respecting the
+  // separators that appear in real names.
+  function titleCaseName(value) {
+    return String(value || '').trim().toLowerCase()
+      .replace(/(^|[\s'\u2019\-])([a-z\u00e0-\u00ff])/g, (m, sep, ch) => sep + ch.toUpperCase());
+  }
+
+  function splitMemberName(user) {
+    let first = user.firstName || null;
+    let last = user.lastName || null;
+    if (!first && !last) {
+      const parts = String(user.fullName || user.name || '').trim().split(/\s+/).filter(Boolean);
+      if (parts.length) { first = parts[0]; last = parts.slice(1).join(' ') || null; }
+    }
+    return { first: first ? titleCaseName(first) : null, last: last ? titleCaseName(last) : null };
+  }
+
+  // Only write back when the member was identified on strong evidence. A
+  // name-only fallback match is precisely the case that could rename the wrong
+  // contact and redirect a customer's replies to a stranger.
+  function mayAutoSync() {
+    return panelUserSource === 'booking' || panelUserSource === 'email' || panelUserSource === 'manual';
+  }
+
+  // Fires at most once per ticket, and never on weak evidence.
+  let syncedForTicket = null;
+  function maybeSyncMember(user) {
+    if (!user || !mayAutoSync()) return;
+    if (syncedForTicket === currentTicketId) return;
+    syncedForTicket = currentTicketId;
+    syncMemberToZoho(user, true);
+  }
+
+  async function syncMemberToZoho(user, silent) {
+    const meta = currentTicketMeta || {};
+    const changed = [];
+    try {
+      const { first, last } = splitMemberName(user);
+      const contactPatch = {};
+      if (first && first !== meta.contactFirstName) contactPatch.firstName = first;
+      if (last && last !== meta.contactLastName) contactPatch.lastName = last;
+      if (meta.contactId && Object.keys(contactPatch).length) {
+        await zdPatch(`/contacts/${meta.contactId}`, contactPatch);
+        if (contactPatch.firstName) meta.contactFirstName = contactPatch.firstName;
+        if (contactPatch.lastName) meta.contactLastName = contactPatch.lastName;
+        changed.push('name → ' + [contactPatch.firstName, contactPatch.lastName].filter(Boolean).join(' '));
+      }
+
+      // Point replies at the member's real address rather than whatever the
+      // channel recorded.
+      const memberEmail = usableEmail(user.email);
+      if (memberEmail && memberEmail.toLowerCase() !== String(meta.ticketEmail || '').toLowerCase()) {
+        await zdPatch(`/tickets/${currentTicketId}`, { email: memberEmail });
+        meta.ticketEmail = memberEmail;
+        changed.push('reply-to → ' + memberEmail);
+      }
+
+      if (changed.length) showToast('Zoho updated: ' + changed.join(' · '), 'success');
+      else if (!silent) showToast('Zoho already matches TA — nothing to update.', 'info');
+      return changed;
+    } catch (err) {
+      showToast('Could not update Zoho: ' + err.message, 'error');
+      console.error('[ta] contact sync failed:', err);
+      return changed;
+    }
   }
 
   // ===== ACTIONS =====
@@ -2029,6 +2120,8 @@
     panelNotice = null;
     pendingMemberQuery = null;
     currentChatThreadId = null;
+    panelUserSource = null;
+    syncedForTicket = null;
     injectPanels();
 
     const cached = ticketBookingCache[ticketId];
@@ -2051,6 +2144,10 @@
         status: ctx.ticket.status || null,
         email: ctx.email || null,             // contact's real address, not the channel's
         contactName: ctx.contactName || null,
+        contactId: ctx.ticket.contactId || null,
+        contactFirstName: ctx.contactFirstName || null,
+        contactLastName: ctx.contactLastName || null,
+        ticketEmail: ctx.ticket.email || null,
         departmentId: ctx.ticket.departmentId || null,
       };
     } catch (err) {
@@ -2116,10 +2213,13 @@
       }
       currentBookingId = bookingId;
       ticketBookingCache[ticketId] = res.data.bookingData;
+      panelUserSource = 'booking';
       renderBookingPanel();
       // Re-runs the duplicate search now that booking ID and supplier ref are
       // available as additional terms.
       recordBookingLink(bookingId, 'auto');
+      const bookingUser = res.data.bookingData && res.data.bookingData.user;
+      if (bookingUser) maybeSyncMember(bookingUser);
     } catch (err) {
       console.error('[ta] load failed:', err);
       ticketBookingCache[ticketId] = null;
