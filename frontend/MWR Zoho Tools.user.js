@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Zoho Tools
 // @namespace    https://traveladvantage.com
-// @version      0.9.2
+// @version      0.9.3
 // @description  TA booking tools for Zoho Desk — booking panel, duplicates, notes, supplier email, chat translation
 // @match        https://desk.zoho.com/agent/*
 // @grant        GM_xmlhttpRequest
@@ -217,6 +217,39 @@
       throw new Error(`Zoho Desk ${method} ${path} failed: ${msg}`);
     }
     return json;
+  }
+
+  // Zoho rejects note content over ~32000 with INVALID_DATA → /content:invalid
+  // (boundary measured between 31882 and 32038). A real email body carrying
+  // inline base64 images passes that easily, which is what broke merge. The
+  // budget is counted in UTF-8 BYTES, not characters: a Cyrillic or accented
+  // transcript costs two bytes per character and would otherwise slip through a
+  // character-based check.
+  const COMMENT_MAX_BYTES = 30000;   // headroom under the limit
+
+  function utf8Bytes(str) {
+    try { return new TextEncoder().encode(str).length; } catch (e) { return str.length * 2; }
+  }
+
+  function truncateForComment(html) {
+    if (utf8Bytes(html) <= COMMENT_MAX_BYTES) return html;
+    const notice = '<p><em>… truncated — the original exceeded Zoho\u2019s note size limit. Open the source ticket for the full message.</em></p>';
+    const budget = COMMENT_MAX_BYTES - utf8Bytes(notice);
+    let lo = 0, hi = html.length;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (utf8Bytes(html.slice(0, mid)) <= budget) lo = mid; else hi = mid;
+    }
+    return html.slice(0, lo) + notice;
+  }
+
+  // Every note goes through here so the size cap cannot be forgotten at a call site.
+  function postComment(ticketId, html, isPublic = false) {
+    return zdPost(`/tickets/${ticketId}/comments`, {
+      content: truncateForComment(html),
+      contentType: 'html',
+      isPublic,
+    });
   }
 
   const zdGet   = (path)       => zdRequest(path);
@@ -1249,11 +1282,7 @@
     if (!bd || !bd.noteHtml) { showToast('No note to post.', 'error'); return; }
     await withButtonLoading(btn, 'Posting…', async () => {
       try {
-        await zdPost(`/tickets/${currentTicketId}/comments`, {
-          content: bd.noteHtml,
-          contentType: 'html',
-          isPublic: false,
-        });
+        await postComment(currentTicketId, bd.noteHtml);
         showToast('Note posted.', 'success');
       } catch (err) {
         showToast(err.message, 'error');
@@ -1275,7 +1304,7 @@
     const noteHtml = `<div style="font-family:system-ui,sans-serif;font-size:13px;line-height:1.8;"><h4 style="margin:0 0 8px;font-size:14px;">👤 Member Details</h4>${lines}${loginLine}${profileLine}</div>`;
     await withButtonLoading(btn, '⏳', async () => {
       try {
-        await zdPost(`/tickets/${currentTicketId}/comments`, { content: noteHtml, contentType: 'html', isPublic: false });
+        await postComment(currentTicketId, noteHtml);
         showToast('Member note posted.', 'success');
       } catch (err) {
         showToast(err.message, 'error');
@@ -1482,11 +1511,7 @@
         const lineHtml = translated.map((l) => `<div>${escapeHtml(l)}</div>`).join('');
         await withButtonLoading(ev.currentTarget, '⏳', async () => {
           try {
-            await zdPost(`/tickets/${currentTicketId}/comments`, {
-              content: `<div style="font-family:system-ui,sans-serif;font-size:13px;line-height:1.6;"><h4 style="margin:0 0 8px;">🌐 Translated message</h4>${lineHtml}</div>`,
-              contentType: 'html',
-              isPublic: false,
-            });
+            await postComment(currentTicketId, `<div style="font-family:system-ui,sans-serif;font-size:13px;line-height:1.6;"><h4 style="margin:0 0 8px;">🌐 Translated message</h4>${lineHtml}</div>`);
             showToast('Translation posted as a note.', 'success');
           } catch (err) {
             showToast('Failed to post: ' + err.message, 'error');
@@ -1568,18 +1593,10 @@
     const sourceLink = location.origin + ticketUrl(sourceId);
     const targetLink = location.origin + ticketUrl(targetId);
 
-    await zdPost(`/tickets/${targetId}/comments`, {
-      content: `<p>Merged from <a href="${sourceLink}">#${sourceNumber || sourceId}</a></p>${html}`,
-      contentType: 'html',
-      isPublic: false,
-    });
+    await postComment(targetId, `<p>Merged from <a href="${sourceLink}">#${sourceNumber || sourceId}</a></p>${html}`);
 
     try {
-      await zdPost(`/tickets/${sourceId}/comments`, {
-        content: `<p>Merged into <a href="${targetLink}">#${targetNumber || targetId}</a></p>`,
-        contentType: 'html',
-        isPublic: false,
-      });
+      await postComment(sourceId, `<p>Merged into <a href="${targetLink}">#${targetNumber || targetId}</a></p>`);
     } catch (err) {
       console.warn('[ta] pointer note on source failed:', err.message);
     }

@@ -354,3 +354,29 @@ token link. `viewCustomer/{id}` may still be built from the id.
 
 Note `server.js` bulk-confirm still synthesises the numeric form for the
 Freshdesk path — obsolete, but the same bug if that code is ever revived.
+
+
+## Note size limit — 32 KB
+
+`POST /tickets/{id}/comments` rejects content over roughly **32000** with
+`422 INVALID_DATA → /content:invalid`. Binary-searched against a nonexistent
+ticket: 31882 accepted, 32038 rejected.
+
+This is what broke Merge in. A real email body carrying inline base64 images is
+comfortably over the limit, while the 8 KB body used in the first probe was under
+it — so the payload validated in testing and failed in use.
+
+The budget is **UTF-8 bytes, not characters**. A Cyrillic or accented transcript
+costs two bytes per character, so a 40000-character Cyrillic note fails even
+though a character count would call it fine. Verified: raw 422, truncated to
+29999 bytes 404.
+
+The overlay caps at 30000 bytes in one `postComment()` helper that every note
+path goes through — booking note, member note, both merge notes and the chat
+translation — so no call site can forget it. Over-long content is trimmed on a
+byte budget with a notice pointing at the source ticket.
+
+Not the cause, for the record: `PATCH /tickets/{id}` with `{status:'Closed'}`
+returns **200** on a real ticket, `"Closed"` is a valid status for this org, and
+there are no mandatory-on-close fields (only `contactId`, `subject` and `status`
+are mandatory at all).
