@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Zoho Tools
 // @namespace    https://traveladvantage.com
-// @version      0.9.1
+// @version      0.9.2
 // @description  TA booking tools for Zoho Desk — booking panel, duplicates, notes, supplier email, chat translation
 // @match        https://desk.zoho.com/agent/*
 // @grant        GM_xmlhttpRequest
@@ -10,6 +10,8 @@
 // @grant        unsafeWindow
 // @connect      mwr-new-booking-server.onrender.com
 // @run-at       document-start
+// @updateURL    https://raw.githubusercontent.com/ivanovichko/MWR_New_Booking_Server/main/frontend/MWR%20Zoho%20Tools.user.js
+// @downloadURL  https://raw.githubusercontent.com/ivanovichko/MWR_New_Booking_Server/main/frontend/MWR%20Zoho%20Tools.user.js
 // ==/UserScript==
 
 // Overlay replacement for the Zoho Desk extension in TA_Zoho_beta/. The extension
