@@ -1,3 +1,139 @@
+# Session 22 — Freshdesk retirement
+
+Freshdesk is gone. The Zoho Desk overlay (`frontend/MWR Zoho Tools.user.js`) is
+the only client, and it calls exactly 8 backend routes out of ~41. Everything
+else served Freshdesk or the abandoned Zoho Desk *extension*.
+
+Decisions taken up front:
+- Pendings + Batch Triage: **retired completely**, not kept as portable parts.
+- Hotel Email: **retired**. The overlay's supplier email builds its own HTML.
+- `/ai-assist`: **retired** — Zoho has AI out of the box.
+- Route namespace: **`/api/*`**, guarded as one middleware.
+- `TA_Zoho_beta/`: **kept on disk, untouched** (gitignored, no history to
+  recover from). Its backend half goes; the directory stays as a reference.
+
+## Phase 1 — Freshdesk client
+- [x] `frontend/MWR Booking Tools.user.js` (3351)
+- [x] `frontend/MWR Booking Tools.options.json` + `.storage.json`
+- [x] `userscript-patch.js` (95, points at localhost:3000, pre-dates everything)
+
+## Phase 2 — Freshdesk backend
+- [x] `services/freshdeskService.js` (441)
+- [x] `services/agentService.js` (80)
+- [x] `services/ticketService.js` (87)
+- [x] `services/ticketActionService.js` (112)
+- [x] `services/batchTriageService.js` (403)
+- [x] `services/triageAiService.js` (132)
+- [x] `services/noteDetectionService.js` (115)
+- [x] `services/hotelEmailBuilder.js` (71)
+- [x] `config.js` (15) — nothing imports `TA_BASE` or the prewarm threshold
+- [x] 29 routes out of `server.js`
+
+## Phase 3 — Zoho extension backend
+The overlay authors its writes same-origin as the signed-in agent (`zdPost`),
+so the org-level OAuth path has no caller.
+- [x] `services/zohoDeskService.js` (147)
+- [x] `services/zohoTicketActionService.js` (32)
+- [x] `/zoho/oauth-session`, `/zoho/config`, `/zoho/orgs`, `/zoho/post-note`,
+      `/zoho/member-note`, `/zoho/hotel-email/lookup`
+- [x] `zoho_sessions` table + accessors
+
+## Phase 4 — trim survivors
+- [x] `prewarmService.js` → `bookingService.js`; keep `extractBookingId`,
+      `fetchAndCacheBooking`. `checkInPriority` dropped too — its only callers
+      were batch triage and Pendings; the overlay computes days-to-check-in
+      client-side in `daysUntilCheckIn`.
+- [x] `aiService.js` → **`translateService.js`**. With only translation left,
+      the Google-then-Groq fallback moved out of `server.js` into it, so the
+      whole translation concern is one module and the route is 8 lines.
+- [x] `dbService.js` — drop `freshdesk_sessions`, `ticket_summaries`,
+      `agent_prompts`, `agent_macros`, `zoho_sessions` from `initDb` and the
+      accessors. No destructive migration: existing tables are left in the DB.
+- [x] `auth.html` — TA cookie only
+- [x] `package.json` — drop `multer`, `form-data`
+
+## Phase 5 — one guarded namespace
+- [x] Every route under `/api/*`, `requireApiSecret` as `app.use` middleware
+- [x] Delete `allowZohoWidgetOrigin` + both CORS mounts (extension-only)
+- [x] Replace `app.use(express.static(__dirname))` — it currently serves the
+      whole repo; `server.js` and `services/*.js` are publicly fetchable
+- [x] Userscript: repointed 8 `api.*` URLs, `@version` 0.13.0. **No first-run
+      prompt added** — `loadTicketInner` already checks `getSecret()` and
+      renders "No backend key set. Click ⚙ above to enter it.", which beats a
+      `window.prompt` on page load.
+
+## Phase 6 — docs
+- [x] Rewrite `.claude/CLAUDE.md` (still documents the Guided modal, prewarm
+      batch, Freshdesk-first architecture)
+- [x] `tasks/backlog.md` — close §2, §3, §4, §4b, §5
+
+## Verification
+- [x] Server boots, schema applies
+- [x] No `freshdesk` / `guided-prewarm` references left outside `tasks/` and history
+- [x] Every surviving `require()` resolves
+- [x] Every userscript `api.*` URL matches a live route
+- [x] `/health` 200; `/api/*` 401 without bearer, 200 with
+
+## Review
+
+**Net: 6,957 lines deleted, 478 added across 25 code files.** 41 routes → 13.
+20 source files → 9 (18 services + `server.js` + `config.js` → 8 services + `server.js`). Every deletion is recoverable from git history.
+
+### What went as planned
+
+Phases 1–4 were pure subtraction and nothing pushed back. The dependency graph
+was cleaner than expected: `parserService`, `userService`, `noteBuilder` and
+`supplierService` had zero Freshdesk coupling, and `prewarmService` had exactly
+two lines of it (the `freshdeskService` and `FD_STATUS` imports).
+
+### Three findings that were not in the plan
+
+1. **The Zoho extension backend was dead too.** `zohoDeskService.js`,
+   `zohoTicketActionService.js` and six `/zoho/*` routes existed only for
+   `TA_Zoho_beta/`. The overlay posts notes same-origin as the signed-in agent
+   via `zdPost` and never touches the org-level OAuth token — so the entire
+   OAuth path, the `zoho_sessions` table and three Render env vars had no
+   caller. Deleted; `TA_Zoho_beta/` itself kept on disk per instruction.
+
+2. **`app.use(express.static(__dirname))` served the whole repo.** Verified
+   against `HEAD` before the change: `/server.js` and `/services/dbService.js`
+   both returned 200. Now 404 — `auth.html` is served by an explicit route.
+   No credentials were exposed (dotfiles are not served, and secrets live in
+   env vars), but the source was public.
+
+3. **Four dead DB tables and a dead settings API.** `/settings/prompts` had no
+   client and `aiService` never read prompts from the DB — the table had been
+   orphaned since the prompt text was inlined. `ticket_summaries` was exported
+   but never imported.
+
+### Deliberate non-deletions
+
+- `GET`/`DELETE /api/ticket-booking/:ticketId` have no caller. Kept as the
+  read/delete half of a table the overlay actively writes; filed in backlog §3.
+- The env var is still `ZOHO_BACKEND_SHARED_SECRET`. Renaming it to match the
+  `/api` namespace buys nothing but a Render dashboard edit and an outage
+  window if the two halves change out of step.
+- `SYSTEM_EMAIL_DOMAINS` in the overlay still matches `freshdesk.com` —
+  migrated tickets carry the old FD routing address in `ticket.email`. That is
+  data reality, not dead code.
+
+### Verification performed
+
+- Server boots; all 13 routes mount.
+- `/health` 200, `/auth` 200.
+- `/api/extract` → 401 with no bearer and with a wrong bearer; a correct bearer
+  reaches the handler.
+- `/server.js`, `/services/dbService.js`, `/package.json` → 404 (were 200).
+- Every `require()` in the 9 surviving files resolves.
+- All 7 distinct `api.*` paths in the userscript match a declared route.
+- `node --check` clean on the userscript.
+
+**Not verified:** no live DB or TA session locally, so no route was exercised
+end-to-end. The overlay needs a run against a real Zoho ticket before this
+reaches Render. Not pushed.
+
+---
+
 # Groq model deprecation fix — llama-3.3-70b-versatile shut down 2026-08-16
 
 Every backend LLM call except `groq/compound` was pointed at a retired model.

@@ -47,9 +47,19 @@ Principles
 
 ## Overview
 
-This is a **Node.js/Express backend** paired with a **Tampermonkey userscript** frontend for automating MWR Life travel support operations in Freshdesk. Agents working a Freshdesk ticket can trigger booking lookups, post internal notes, send hotel emails, and detect duplicate tickets — all from a floating UI injected into the Freshdesk page.
+A **Node.js/Express backend** paired with a **Tampermonkey overlay** that injects
+TA booking tools into Zoho Desk. Agents working a Zoho Desk ticket get a booking
+panel, member lookup, duplicate detection, internal notes, supplier email and
+chat translation — all inside the Desk page.
 
-The backend is deployed on Render (`mwr-new-booking-server.onrender.com`). The frontend is a single Tampermonkey userscript (`frontend/MWR Booking Tools.user.js`) installed in the agent's browser.
+The backend is deployed on Render (`mwr-new-booking-server.onrender.com`). The
+frontend is a single userscript (`frontend/MWR Zoho Tools.user.js`) installed in
+the agent's browser.
+
+**Freshdesk was retired in session 22 (2026-09-15).** The Freshdesk userscript,
+its eight backend services and ~29 routes are gone; so is the Zoho Desk
+*extension* backend (org-level OAuth), which the overlay made redundant. Look in
+git history before re-implementing anything that sounds familiar.
 
 ## Running the server
 
@@ -59,96 +69,138 @@ npm run dev          # nodemon with auto-reload
 npm start            # production (node server.js)
 ```
 
-The server requires a `.env` file (not committed). Required variables:
-- `DATABASE_URL` — PostgreSQL connection string (Neon or similar)
-- `FRESHDESK_DOMAIN` — e.g. `mwrlife.freshdesk.com`
-- `FRESHDESK_API_KEY` — Freshdesk API key
-- `FRESHDESK_AGENT_ID` — numeric agent ID, used by the Pendings job to filter tickets
-- `GROQ_API_KEY` — used by `aiService.js` and `prewarmService.js` (`extractBookingId`) for LLM calls
+Requires a `.env` (not committed):
+
+- `DATABASE_URL` — PostgreSQL connection string (Neon)
+- `ZOHO_BACKEND_SHARED_SECRET` — bearer token guarding every `/api/*` route.
+  Agents paste the same value into the userscript once (⚙ in the panel header).
+- `GROQ_API_KEY` — booking-reference extraction and the translation fallback
+- `GROQ_API_URL` — optional; point at `tools/groq-proxy-worker.js` when Groq
+  blocks Render's egress IP with a 403
 - `TA_BASE_URL` — defaults to `https://www.traveladvantage.com`
-- `BACKEND_URL` — used when constructing attachment proxy URLs in notes
 
 ## Architecture
 
-### Request flow
+### Two call paths
 
-1. **Userscript** (`frontend/MWR Booking Tools.user.js`) runs inside the Freshdesk ticket page. It injects native UI directly into Freshdesk's DOM (a floating booking panel, a duplicate-search strip above the reply bar, reply tabs in the composer, per-conversation controls) and calls the backend via `GM_xmlhttpRequest`.
-2. **Backend** (`server.js`) handles all Express routes, orchestrates service calls, and returns structured data.
-3. **Userscript** renders the returned booking/note/duplicate data into the injected panels, then lets the agent confirm before posting.
-4. For Freshdesk's own data the userscript also calls FD's internal `/api/_/` endpoints **directly** (same-origin `fetch`, no `GM_xmlhttpRequest` needed) — e.g. fetching the agent's filter queue for prewarm.
+The overlay runs *inside* the Desk page, which gives it two ways out:
 
-### Backend services
+1. **`zdGet` / `zdPost`** — same-origin to Zoho Desk's own API
+   (`/supportapi/zd/mwrlife/api/v1`, cookie auth + org header). Every **write**
+   goes this way, so notes, replies and status changes are authored by the agent
+   who clicked. See `tasks/zoho-endpoints.md`.
+2. **`api.*`** — `GM_xmlhttpRequest` to the Render backend. Desk's CSP blocks
+   page-origin XHR to external domains, so this cannot be a plain `fetch`.
+
+The backend therefore never needs Zoho write access. That is why the extension's
+OAuth path was deleted rather than kept.
+
+### The backend is small on purpose
+
+Thirteen routes. Everything under `/api/*` sits behind one `app.use` middleware
+checking the bearer token — not per-route, so a new route cannot be added
+unguarded by accident.
+
+| Route | Purpose |
+|---|---|
+| `GET /health` | liveness |
+| `GET /auth`, `POST /ta-session` | the page where agents paste their TA cookie |
+| `POST /api/extract` | Groq: pull a booking reference out of subject + description |
+| `GET /api/booking/:id` | booking lookup — DB cache first, live TA fetch on a miss |
+| `POST /api/find-user`, `GET /api/user/:id`, `GET /api/user/:id/reservations` | TA member search, profile, reservation history |
+| `POST /api/ticket-booking`, `GET /api/ticket-booking/:ticketId`, `GET /api/booking-tickets/:bookingId`, `DELETE /api/ticket-booking/:ticketId` | the ticket ↔ booking link table |
+| `POST /api/translate` | Google first, Groq fallback |
+
+`GET`/`DELETE /api/ticket-booking/:ticketId` have no caller yet — kept as the
+read/delete half of a table the overlay actively writes.
+
+### Services
 
 | File | Responsibility |
-|------|---------------|
-| `services/parserService.js` | Parses the TA booking list `dataRow` array (DataTables format) into a structured `booking` object; also parses raw booking detail HTML into `cleanHtml` + `details`; extracts the Zeal AI-reconfirmation status from `row[0]` |
-| `services/userService.js` | Parses the TA member profile HTML into a `user` object; also `findUser` for member search |
-| `services/noteBuilder.js` | Builds the styled HTML for Freshdesk internal notes from booking + details + user + supplier data |
-| `services/hotelEmailBuilder.js` | Builds the styled HTML body for outbound hotel emails |
-| `services/freshdeskService.js` | Freshdesk API wrapper — post notes (`addNoteWithImages`), send emails, tag tickets, set status/priority, search duplicates, get ticket context. POSTs to `/api/_/` use `fdPost`, which attaches the stored session cookie + CSRF token |
-| `services/agentService.js` | Resolves agent IDs to names. Bulk fetch via `/api/_/bootstrap/agents_groups`, per-id fallback via `/api/_/contacts/{id}`. 10-min in-memory cache; per-id cache survives across requests |
-| `services/ticketService.js` | Dual-path ticket fetch: session cookie (`/api/_/tickets/{id}` + conversations) primary, API-key (`/api/v2/...`) fallback. Returns `{ ticket, conversations }` |
-| `services/dbService.js` | PostgreSQL via `pg` — caches bookings, stores TA/Freshdesk sessions (cookie + CSRF), manages agent prompts |
-| `services/taAuthService.js` | Authenticates with TravelAdvantage (cookie-based, 2-step OTP flow); `taGet`/`taPost` helpers attach the stored session cookie and log a request/response summary (body redacted, response truncated) |
-| `services/aiService.js` | Groq LLM calls for AI assist (reply drafting, summary, chat translation) and hotel email lookup |
-| `services/prewarmService.js` | Per-ticket helpers — `extractBookingId` (Groq), `fetchAndCacheBooking` (TA fetch + DB cache), `checkInPriority` (date → priority). Also hosts `checkPendings`, the Pendings batch job that reopens pending tickets nearing check-in |
+|---|---|
+| `services/parserService.js` | Parses the TA booking list `dataRow` (DataTables format) into a `booking`; parses booking detail HTML into `cleanHtml` + `details`; extracts the Zeal AI-reconfirmation status from `row[0]` |
+| `services/userService.js` | Parses the TA member profile HTML into a `user`; `findUser` for member search |
+| `services/bookingService.js` | `extractBookingId` (Groq) and `fetchAndCacheBooking` (TA fetch + DB cache). Helpdesk-agnostic — its only inputs are text and a reference. Was `prewarmService.js` |
+| `services/noteBuilder.js` | Builds the styled HTML for an internal note from booking + details + user + supplier |
 | `services/supplierService.js` | Static map of supplier names → contact email / URL / notes |
-| `services/ticketActionService.js` | Higher-level ticket actions: `confirmTicket` posts the booking note + applies date/country tags; `lookupHotelEmail` + `sendHotelEmailConfirmed` run the two-phase hotel-email flow |
-| `config.js` | Shared constants: Freshdesk status codes, TA base URL |
+| `services/translateService.js` | Google's free endpoint first, Groq as fallback. Google quotas per client IP and Render's egress IP is shared, so the fallback is the normal path, not an error path |
+| `services/taAuthService.js` | TravelAdvantage cookie auth; `taGet`/`taPost` attach the stored session cookie and log a redacted request summary |
+| `services/dbService.js` | PostgreSQL via `pg` — TA session, booking cache, ticket ↔ booking links |
 
-### Backend route conventions
+### Route conventions
 
-- All Express routes are wrapped in `safeRoute(handler)` (defined in `server.js`). The wrapper turns thrown errors into a unified `{ error, code? }` JSON response and logs them with a `[scope]` prefix. Throw `new HttpError(message, status, code?)` for user-visible failures with a non-500 status.
-- Diagnostic logs use `[scope]` prefixes (e.g. `[ta]`, `[freshdesk]`, `[agentService]`). No emoji decoration.
+- Every route is wrapped in `safeRoute(handler)`. Thrown errors become a uniform
+  `{ error }` JSON response, logged with a `[scope]` prefix. Throw
+  `new HttpError(message, status)` for a user-visible non-500.
+- Diagnostic logs use `[scope]` prefixes (`[booking]`, `[extract]`, `[link]`).
+  No emoji decoration.
+- **No `express.static` on the repo root.** It used to be mounted there, which
+  served `server.js` and `services/*.js` publicly. `auth.html` is served by an
+  explicit route.
 
 ### Key data objects
 
-- **`booking`** — parsed from the TA booking list row via `parseDataRow()`. Contains IDs, pricing, product type, dates, guest name, status.
-- **`details`** — parsed from the TA booking detail page. Hotel name, address, room type, board code, special requests, estimated arrival time.
-- **`user`** — parsed from the TA member profile page. Name, email, phone, membership status, instance, country, language.
-- **`supplier`** — looked up from the static `SUPPLIER_MAP` by `booking.supplierName`. Adds contact email, URL, and any special notes to the rendered note.
+- **`booking`** — from `parseDataRow()`. IDs, pricing, product type, dates,
+  guest name, status.
+- **`details`** — from the TA booking detail page. Hotel name, address, room
+  type, board code, special requests, estimated arrival.
+- **`user`** — from the TA member profile. Name, email, phone, membership
+  status, instance, country, language.
+- **`supplier`** — from `SUPPLIER_MAP` by `booking.supplierName`. Contact email,
+  URL, special notes.
+
+### Ticket ↔ booking link table
+
+`ticket_bookings` maps one ticket → at most one booking, but one booking → many
+tickets. That one-to-many side is the duplicate signal: siblings of the same
+`booking_id` are far more reliable than matching subject strings. The overlay
+writes the link as soon as a booking is established for a ticket.
+
+Dead tables left in the DB but no longer created by `initDb`:
+`freshdesk_sessions`, `zoho_sessions`, `ticket_summaries`, `agent_prompts`,
+`agent_macros`. Dropping them is a separate, deliberate migration.
 
 ### Session management
 
-TravelAdvantage requires cookie-based auth. Agents paste their TA cookie at `/auth` (served by the backend). The cookie is stored in the `ta_sessions` DB table and retrieved per-request by `taAuthService`. Similarly, Freshdesk session cookies are stored in `freshdesk_sessions` for prewarm jobs that need to scrape TA on behalf of agents.
-
-### Prewarm (Assisted Mode)
-
-Prewarm is per-ticket and demand-driven — there is no batch job. Flow:
-
-1. The agent presses the **Assisted** toggle in the toolbar (state persisted in `localStorage`). While on, every ticket navigation auto-fires a prewarm; it also fires once on cold page load.
-2. `prewarmWindow()` reads the current ticket ID + the last-visited filter ID from the URL, fetches the agent's filter queue from FD's `/api/_/tickets?filter={id}` (same-origin `fdGet`), and computes a window of `[current, +1, +2]`.
-3. For each ticket in the window not already cached, it calls `GET /guided-prewarm/analyse/:id` in parallel — that route fetches the ticket, runs Groq booking-ID extraction, hits the DB booking cache, and TA-fetches on a miss.
-4. Results land in `ticketBookingCache` (keyed by ticket ID). Opening a prewarmed ticket renders the booking panel instantly.
-
-If no filter is captured or the ticket isn't in the queue, it falls back to a single-ticket prewarm.
-
-The legacy batch routes (`/prewarm/start|stop|status`) and the Guided modal were removed in the May 2026 refactor — see `tasks/backlog.md`.
+TravelAdvantage requires cookie-based auth. Agents paste their TA cookie at
+`/auth`; it is stored in `ta_sessions` and retrieved per-request by
+`taAuthService`. Valid roughly three days.
 
 ### Userscript
 
-The userscript (`frontend/MWR Booking Tools.user.js`) is a single self-contained IIFE that injects native UI into Freshdesk's own DOM. It runs *inside* the FD page, so it can call FD's internal `/api/_/` endpoints same-origin.
+`frontend/MWR Zoho Tools.user.js` is a single self-contained IIFE. Bump
+`@version` on every release — Tampermonkey auto-updates from the GitHub raw
+`@updateURL` / `@downloadURL`.
 
-**Injected UI** (re-applied by a 1.5s polling loop in `mountNativeInjections` because FD re-renders its DOM on SPA navigation):
-- **Booking panel** — fixed floating right-rail panel (`injectBookingPanel` / `renderBookingPanel`). Shows the booking details table, action row (Post Note / View Note / Hotel Email / Chat / AI Summary), Member section (Profile + Reservations tabs, Find Member, Post Member Note), Change Booking, and a header queue counter. Reads from `ticketBookingCache`.
-- **Duplicate strip** — injected above the reply bar (`injectDuplicateStrip`). Auto-search by booking refs + member email, manual search with "incl. closed", and Preview/Merge + Merge Out modals.
-- **Reply Customer / Supplier** — tabs in FD's composer toolbar (`.ticket-actions-list`) and buttons in `ul.reply-bar`. Both open a *mimicked composer* — `showReplyComposer` mounted in a floating modal with an RTF toolbar, templated body (`buildReplySignature`), translate, attachments. Send → `/send-reply` → FD's `/api/_/tickets/{id}/reply`.
-- **Per-conversation controls** — collapse toggle + 🌐 Google translate + 🤖 AI translate, injected into each conversation/description header. Old notes collapse by default; last two stay open.
-- **Translate near Send** — button in FD's composer footer; translates the current draft in-place.
+**Injected UI:**
+- **Booking panel** — floating right-rail panel. Booking table, action row
+  (Post Note / View Note / Supplier Email / Rename Subject / Change Booking),
+  Member section (Profile + Reservations, Find Member, Post Member Note),
+  duplicates.
+- **Duplicates** — merged from a Desk ticket search and the link table, with
+  Preview / Merge in / Merge out modals. Desk has no merge endpoint; merge is
+  reproduced as a note on the survivor + a pointer note + a status PATCH.
+- **Per-conversation controls** — 🌐 Google translate and 🤖 AI translate,
+  injected into each conversation header by a 1.5s polling loop (Desk re-renders
+  the list on SPA nav and lazy load).
+- **Supplier email** — entirely client-side; recipient from
+  `bookingData.supplier`, body built in the overlay, sent via Desk's `sendReply`
+  from the agent's session.
 
-**Key helpers / patterns:**
-- `THEME` — shared visual constants (font, colors, shadow, radius).
-- `createModal(id, title, opts)` — draggable modal factory; returns `{ modal, header, body, closeBtn }`. `trapKeyEventsForModal(modal)` stops FD hotkeys firing while typing in a modal.
-- `createRichEditor(opts)` — contentEditable div with image-paste-to-base64; `buildRtfToolbar` adds B/I/U/list/link formatting.
-- `api` — single object wrapping every backend call (`api.guided.ticket(id)`, `api.postNote(...)`, etc.). All URL/body shapes live here.
-- `fdGet(path)` — same-origin `fetch` to FD's `/api/_/`. Used for the filter queue. (Backend calls still go through `GM_xmlhttpRequest` because FD's CSP blocks XHR to external domains.)
-- In-memory caches (survive SPA nav, reset on full reload): `ticketBookingCache` (ticketId → analyse result), `viewQueueCache` (filterId → ordered ticket IDs), `ticketDuplicatesCache`, `userReservationsCache`, `panelUserOverride`.
-- `refreshFreshdeskTicket()` — forces FD to refetch the conversation thread after a post/send (800ms delay so FD's backend has indexed the new entry; tries several toggle selectors).
-- `BACKEND_URL` is hardcoded at the top; update it when deploying to a new Render URL.
-- Bump `@version` on every release — Tampermonkey auto-updates from the GitHub raw `@updateURL` / `@downloadURL`.
+**Key helpers:**
+- `THEME` — shared visual constants.
+- `createModal(id, title, opts)` — draggable modal factory.
+  `trapKeyEventsForModal` stops Desk hotkeys firing while typing.
+- `api` — one object holding every backend call; all URL and body shapes live
+  there.
+- `zdRequest` / `installTokenObserver` — same-origin Desk calls; the CSRF token
+  is captured by patching `fetch` and `XMLHttpRequest.setRequestHeader`.
+- In-memory caches, reset on full reload: `ticketBookingCache`,
+  `reservationsCache`, `duplicateCache`, `chatCache`, `fromAddressCache`.
 
-The toolbar (`addToolbarButtons`) carries the **Assisted** toggle, **Bulk**, and **Pendings** buttons.
+### TA_Zoho_beta/
 
-### Attachment proxy
-
-Freshdesk strips `data:` URLs from note bodies. `freshdeskService.addNoteWithImages()` works around this by uploading images as multipart attachments, then patching the note body to use `/attachment?url=...&ticket_id=...` proxy URLs. The backend's `/attachment` route adds the Freshdesk auth header when proxying the image fetch.
+A gitignored prototype of the Zoho Desk *extension*, superseded by the overlay
+(the marketplace install was never approved, and its single org-level OAuth
+token could not author writes as the clicking agent). Its backend half is gone.
+**Kept on disk as a reference — do not delete it.**

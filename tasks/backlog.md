@@ -3,106 +3,60 @@
 Forward-looking list. `todo.md` holds the session-by-session log of what's
 done; this file is what's still open.
 
-## 1. Refactoring sweep — DONE (session 18, @version 6.53)
+Everything Freshdesk-related was closed by deletion in session 22 (see
+`todo.md` § Session 22). What follows is the Zoho overlay's list.
 
-- [x] Killed the Guided modal — `showGuidedPrewarmModal` (~1747 lines) + the
-      `🎯 Guided` / `🎯 Open Here` toolbar buttons.
-- [x] Server prune — removed `/prewarm/start|stop|status` + `prewarmJob`,
-      `/tag-ticket`, `/guided-prewarm/tickets` + `GUIDED_FILTERS`,
-      `/update-ticket`, `/close-ticket`, all `/settings/macros` routes.
-- [x] `prewarmService.js` rewritten — kept `extractBookingId`,
-      `fetchAndCacheBooking`, `checkInPriority`, `checkPendings`,
-      `setTicketStatus`, `extractDateFromTags`. Dropped `prewarm()` batch,
-      `fetchLowPriorityTickets`, `setTicketPriority`, `postNote`,
-      `extractDateFromTagsWithGroq`.
-- [x] `ticketActionService.confirmTicket` — note-only now; posts via
-      `freshdeskService.addNoteWithImages`. `call_hotel` + `voucher` dropped.
-- [x] `dbService` — macro CRUD removed.
-- [x] Userscript dead helpers removed: `attachMacroTrigger`, `substituteVars`,
-      `autoTagTicket`, `parseBookingDate`, `formatMonthYear`, standalone
-      `checkDuplicates`, `markDuplicate`, `gmPut`, `gmDelete`,
-      `gmFreshdeskNote`, `showConfirmModal`.
-- [x] Deleted orphan files: `services/server.js` (stale 497-line duplicate,
-      broken require paths), `services/bookingService.js` (0 imports).
-- [x] `.gitignore` — Tampermonkey cache files added.
+## 1. Overlay — unfinished features
 
-**Deviations from plan:**
-- `freshdeskService.tagTicket` **kept** — still used internally by
-  `ticketActionService` (confirmTicket + lookupHotelEmail) to write the
-  month/country date tags that the Pendings job reads. Only the `/tag-ticket`
-  HTTP route + userscript `api.tagTicket` were removed.
-- `freshdeskService.updateTicket` left in place (1 unused export, low value
-  to chase).
-- `agent_macros` DB table left in place — see §5.
+- [ ] **Reply composer** (customer + supplier). The overlay has supplier email
+      only. Port the Freshdesk composer's shape from git history:
+      `showReplyComposer` + `buildReplySignature` + attachments, sending via
+      `POST /tickets/{id}/sendReply`.
+- [ ] **Real agent signature.** `getAgentName` stores a name in `GM_setValue`
+      because Desk exposes no current-agent endpoint (`/agents/me` 404s,
+      `/myPreferences` carries no identity). Revisit `GET /agents` with a
+      filter, or accept the local value permanently.
+- [ ] **Supplier email for flights.** The body says "dear hotel team", so the
+      button is hidden for non-hotel products. Needs a generic template.
+- [ ] **Supplier email has never been sent for real.** Verify on a test ticket
+      before trusting it.
+- [ ] Translate target picker — replace `prompt()` with a dropdown of common
+      languages.
+- [ ] Bulk "Collapse all / Expand all" for conversations; persist per-ticket
+      collapse state across SPA navigation.
 
-Net: userscript 5300 → 2720 lines; `services/` lost 2 files.
+## 2. Security / hygiene
 
-## 2. Naming debt (after the sweep)
+- [x] ~~`/guided-prewarm/booking/:id` reachable unauthenticated~~ — closed in
+      session 22: every route moved under `/api/*` behind one `app.use` guard.
+- [x] ~~`express.static` on the repo root served `server.js` and
+      `services/*.js` publicly~~ — closed in session 22.
+- [ ] `POST /ta-session` is still unauthenticated. It is how `auth.html` stores
+      the TA cookie, so guarding it means giving that page a secret too. Low
+      risk (write-only, overwrites one row) but it is the last open door.
+- [ ] Drop the dead tables — `freshdesk_sessions`, `zoho_sessions`,
+      `ticket_summaries`, `agent_prompts`, `agent_macros`. `initDb` no longer
+      creates them; removing them from the live DB is a deliberate migration,
+      not a code change.
 
-- [ ] Rename `api.guided.*` → `api.booking.*` (or similar) — "guided" is a
-      dead concept once the modal is gone.
-- [ ] Rename `/guided-prewarm/*` server routes — drop the `guided-prewarm`
-      prefix. Coordinate with the userscript `api` object.
+## 3. Loose ends to verify
 
-## 3. Reply / composer
+- [ ] **Login as User URL** — confirm the `webadminCustomerLogin/{id}` pattern
+      is correct for primary members; if not, capture the real URL from TA.
+- [ ] `GET`/`DELETE /api/ticket-booking/:ticketId` have no caller. Either give
+      the overlay an unlink affordance or delete the routes.
 
-- [ ] Agent signature from Freshdesk — `buildReplySignature` still hardcodes
-      "Ivan K. / Travel Advantage Support / ...". Discover FD's `/api/_/me`
-      (or `/api/_/agents/me`) endpoint, pull `signature_html`, cache per
-      session. Needed before multi-agent use.
-- [ ] Programmatic To: for the Forward composer — currently supplier email is
-      copied to clipboard for manual paste. FD's To: input is Ember-managed;
-      revisit if a reliable approach surfaces (or use a draft endpoint).
-- [ ] Translate target picker — replace `prompt()` with a small dropdown of
-      common languages.
+## 4. Future capabilities (not committed)
 
-## 4. Conversation controls
-
-- [ ] Bulk "Collapse all / Expand all" notes control.
-- [ ] Persist per-ticket collapse state across SPA navigation (currently
-      resets to default-collapse on every re-inject).
-- [ ] Per-conversation 🌐 Google translate — auto-detect source language and
-      show it inline instead of always assuming English target.
-
-## 4b. Zoho port — security follow-up
-
-- [ ] `/guided-prewarm/booking/:id` has **no auth** and is now browser-reachable
-      cross-origin from Zoho widget sandbox origins (`*.zappsusercontent.eu|com`)
-      after the CORS middleware landed. Fix: add `GET /zoho/booking/:id` behind
-      `requireZohoSecret`, point `TA_Zoho_beta/app/widget.js` at it, then drop
-      the `/guided-prewarm` CORS mount from `server.js`. Deliberately deferred
-      to unblock end-to-end testing — don't let it stick.
-      *(Session 21 made this cleaner: call it via `ZOHODESK.request` with the
-      `{{backend_shared_secret}}` placeholder — proxy substitution is confirmed
-      working, so no secret in the browser. The widget's other calls already
-      moved to this pattern; once this lands, the plain-fetch path and the
-      whole `/guided-prewarm` CORS exposure can go.)*
-- [x] ~~Browser-readable org-level secret (devtools exposure)~~ — closed in
-      session 21: the widget no longer reads `extension.config`; the secret is
-      injected server-side by Zoho's request proxy.
-
-## 5. Loose ends to verify
-
-- [ ] Login as User URL — `console.log` added (6.48). Confirm the
-      `webadminCustomerLogin/{id}` pattern is correct for primary members; if
-      not, capture the real URL from TA.
-- [ ] `refreshFreshdeskTicket` — 7-selector fallback chain (6.42). Confirm one
-      actually matches current FD DOM; if the console still warns "refresh
-      button not found", grab the real HTML.
-- [ ] DB `macros` table — drop via migration once the macros code is removed
-      (left in place during the sweep to avoid a migration mid-refactor).
-
-## 6. Future capabilities (not committed)
-
-- [ ] RTS real-time channel — the `rts` WebSocket config found early on
-      (`rts-us-fd.freshworksapi.com`, `rts-min.js`). Could replace polling and
-      give live ticket/queue updates. ~20-min reverse-engineering spike to
-      map the event shapes. Bookmarked, not scheduled.
-- [ ] Settings button + prompt editor — the translate-chat prompt lives in the
-      DB (`/settings/prompts`) but there's no in-UI editor. Decide placement
-      (gear icon in the booking panel header?) if agents need to tune prompts.
-- [ ] Note edit/delete — FD owns this natively; revisit only if a need
-      appears.
-- [ ] `.claude/CLAUDE.md` is stale after the sweep — still documents the
-      Guided modal, the prewarm batch, `bookingService.js`. Refresh the
-      architecture section when convenient.
+- [ ] Zoho's built-in AI — the reason `/ai-assist` was retired. If a summary or
+      draft-reply feature is wanted, wire Desk's own rather than re-adding a
+      Groq route.
+- [ ] Triage automation. Freshdesk had a batch triage job (LLM classification →
+      auto note / hotel email / status) and a Pendings job (reopen pending
+      tickets nearing check-in). Both deleted in session 22 as FD-wired. If
+      either is wanted on Zoho, git history has a working reference —
+      `services/batchTriageService.js`, `triageAiService.js`,
+      `noteDetectionService.js`, `prewarmService.checkPendings`.
+- [ ] Hotel Email — AI-resolved hotel address + prepaid-confirmation body.
+      Retired in session 22. `hotelEmailBuilder.js` and `aiService.findHotelEmail`
+      are in git history if it comes back.
