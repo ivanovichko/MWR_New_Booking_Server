@@ -82,7 +82,10 @@ Requires a `.env` (not committed):
   the panel header); the extension gets it from Zoho's request proxy.
 - `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`, `ZOHO_ORG_ID` — extension only, for
   the org-level OAuth write path. Org is `914515468` ("MWR LIFE") on `.com`.
-- `GROQ_API_KEY` — booking-reference extraction and the translation fallback
+- `AI_ENABLED` — `true` restores the deprecated AI routes. Absent/anything else
+  = off, which is the current state.
+- `GROQ_API_KEY` — booking-reference extraction and the translation fallback.
+  Unused while AI is off; leave it set so the flag stays flippable.
 - `GROQ_API_URL` — optional; point at `tools/groq-proxy-worker.js` when Groq
   blocks Render's egress IP with a 403
 - `TA_BASE_URL` — defaults to `https://www.traveladvantage.com`
@@ -129,10 +132,10 @@ is the last open door — backlog §2).
 
 | Route | Purpose |
 |---|---|
-| `POST …/extract` | Groq: pull a booking reference out of subject + description |
 | `GET …/booking/:id` | booking lookup — DB cache first, live TA fetch on a miss |
 | `POST …/find-user`, `GET …/user/:id`, `GET …/user/:id/reservations` | TA member search, profile, reservation history |
-| `POST …/translate` | Google first, Groq fallback |
+| `POST …/extract` | **deprecated** — Groq booking-reference extraction; 410 while AI is off |
+| `POST …/translate` | **deprecated** — Google first, Groq fallback; 410 while AI is off |
 
 **Overlay only** — `POST /api/ticket-booking`, `GET /api/ticket-booking/:ticketId`,
 `GET /api/booking-tickets/:bookingId`, `DELETE /api/ticket-booking/:ticketId`.
@@ -145,16 +148,47 @@ exchange), `GET /zoho/config` (diagnostic, returns no secrets), `GET /zoho/orgs`
 `POST /zoho/member-note`. These write through the org-level OAuth token, which
 is why they have no `/api` twin.
 
+### AI is deprecated and disconnected
+
+Zoho Desk ships AI out of the box, so as of **2026-09-15** the Groq-backed
+booking-reference extraction and the Google/Groq translation are switched off.
+**Disconnected, not removed** — every implementation is intact and still
+imported. One flag on each side:
+
+- `server.js` → `const AI_ENABLED = process.env.AI_ENABLED === 'true'` (false by
+  default; set `AI_ENABLED=true` on Render to restore without a code change).
+  While off, `…/extract` and `…/translate` answer **410** with
+  `code: "AI_DISABLED"` — 410 rather than 404 so a caller can tell "switched
+  off" from "wrong URL".
+- `frontend/MWR Zoho Tools.user.js` → `const AI_ENABLED = false`. While off the
+  🌐 per-message buttons are not injected and extraction is skipped.
+
+**Turn both on together.** The server flag alone leaves the overlay silent; the
+overlay flag alone gets 410s.
+
+Consequence for the panel: with extraction off it resolves a booking from the
+`ticket_bookings` link table instead (`GET /api/ticket-booking/:ticketId` — this
+is what finally gave that route a caller). A ticket with no link yet waits for
+the agent to pick one via **Change Booking**, which writes the link so the next
+visit resolves instantly.
+
+Consequence for the extension: its flow begins with `/zoho/extract`, so while AI
+is off the widget shows the 410 message and goes no further. It is dormant
+anyway; re-enabling AI restores it.
+
+`GROQ_API_KEY` and `GROQ_API_URL` are unused while AI is off. Leave them set —
+they cost nothing and the flag is meant to be flippable.
+
 ### Services
 
 | File | Responsibility |
 |---|---|
 | `services/parserService.js` | Parses the TA booking list `dataRow` (DataTables format) into a `booking`; parses booking detail HTML into `cleanHtml` + `details`; extracts the Zeal AI-reconfirmation status from `row[0]` |
 | `services/userService.js` | Parses the TA member profile HTML into a `user`; `findUser` for member search |
-| `services/bookingService.js` | `extractBookingId` (Groq) and `fetchAndCacheBooking` (TA fetch + DB cache). Helpdesk-agnostic — its only inputs are text and a reference. Was `prewarmService.js` |
+| `services/bookingService.js` | `fetchAndCacheBooking` (TA fetch + DB cache) and `extractBookingId` (Groq, **deprecated**). Helpdesk-agnostic — its only inputs are text and a reference. Was `prewarmService.js` |
 | `services/noteBuilder.js` | Builds the styled HTML for an internal note from booking + details + user + supplier |
 | `services/supplierService.js` | Static map of supplier names → contact email / URL / notes |
-| `services/translateService.js` | Google's free endpoint first, Groq as fallback. Google quotas per client IP and Render's egress IP is shared, so the fallback is the normal path, not an error path |
+| `services/translateService.js` | **Deprecated, still complete.** Google's free endpoint first, Groq as fallback. Google quotas per client IP and Render's egress IP is shared, so the fallback is the normal path, not an error path |
 | `services/taAuthService.js` | TravelAdvantage cookie auth; `taGet`/`taPost` attach the stored session cookie and log a redacted request summary |
 | `services/dbService.js` | PostgreSQL via `pg` — TA session, Zoho OAuth session, booking cache, ticket ↔ booking links |
 | `services/zohoDeskService.js` | Extension only. Self-client grant exchange, self-refreshing access token, `listOrganizations`, `postComment` |

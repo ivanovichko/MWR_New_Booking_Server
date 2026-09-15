@@ -1,3 +1,39 @@
+# Session 23 — AI deprecated and disconnected
+
+Zoho Desk ships AI out of the box, so the Groq booking-reference extraction and
+the Google/Groq message translation are switched off. **Deprecated, not
+removed** — every implementation is intact and reachable by flipping one flag on
+each side (`AI_ENABLED`).
+
+- [x] `server.js` — `AI_ENABLED` (env-overridable, false by default).
+      `…/extract` and `…/translate` under both prefixes answer 410 +
+      `code: "AI_DISABLED"` while off; 410 not 404, so "switched off" is
+      distinguishable from "wrong URL". Non-AI routes untouched.
+- [x] `bookingService.extractBookingId` and all of `translateService` marked
+      deprecated in place. `fetchAndCacheBooking` explicitly called out as
+      unaffected — it has no LLM in it.
+- [x] Userscript `AI_ENABLED = false` (0.14.0). 🌐 buttons no longer injected;
+      extraction skipped.
+- [x] Panel still finds bookings without extraction: it reads the
+      `ticket_bookings` link table via `GET /api/ticket-booking/:ticketId`.
+      **This is the one thing added rather than switched off** — without it the
+      panel would come up empty on every ticket. It also finally gives that
+      route a caller.
+- [x] Verified both states: off → 410 on all four AI routes, non-AI routes
+      unaffected; `AI_ENABLED=true` → routes live and reaching the real
+      implementations.
+
+Known gap, deliberately not fixed here: the extension's flow starts with
+`/zoho/extract`, so the dormant widget shows the 410 and stops. Re-enabling AI
+restores it.
+
+Also filed (backlog §5): `api.translate` retries terminal 4xx three times and
+`translateChatLines` fans out to one retried call per line — a dead endpoint
+hangs the 🌐 button for minutes. Moot while AI is off; must be fixed before it
+is ever turned back on.
+
+---
+
 # Session 22 — Freshdesk retirement
 
 Freshdesk is gone. The Zoho Desk overlay (`frontend/MWR Zoho Tools.user.js`) is

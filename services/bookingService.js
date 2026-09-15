@@ -18,6 +18,10 @@ const { cacheBooking } = require('./dbService');
 const GROQ_API_URL = process.env.GROQ_API_URL || 'https://api.groq.com/openai/v1/chat/completions';
 
 // ─── Extract a booking reference from ticket text using Groq ─────────────────
+// DEPRECATED 2026-09-15 — disconnected, not removed. Zoho Desk ships AI out of
+// the box, so /extract answers 410 while server.js's AI_ENABLED is false. The
+// function is untouched and still exported; flip the flag to restore it.
+// fetchAndCacheBooking below is NOT affected — it has no LLM in it.
 // Returns { bookingId } — null when the ticket carries no usable reference.
 async function extractBookingId({ subject = '', description = '' }) {
   const apiKey = process.env.GROQ_API_KEY;

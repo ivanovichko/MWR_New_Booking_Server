@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Zoho Tools
 // @namespace    https://traveladvantage.com
-// @version      0.13.0
+// @version      0.14.0
 // @description  TA booking tools for Zoho Desk — booking panel, duplicates, notes, supplier email, chat translation
 // @match        https://desk.zoho.com/agent/*
 // @grant        GM_xmlhttpRequest
@@ -33,6 +33,18 @@
 
   // ===== CONFIG =====
   const BACKEND_URL = 'https://mwr-new-booking-server.onrender.com';
+
+  // ─── AI functionality — DEPRECATED 2026-09-15, disconnected not removed ────
+  // Zoho Desk ships AI out of the box, so the Groq booking-reference extraction
+  // and the 🌐 message translation are switched off. Every implementation below
+  // is intact — translateChatLines, toggleConversationTranslation, api.extract,
+  // api.translate — they are simply not reached. The backend has a matching
+  // AI_ENABLED flag and answers 410 on those routes; turn both on together.
+  //
+  // With extraction off the panel finds its booking from the ticket ↔ booking
+  // link table instead, and falls back to Change Booking when a ticket has no
+  // link yet.
+  const AI_ENABLED = false;
 
   // Fallback only. resolveOrgId() prefers a value read from the live page so a
   // different org (or the .eu test org) works without editing the script.
@@ -309,6 +321,8 @@
       return last;
     },
     linkTicketBooking: (body)  => gmPost(`${BACKEND_URL}/api/ticket-booking`, body),
+    ticketBooking:    (ticketId) =>
+      gmGet(`${BACKEND_URL}/api/ticket-booking/${encodeURIComponent(ticketId)}`),
     bookingTickets:   (bookingId, exclude) =>
       gmGet(`${BACKEND_URL}/api/booking-tickets/${encodeURIComponent(bookingId)}` +
             (exclude ? `?exclude=${encodeURIComponent(exclude)}` : '')),
@@ -1718,6 +1732,7 @@
   const CONV_WRAP_SEL  = '[class*="-commentlistitemcommon-contentWrapper"]';
 
   function injectConversationTranslate() {
+    if (!AI_ENABLED) return;   // deprecated — see the AI_ENABLED note at the top
     document.querySelectorAll(CONV_BLOCK_SEL).forEach((block) => {
       if (block.querySelector('.ta-conv-translate')) return;
       const body = block.querySelector(CONV_BODY_SEL);
@@ -2336,16 +2351,28 @@
     }
 
     try {
-      renderPanelMessage(`<div style="color:${THEME.subtle};font-size:13px;">Finding booking reference…</div>`);
-      const ext = await api.extract({ subject: ctx.subject, description: ctx.description });
-      if (!ext.ok) {
-        ticketBookingCache[ticketId] = null;
-        panelNotice = { text: 'Could not read a booking reference: ' + ((ext.data && ext.data.error) || 'extraction failed') };
-        seedMemberLookupFromTicket();
-        renderBookingPanel();
-        return;
+      let bookingId = null;
+
+      if (AI_ENABLED) {
+        renderPanelMessage(`<div style="color:${THEME.subtle};font-size:13px;">Finding booking reference…</div>`);
+        const ext = await api.extract({ subject: ctx.subject, description: ctx.description });
+        if (!ext.ok) {
+          ticketBookingCache[ticketId] = null;
+          panelNotice = { text: 'Could not read a booking reference: ' + ((ext.data && ext.data.error) || 'extraction failed') };
+          seedMemberLookupFromTicket();
+          renderBookingPanel();
+          return;
+        }
+        bookingId = ext.data.bookingId;
+      } else {
+        // Extraction is deprecated. A ticket already linked to a booking still
+        // resolves instantly; anything else waits for the agent to pick one via
+        // Change Booking, which writes the link for next time.
+        renderPanelMessage(`<div style="color:${THEME.subtle};font-size:13px;">Looking for a linked booking…</div>`);
+        const linked = await api.ticketBooking(ticketId);
+        if (linked.ok && linked.data && linked.data.link) bookingId = linked.data.link.booking_id;
       }
-      const bookingId = ext.data.bookingId;
+
       if (!bookingId) {
         ticketBookingCache[ticketId] = null;
         currentBookingId = null;
@@ -2357,11 +2384,11 @@
       renderPanelMessage(`<div style="color:${THEME.subtle};font-size:13px;">Loading booking ${escapeHtml(bookingId)}…</div>`);
       const res = await api.booking(bookingId);
       if (!res.ok || !res.data.success) {
-        // The reference was read from the ticket but TA has no such booking —
-        // a common, recoverable state (typo, supplier ref, cancelled record).
+        // A reference resolved but TA has no such booking — a common, recoverable
+        // state (typo, supplier ref, cancelled record, or a stale link row).
         ticketBookingCache[ticketId] = null;
         panelNotice = {
-          text: `Reference "${bookingId}" was found in the ticket but no matching booking exists in TA.`,
+          text: `Reference "${bookingId}" ${AI_ENABLED ? 'was found in the ticket' : 'is linked to this ticket'} but no matching booking exists in TA.`,
           bookingId,
         };
         seedMemberLookupFromTicket();

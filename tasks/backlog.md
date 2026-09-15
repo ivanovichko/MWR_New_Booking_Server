@@ -44,8 +44,10 @@ the dormant extension.
 
 - [ ] **Login as User URL** — confirm the `webadminCustomerLogin/{id}` pattern
       is correct for primary members; if not, capture the real URL from TA.
-- [ ] `GET`/`DELETE /api/ticket-booking/:ticketId` have no caller. Either give
-      the overlay an unlink affordance or delete the routes.
+- [x] ~~`GET /api/ticket-booking/:ticketId` has no caller~~ — it does now: with
+      AI extraction deprecated, it is how the panel resolves a booking (§5).
+- [ ] `DELETE /api/ticket-booking/:ticketId` still has no caller. Either give
+      the overlay an unlink affordance or delete the route.
 
 ## 4. Zoho Desk extension (TA_Zoho_beta/) — dormant, maintained
 
@@ -67,7 +69,30 @@ through an org-level OAuth token, which the overlay deliberately does not use.
       `/zoho/*` extension routes, `zoho_sessions`, and the `ZOHO_CLIENT_ID` /
       `ZOHO_CLIENT_SECRET` / `ZOHO_ORG_ID` Render vars. **Ask first.**
 
-## 5. Future capabilities (not committed)
+## 5. AI — deprecated, disconnected 2026-09-15
+
+Zoho Desk ships AI out of the box. Groq extraction and Google/Groq translation
+are switched off behind `AI_ENABLED` (false in `server.js` and in the
+userscript). Nothing removed — both flags flip back on.
+
+- [ ] Replace extraction with Zia. `GET /api/ticket-booking/:ticketId` covers
+      already-linked tickets; a fresh ticket still needs its booking ref read
+      from the text. See the Zia Smart Prompt notes — it needs a provisioned
+      GenAI model, which the trial org did not have.
+- [ ] Replace 🌐 message translation with Desk's own, or accept the loss.
+- [ ] A stale link row now surfaces as "Reference X is linked to this ticket but
+      no matching booking exists in TA" — the DELETE route above is the fix.
+- [ ] Fix before ever re-enabling: `api.translate` retries **any** failure 3×
+      (1.5s + 4s), including terminal 4xx, and `translateChatLines` falls back
+      to one call per line — each also retried. A 25-line message against a
+      dead endpoint hangs the button for ~2.5 minutes; against a timeout
+      (`gmRequest` uses 60s) far longer. Classify retryable vs terminal, and
+      abort the per-line fan-out on a terminal error.
+- [ ] `injectConversationTranslate` had no `getSecret()` check, so the 🌐
+      buttons appeared on tickets whose panel said "No backend key set". Moot
+      while AI is off (the whole injection is skipped) — fix it if AI returns.
+
+## 6. Future capabilities (not committed)
 
 - [ ] Zoho's built-in AI — the reason `/ai-assist` was retired. If a summary or
       draft-reply feature is wanted, wire Desk's own rather than re-adding a

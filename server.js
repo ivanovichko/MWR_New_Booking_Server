@@ -16,6 +16,15 @@ const {
   linkTicketBooking, getTicketBooking, getTicketsForBooking, unlinkTicket,
 } = require('./services/dbService');
 
+// ─── AI functionality — DEPRECATED, disconnected 2026-09-15 ──────────────────
+// Zoho Desk ships AI out of the box, so the Groq-backed booking-reference
+// extraction and the Google/Groq translation are no longer served. Nothing is
+// removed: services/bookingService.js and services/translateService.js are
+// intact and the routes still exist, they just answer 410 while this is false.
+// Flip the constant, or set AI_ENABLED=true on Render, to bring it all back.
+// The overlay has a matching flag — turn both on together.
+const AI_ENABLED = process.env.AI_ENABLED === 'true';
+
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 
@@ -91,7 +100,15 @@ app.use('/zoho', requireSecret);
 // Mounted under both prefixes. The overlay and the extension ask the same
 // questions of TravelAdvantage; only their write paths differ.
 
-// Groq: pull a booking reference out of subject + description.
+// Answers every AI route while AI_ENABLED is false. 410 rather than 404 so a
+// caller can tell "deliberately switched off" from "wrong URL".
+const aiDisconnected = (req, res) => res.status(410).json({
+  error: 'AI functionality is deprecated and disconnected on this server. Set AI_ENABLED=true to restore it.',
+  code: 'AI_DISABLED',
+});
+
+// DEPRECATED (see AI_ENABLED). Groq: pull a booking reference out of subject +
+// description.
 const extractHandler = safeRoute(async (req, res) => {
   const { subject, description } = req.body;
   if (!subject && !description) throw new HttpError('subject or description is required');
@@ -186,6 +203,7 @@ const reservationsHandler = safeRoute(async (req, res) => {
   res.json({ success: true, reservations, total: data.recordsTotal });
 });
 
+// DEPRECATED (see AI_ENABLED). Google first, Groq fallback.
 const translateHandler = safeRoute(async (req, res) => {
   const { text, target = 'en', source = 'auto' } = req.body || {};
   if (!text || typeof text !== 'string') throw new HttpError('text required');
@@ -198,13 +216,17 @@ const translateHandler = safeRoute(async (req, res) => {
 });
 
 for (const prefix of ['/api', '/zoho']) {
-  app.post(`${prefix}/extract`,                  extractHandler);
   app.get(`${prefix}/booking/:id`,               bookingHandler);
   app.post(`${prefix}/find-user`,                findUserHandler);
   app.get(`${prefix}/user/:id`,                  userHandler);
   app.get(`${prefix}/user/:id/reservations`,     reservationsHandler);
-  app.post(`${prefix}/translate`,                translateHandler);
+
+  // Deprecated pair — served only while AI_ENABLED.
+  app.post(`${prefix}/extract`,   AI_ENABLED ? extractHandler   : aiDisconnected);
+  app.post(`${prefix}/translate`, AI_ENABLED ? translateHandler : aiDisconnected);
 }
+
+console.log(`[server] AI functionality ${AI_ENABLED ? 'ENABLED' : 'disconnected (deprecated)'}`);
 
 // ─── Ticket ↔ booking link (overlay only) ────────────────────────────────────
 // The overlay records the link as soon as a booking is established for a ticket,

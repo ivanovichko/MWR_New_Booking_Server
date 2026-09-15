@@ -1,3 +1,8 @@
+// DEPRECATED 2026-09-15 — disconnected, not removed.
+// Zoho Desk ships AI out of the box. This module is still complete and still
+// imported; the routes that reach it answer 410 while server.js's AI_ENABLED
+// is false. Keep it working — flip AI_ENABLED to bring it back.
+//
 // Translation for the overlay's 🌐 / 🤖 buttons and chat cleanup.
 //
 // Two providers, in order: Google's free endpoint first (fast, free, good
