@@ -29,14 +29,17 @@ Decisions taken up front:
 - [x] `config.js` (15) — nothing imports `TA_BASE` or the prewarm threshold
 - [x] 29 routes out of `server.js`
 
-## Phase 3 — Zoho extension backend
-The overlay authors its writes same-origin as the signed-in agent (`zdPost`),
-so the org-level OAuth path has no caller.
-- [x] `services/zohoDeskService.js` (147)
-- [x] `services/zohoTicketActionService.js` (32)
-- [x] `/zoho/oauth-session`, `/zoho/config`, `/zoho/orgs`, `/zoho/post-note`,
-      `/zoho/member-note`, `/zoho/hotel-email/lookup`
-- [x] `zoho_sessions` table + accessors
+## Phase 3 — Zoho extension backend — REVERSED
+Planned on the grounds that the overlay authors its writes same-origin
+(`zdPost`), so the org-level OAuth path has no caller. Carried out, then undone
+within the session: no caller ≠ dead. The extension is dormant pending
+marketplace approval and is the form MWR would license. See `lessons.md`.
+- [~] `services/zohoDeskService.js` (147) — deleted, then **restored**
+- [~] `services/zohoTicketActionService.js` (32) — deleted, then **restored**
+- [~] `/zoho/oauth-session`, `/zoho/config`, `/zoho/orgs`, `/zoho/post-note`,
+      `/zoho/member-note` — **restored**. Only `/zoho/hotel-email/lookup`
+      stayed deleted, with the rest of the Hotel Email feature.
+- [~] `zoho_sessions` table + accessors — **restored**
 
 ## Phase 4 — trim survivors
 - [x] `prewarmService.js` → `bookingService.js`; keep `extractBookingId`,
@@ -88,12 +91,14 @@ two lines of it (the `freshdeskService` and `FD_STATUS` imports).
 
 ### Three findings that were not in the plan
 
-1. **The Zoho extension backend was dead too.** `zohoDeskService.js`,
-   `zohoTicketActionService.js` and six `/zoho/*` routes existed only for
-   `TA_Zoho_beta/`. The overlay posts notes same-origin as the signed-in agent
-   via `zdPost` and never touches the org-level OAuth token — so the entire
-   OAuth path, the `zoho_sessions` table and three Render env vars had no
-   caller. Deleted; `TA_Zoho_beta/` itself kept on disk per instruction.
+1. **The Zoho extension backend has no caller — and that was the wrong reason
+   to delete it.** I removed `zohoDeskService.js`, `zohoTicketActionService.js`,
+   six `/zoho/*` routes and `zoho_sessions` on the grounds that the overlay
+   posts same-origin via `zdPost` and never uses the org OAuth token. True, and
+   irrelevant: the extension is dormant pending marketplace approval, not
+   obsolete, and it is the form MWR would license if they buy the app.
+   **Restored in full the same session**, and improved rather than merely
+   reverted — see below. Lesson recorded in `lessons.md`.
 
 2. **`app.use(express.static(__dirname))` served the whole repo.** Verified
    against `HEAD` before the change: `/server.js` and `/services/dbService.js`
@@ -105,6 +110,24 @@ two lines of it (the `freshdeskService` and `FD_STATUS` imports).
    client and `aiService` never read prompts from the DB — the table had been
    orphaned since the prompt text was inlined. `ticket_summaries` was exported
    but never imported.
+
+### The restore
+
+`/zoho/*` is back and is now a first-class namespace rather than a leftover:
+
+- Extension-only routes (`oauth-session`, `config`, `orgs`, `post-note`,
+  `member-note`) restored verbatim — they write through the OAuth token, so
+  they have no `/api` twin.
+- The six read routes both clients need (`extract`, `booking/:id`, `find-user`,
+  `user/:id`, `user/:id/reservations`, `translate`) are declared once as named
+  handlers and mounted under both prefixes in a loop. One implementation.
+- `requireSecret` is now `app.use` on **both** prefixes, so the extension's
+  routes gained the same no-unguarded-route-by-accident property.
+- `TA_Zoho_beta/app/widget.js` repointed: its plain-`fetch` booking lookup and
+  its two unauthenticated member calls now go through `ZOHODESK.request` with
+  the `{{backend_shared_secret}}` placeholder. **That closes backlog §4b** —
+  and with no plain-fetch path left, the `allowZohoWidgetOrigin` CORS
+  middleware is genuinely unnecessary rather than merely deleted.
 
 ### Deliberate non-deletions
 

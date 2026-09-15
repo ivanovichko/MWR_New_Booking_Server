@@ -9,6 +9,8 @@ const { lookupSupplier }                 = require('./services/supplierService')
 const { translate }                      = require('./services/translateService');
 const { taGet, taPost }                  = require('./services/taAuthService');
 const { extractBookingId, fetchAndCacheBooking } = require('./services/bookingService');
+const { confirmTicketZoho } = require('./services/zohoTicketActionService');
+const { exchangeGrantToken, listOrganizations, describeConfig, postComment } = require('./services/zohoDeskService');
 const {
   initDb, storeSession, getCachedBooking,
   linkTicketBooking, getTicketBooking, getTicketsForBooking, unlinkTicket,
@@ -55,37 +57,53 @@ app.post('/ta-session', safeRoute(async (req, res) => {
   res.json({ success: true });
 }));
 
-// ─── /api/* — everything the overlay calls, behind one shared secret ─────────
-// The overlay (frontend/MWR Zoho Tools.user.js) sends the secret as a bearer
-// token on every call; agents enter it once into Tampermonkey storage. Applied
-// as middleware rather than per-route so a new route cannot be added unguarded
-// by accident.
+// ─── Two guarded namespaces, one shared secret ───────────────────────────────
 //
-// Env var is still named ZOHO_BACKEND_SHARED_SECRET — it is already set on
-// Render, and renaming it buys nothing but a dashboard edit and an outage
-// window if the two halves are changed out of step.
-app.use('/api', (req, res, next) => {
+// /api/*  — the Tampermonkey overlay (frontend/MWR Zoho Tools.user.js), which
+//           is what agents run today. It reaches the backend via
+//           GM_xmlhttpRequest, so CORS never applies.
+//
+// /zoho/* — the Zoho Desk extension (TA_Zoho_beta/). Dormant pending a
+//           marketplace / Developer Space approval, but kept working: if MWR
+//           buys the app, this is the half that has to still be here. Its
+//           widget calls the backend through ZOHODESK.request, Zoho's
+//           server-side request proxy, which substitutes the literal
+//           {{backend_shared_secret}} placeholder into the Authorization
+//           header — so the secret never reaches browser JS, and because the
+//           proxy runs server-side, CORS never applies there either.
+//
+// Both carry the same bearer token, applied as middleware rather than per-route
+// so a new route cannot be added unguarded by accident. The env var is still
+// named ZOHO_BACKEND_SHARED_SECRET: it is already set on Render, and renaming
+// it buys nothing but a dashboard edit and an outage window if the halves are
+// changed out of step.
+function requireSecret(req, res, next) {
   const expected = process.env.ZOHO_BACKEND_SHARED_SECRET;
   if (!expected) return res.status(500).json({ error: 'ZOHO_BACKEND_SHARED_SECRET not configured on server' });
   const got = (req.get('Authorization') || '').replace(/^Bearer\s+/i, '');
   if (got !== expected) return res.status(401).json({ error: 'Unauthorized' });
   next();
-});
+}
+app.use('/api',  requireSecret);
+app.use('/zoho', requireSecret);
 
-// ─── Booking-reference extraction ────────────────────────────────────────────
-app.post('/api/extract', safeRoute(async (req, res) => {
+// ─── Shared handlers ─────────────────────────────────────────────────────────
+// Mounted under both prefixes. The overlay and the extension ask the same
+// questions of TravelAdvantage; only their write paths differ.
+
+// Groq: pull a booking reference out of subject + description.
+const extractHandler = safeRoute(async (req, res) => {
   const { subject, description } = req.body;
   if (!subject && !description) throw new HttpError('subject or description is required');
   const result = await extractBookingId({ subject: subject || '', description: description || '' });
   console.log(`[extract] → ${result.bookingId || 'none'}`);
   res.json({ success: true, ...result });
-}));
+});
 
-// ─── Booking lookup ──────────────────────────────────────────────────────────
-// Cache first, live TA fetch on a miss. data_row and user_html are always
-// re-parsed on read so new parser fields (aiReconfirmation, user.language)
-// reach cached bookings without dropping the cache.
-app.get('/api/booking/:id', safeRoute(async (req, res) => {
+// Booking lookup — cache first, live TA fetch on a miss. data_row and user_html
+// are always re-parsed on read so new parser fields (aiReconfirmation,
+// user.language) reach cached bookings without dropping the cache.
+const bookingHandler = safeRoute(async (req, res) => {
   const bookingId = req.params.id;
   let bookingData;
   let cleanHtmlForNote = null;
@@ -109,26 +127,24 @@ app.get('/api/booking/:id', safeRoute(async (req, res) => {
   );
   console.log(`[booking] ${bookingId} (${cached ? 'cache' : 'live'})`);
   res.json({ success: true, bookingData });
-}));
+});
 
-// ─── Member search + profile ─────────────────────────────────────────────────
-app.post('/api/find-user', safeRoute(async (req, res) => {
+const findUserHandler = safeRoute(async (req, res) => {
   const { query } = req.body;
   if (!query) throw new HttpError('query is required');
   const results = await findUser(query);
   console.log(`[find-user] "${query}" → ${results.length} result(s)`);
   res.json({ success: true, results });
-}));
+});
 
-app.get('/api/user/:id', safeRoute(async (req, res) => {
+const userHandler = safeRoute(async (req, res) => {
   const { id } = req.params;
   console.log(`[user] profile — ${id}`);
   const html = await taGet(`https://traveladvantage.com/admin/account/viewCustomer/${id}`);
   res.json({ success: true, user: parseUserHtml(html) });
-}));
+});
 
-// ─── Member reservation history ──────────────────────────────────────────────
-app.get('/api/user/:id/reservations', safeRoute(async (req, res) => {
+const reservationsHandler = safeRoute(async (req, res) => {
   const { id } = req.params;
   console.log(`[reservations] user ${id}`);
 
@@ -168,9 +184,29 @@ app.get('/api/user/:id/reservations', safeRoute(async (req, res) => {
   }));
 
   res.json({ success: true, reservations, total: data.recordsTotal });
-}));
+});
 
-// ─── Ticket ↔ booking link ───────────────────────────────────────────────────
+const translateHandler = safeRoute(async (req, res) => {
+  const { text, target = 'en', source = 'auto' } = req.body || {};
+  if (!text || typeof text !== 'string') throw new HttpError('text required');
+  try {
+    const result = await translate({ text, target, source });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    throw new HttpError(`Translation unavailable: ${err.message}`, 502);
+  }
+});
+
+for (const prefix of ['/api', '/zoho']) {
+  app.post(`${prefix}/extract`,                  extractHandler);
+  app.get(`${prefix}/booking/:id`,               bookingHandler);
+  app.post(`${prefix}/find-user`,                findUserHandler);
+  app.get(`${prefix}/user/:id`,                  userHandler);
+  app.get(`${prefix}/user/:id/reservations`,     reservationsHandler);
+  app.post(`${prefix}/translate`,                translateHandler);
+}
+
+// ─── Ticket ↔ booking link (overlay only) ────────────────────────────────────
 // The overlay records the link as soon as a booking is established for a ticket,
 // so the booking becomes a first-class key rather than something re-derived from
 // the ticket text on every visit. A booking maps to many tickets, which is what
@@ -204,16 +240,53 @@ app.delete('/api/ticket-booking/:ticketId', safeRoute(async (req, res) => {
   res.json({ success: true });
 }));
 
-// ─── Translation ─────────────────────────────────────────────────────────────
-app.post('/api/translate', safeRoute(async (req, res) => {
-  const { text, target = 'en', source = 'auto' } = req.body || {};
-  if (!text || typeof text !== 'string') throw new HttpError('text required');
-  try {
-    const result = await translate({ text, target, source });
-    res.json({ success: true, ...result });
-  } catch (err) {
-    throw new HttpError(`Translation unavailable: ${err.message}`, 502);
-  }
+// ─── Zoho Desk extension only ────────────────────────────────────────────────
+// The extension writes through an org-level OAuth token rather than the acting
+// agent's session — that difference is exactly why the overlay exists, and why
+// these routes have no /api twin. Kept working against the day the marketplace
+// app is approved.
+
+// One-time exchange of a self-client grant token (generated in the Zoho API
+// console, valid ~10 minutes, single use) for a durable refresh_token.
+// requireSecret runs *before* the exchange, so a 500 "not configured" response
+// does not consume the single-use code.
+app.post('/zoho/oauth-session', safeRoute(async (req, res) => {
+  const { grantCode } = req.body;
+  if (!grantCode) throw new HttpError('grantCode is required');
+  res.json(await exchangeGrantToken(grantCode));
+}));
+
+// Diagnostic only. Returns no secrets — just which vars are set and which data
+// centre the exchange will hit, so an invalid_client can be pinned down.
+app.get('/zoho/config', safeRoute(async (req, res) => {
+  res.json({ success: true, config: describeConfig() });
+}));
+
+// Health check + org ID discovery. Works before ZOHO_ORG_ID is set, so it is the
+// first call that proves the stored session can actually reach Desk — the OAuth
+// exchange only proves accounts.zoho.
+app.get('/zoho/orgs', safeRoute(async (req, res) => {
+  const orgs = await listOrganizations();
+  res.json({ success: true, orgs });
+}));
+
+// Post the standard booking note to a Desk ticket.
+app.post('/zoho/post-note', safeRoute(async (req, res) => {
+  const { ticketId, bookingId, noteHtml } = req.body;
+  if (!ticketId || !bookingId) throw new HttpError('ticketId and bookingId are required');
+  const results = await confirmTicketZoho(ticketId, bookingId, noteHtml || null);
+  console.log(`[zoho] posted note to ticket ${ticketId}`);
+  res.json({ success: true, results });
+}));
+
+// The widget's Member section builds member-detail HTML that has no booking
+// behind it, so this posts the prebuilt HTML directly — no cached booking.
+app.post('/zoho/member-note', safeRoute(async (req, res) => {
+  const { ticketId, noteHtml } = req.body;
+  if (!ticketId || !noteHtml) throw new HttpError('ticketId and noteHtml are required');
+  await postComment(ticketId, noteHtml, false);
+  console.log(`[zoho] posted member note to ticket ${ticketId}`);
+  res.json({ success: true });
 }));
 
 const PORT = process.env.PORT || 3000;

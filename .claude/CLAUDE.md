@@ -56,10 +56,15 @@ The backend is deployed on Render (`mwr-new-booking-server.onrender.com`). The
 frontend is a single userscript (`frontend/MWR Zoho Tools.user.js`) installed in
 the agent's browser.
 
+A second client exists and is **kept working**: the Zoho Desk extension in
+`TA_Zoho_beta/`. It is dormant — the marketplace / Developer Space install was
+never approved — but it is the shape MWR would license if they buy the app, so
+its backend half (`/zoho/*`, org-level OAuth) stays live. Do not delete it for
+having no daily caller.
+
 **Freshdesk was retired in session 22 (2026-09-15).** The Freshdesk userscript,
-its eight backend services and ~29 routes are gone; so is the Zoho Desk
-*extension* backend (org-level OAuth), which the overlay made redundant. Look in
-git history before re-implementing anything that sounds familiar.
+its eight backend services and ~29 routes are gone. Look in git history before
+re-implementing anything that sounds familiar.
 
 ## Running the server
 
@@ -72,8 +77,11 @@ npm start            # production (node server.js)
 Requires a `.env` (not committed):
 
 - `DATABASE_URL` — PostgreSQL connection string (Neon)
-- `ZOHO_BACKEND_SHARED_SECRET` — bearer token guarding every `/api/*` route.
-  Agents paste the same value into the userscript once (⚙ in the panel header).
+- `ZOHO_BACKEND_SHARED_SECRET` — bearer token guarding every `/api/*` and
+  `/zoho/*` route. Agents paste the same value into the userscript once (⚙ in
+  the panel header); the extension gets it from Zoho's request proxy.
+- `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`, `ZOHO_ORG_ID` — extension only, for
+  the org-level OAuth write path. Org is `914515468` ("MWR LIFE") on `.com`.
 - `GROQ_API_KEY` — booking-reference extraction and the translation fallback
 - `GROQ_API_URL` — optional; point at `tools/groq-proxy-worker.js` when Groq
   blocks Render's egress IP with a 403
@@ -81,9 +89,9 @@ Requires a `.env` (not committed):
 
 ## Architecture
 
-### Two call paths
+### Two clients, three call paths
 
-The overlay runs *inside* the Desk page, which gives it two ways out:
+**The overlay** runs *inside* the Desk page, which gives it two ways out:
 
 1. **`zdGet` / `zdPost`** — same-origin to Zoho Desk's own API
    (`/supportapi/zd/mwrlife/api/v1`, cookie auth + org header). Every **write**
@@ -92,27 +100,50 @@ The overlay runs *inside* the Desk page, which gives it two ways out:
 2. **`api.*`** — `GM_xmlhttpRequest` to the Render backend. Desk's CSP blocks
    page-origin XHR to external domains, so this cannot be a plain `fetch`.
 
-The backend therefore never needs Zoho write access. That is why the extension's
-OAuth path was deleted rather than kept.
+**The extension** runs in a Zoho-hosted widget sandbox and has neither:
+
+3. **`ZOHODESK.request`** — Zoho's server-side request proxy. It substitutes the
+   literal `{{backend_shared_secret}}` placeholder into the Authorization
+   header, so the secret never reaches browser JS, and because it runs
+   server-side, CORS never applies. Its writes go through the backend's
+   org-level OAuth token (`/zoho/post-note`), not the acting agent's session —
+   that limitation is precisely why the overlay was built.
+
+Because the proxy handles the cross-origin problem, the backend needs **no CORS
+middleware at all**. An earlier `allowZohoWidgetOrigin` mount existed only for a
+plain-`fetch` booking lookup that has since moved behind the guard.
 
 ### The backend is small on purpose
 
-Thirteen routes. Everything under `/api/*` sits behind one `app.use` middleware
-checking the bearer token — not per-route, so a new route cannot be added
-unguarded by accident.
+Two guarded namespaces, one secret. `/api/*` is the overlay's, `/zoho/*` is the
+extension's, and each is guarded by an `app.use` middleware rather than a
+per-route call — so a new route cannot be added unguarded by accident. Nothing
+outside `/health`, `/auth` and `POST /ta-session` is reachable without the
+bearer token.
+
+**Unguarded** — `GET /health` (liveness) and `GET /auth` + `POST /ta-session`
+(the page where agents paste their TA cookie; it has no secret to send, so this
+is the last open door — backlog §2).
+
+**Shared** — mounted under both prefixes from one handler each:
 
 | Route | Purpose |
 |---|---|
-| `GET /health` | liveness |
-| `GET /auth`, `POST /ta-session` | the page where agents paste their TA cookie |
-| `POST /api/extract` | Groq: pull a booking reference out of subject + description |
-| `GET /api/booking/:id` | booking lookup — DB cache first, live TA fetch on a miss |
-| `POST /api/find-user`, `GET /api/user/:id`, `GET /api/user/:id/reservations` | TA member search, profile, reservation history |
-| `POST /api/ticket-booking`, `GET /api/ticket-booking/:ticketId`, `GET /api/booking-tickets/:bookingId`, `DELETE /api/ticket-booking/:ticketId` | the ticket ↔ booking link table |
-| `POST /api/translate` | Google first, Groq fallback |
+| `POST …/extract` | Groq: pull a booking reference out of subject + description |
+| `GET …/booking/:id` | booking lookup — DB cache first, live TA fetch on a miss |
+| `POST …/find-user`, `GET …/user/:id`, `GET …/user/:id/reservations` | TA member search, profile, reservation history |
+| `POST …/translate` | Google first, Groq fallback |
 
-`GET`/`DELETE /api/ticket-booking/:ticketId` have no caller yet — kept as the
-read/delete half of a table the overlay actively writes.
+**Overlay only** — `POST /api/ticket-booking`, `GET /api/ticket-booking/:ticketId`,
+`GET /api/booking-tickets/:bookingId`, `DELETE /api/ticket-booking/:ticketId`.
+The last two have no caller yet; kept as the read/delete half of a table the
+overlay actively writes.
+
+**Extension only** — `POST /zoho/oauth-session` (one-time grant→refresh_token
+exchange), `GET /zoho/config` (diagnostic, returns no secrets), `GET /zoho/orgs`
+(proves the stored session reaches Desk), `POST /zoho/post-note`,
+`POST /zoho/member-note`. These write through the org-level OAuth token, which
+is why they have no `/api` twin.
 
 ### Services
 
@@ -125,7 +156,9 @@ read/delete half of a table the overlay actively writes.
 | `services/supplierService.js` | Static map of supplier names → contact email / URL / notes |
 | `services/translateService.js` | Google's free endpoint first, Groq as fallback. Google quotas per client IP and Render's egress IP is shared, so the fallback is the normal path, not an error path |
 | `services/taAuthService.js` | TravelAdvantage cookie auth; `taGet`/`taPost` attach the stored session cookie and log a redacted request summary |
-| `services/dbService.js` | PostgreSQL via `pg` — TA session, booking cache, ticket ↔ booking links |
+| `services/dbService.js` | PostgreSQL via `pg` — TA session, Zoho OAuth session, booking cache, ticket ↔ booking links |
+| `services/zohoDeskService.js` | Extension only. Self-client grant exchange, self-refreshing access token, `listOrganizations`, `postComment` |
+| `services/zohoTicketActionService.js` | Extension only. Posts the standard booking note through the OAuth token — the counterpart of what the overlay does with `zdPost` |
 
 ### Route conventions
 
@@ -157,8 +190,8 @@ tickets. That one-to-many side is the duplicate signal: siblings of the same
 writes the link as soon as a booking is established for a ticket.
 
 Dead tables left in the DB but no longer created by `initDb`:
-`freshdesk_sessions`, `zoho_sessions`, `ticket_summaries`, `agent_prompts`,
-`agent_macros`. Dropping them is a separate, deliberate migration.
+`freshdesk_sessions`, `ticket_summaries`, `agent_prompts`, `agent_macros`.
+Dropping them is a separate, deliberate migration.
 
 ### Session management
 
@@ -200,7 +233,17 @@ TravelAdvantage requires cookie-based auth. Agents paste their TA cookie at
 
 ### TA_Zoho_beta/
 
-A gitignored prototype of the Zoho Desk *extension*, superseded by the overlay
-(the marketplace install was never approved, and its single org-level OAuth
-token could not author writes as the clicking agent). Its backend half is gone.
-**Kept on disk as a reference — do not delete it.**
+The Zoho Desk *extension*: `zet`-packaged, `zet validate` clean, OAuth exchanged
+and org confirmed. Gitignored, so **it exists only on disk — deleting it is
+unrecoverable. Do not.**
+
+It is dormant, not dead. The marketplace / Developer Space install was never
+approved, and its single org-level OAuth token cannot author writes as the
+clicking agent — which is why the overlay was built and is what agents run. But
+the extension is the form MWR would license if they buy the app, so its backend
+half is maintained alongside the overlay's.
+
+Its widget calls `/zoho/extract`, `/zoho/booking/:id`, `/zoho/find-user`,
+`/zoho/user/:id/reservations`, `/zoho/post-note` and `/zoho/member-note` — all
+through `ZOHODESK.request` with the secret placeholder, no plain `fetch`
+anywhere.
