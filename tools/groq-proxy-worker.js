@@ -20,7 +20,7 @@
  *   3. Copy the worker URL, e.g. https://groq-proxy.<you>.workers.dev
  *   4. On Render, set env var:
  *        GROQ_API_URL = https://groq-proxy.<you>.workers.dev/openai/v1/chat/completions
- *      (aiService.js + prewarmService.js read this; unset = Groq direct.)
+ *      (translateService.js + bookingService.js read this; unset = Groq direct.)
  *   5. Redeploy the Render service so it picks up the env var.
  *
  * Optional hardening: set a shared secret to stop others using your

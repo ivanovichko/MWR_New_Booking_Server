@@ -5,50 +5,13 @@ const pool = new Pool({
   ssl: process.env.DATABASE_URL?.includes('localhost') ? false : { rejectUnauthorized: false },
 });
 
-const TRANSLATE_CHAT_PROMPT = `You are a multilingual chat transcript cleaner. Produce a clean, English-only version of a customer support chat, followed by a 2-sentence summary.
-
-STRICT RULES:
-1. Preserve the exact chronological order of all messages. Do not reorder, skip, or merge messages across different turns.
-2. SCOPE: Process only the chat transcript provided. Do not generate, include, or reference any content not present in the input — no email replies, no signatures, no invented messages. Ignore notes.
-3. Every message must appear in the output. Do not drop any message.
-4. BOT messages repeat the same content in multiple languages separated by " - ". Keep only the English segment verbatim.
-5. AGENT messages may appear in pairs — the same message in English then another language (or the reverse). Deduplicate: output only one English version. If the message is in a non-English language only, translate it exactly — do not paraphrase.
-6. CUSTOMER messages: translate any non-English text to English exactly — do not paraphrase or add content.
-7. If the customer's message appears more than once in identical form, show it only the first time it appears.
-8. Never paraphrase, summarize, or add any content not present in the original message.
-9. Speaker labels: BOT, CUSTOMER [first name], AGENT [name].
-
-After the transcript, output exactly:
----
-SUMMARY: [Two sentences. Sentence 1: what the customer asked. Sentence 2: what the agent did or resolved.]`;
-
-const TRANSLATE_PROMPT = `Translate the following text to {{memberLanguage}}. Translate everything including greetings and sign-offs. Return only the translated text — no explanation, no extra content.
-
-{{replyBody}}`;
-
 // ─── Initialize schema ────────────────────────────────────────────────────────
 async function initDb() {
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS freshdesk_sessions (
-      id          SERIAL PRIMARY KEY,
-      cookie      TEXT NOT NULL,
-      csrf_token  TEXT,
-      created_at  TIMESTAMPTZ DEFAULT NOW()
-    );
-    ALTER TABLE freshdesk_sessions ADD COLUMN IF NOT EXISTS csrf_token TEXT;
-
     CREATE TABLE IF NOT EXISTS ta_sessions (
       id          SERIAL PRIMARY KEY,
       cookie      TEXT NOT NULL,
       created_at  TIMESTAMPTZ DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS zoho_sessions (
-      id            SERIAL PRIMARY KEY,
-      access_token  TEXT,
-      refresh_token TEXT NOT NULL,
-      expires_at    TIMESTAMPTZ,
-      created_at    TIMESTAMPTZ DEFAULT NOW()
     );
 
     CREATE TABLE IF NOT EXISTS booking_cache (
@@ -58,13 +21,6 @@ async function initDb() {
       user_html     TEXT,
       parsed        JSONB,
       fetched_at    TIMESTAMPTZ DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS ticket_summaries (
-      ticket_id   TEXT PRIMARY KEY,
-      booking_id  TEXT,
-      summary     TEXT,
-      processed_at TIMESTAMPTZ DEFAULT NOW()
     );
 
     -- Ticket ↔ booking link. One ticket resolves to at most one booking (hence
@@ -85,50 +41,15 @@ async function initDb() {
       updated_at    TIMESTAMPTZ DEFAULT NOW()
     );
     CREATE INDEX IF NOT EXISTS idx_ticket_bookings_booking_id ON ticket_bookings (booking_id);
-
-    CREATE TABLE IF NOT EXISTS agent_prompts (
-      id         SERIAL PRIMARY KEY,
-      label      TEXT NOT NULL,
-      text       TEXT NOT NULL,
-      created_at TIMESTAMPTZ DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS agent_macros (
-      id         SERIAL PRIMARY KEY,
-      name       TEXT NOT NULL,
-      text       TEXT NOT NULL,
-      created_at TIMESTAMPTZ DEFAULT NOW()
-    );
   `);
 
-  // Seed default prompts if table is empty
-  const { rows } = await pool.query(`SELECT COUNT(*) FROM agent_prompts`);
-  if (parseInt(rows[0].count) === 0) {
-    await pool.query(
-      `INSERT INTO agent_prompts (label, text) VALUES ($1, $2), ($3, $4)`,
-      ['🌐 Translate chat', TRANSLATE_CHAT_PROMPT, '🌐 Translate', TRANSLATE_PROMPT]
-    );
-    console.log('✅ Seeded default prompts');
-  }
-
-  console.log('✅ DB schema ready');
+  console.log('[db] schema ready');
 }
 
-// ─── Freshdesk session ────────────────────────────────────────────────────────
-async function storeFreshdeskSession(cookie, csrfToken = null) {
-  await pool.query(`DELETE FROM freshdesk_sessions`);
-  await pool.query(`INSERT INTO freshdesk_sessions (cookie, csrf_token) VALUES ($1, $2)`, [cookie, csrfToken]);
-}
-
-async function getFreshdeskSession() {
-  const res = await pool.query(`SELECT cookie FROM freshdesk_sessions ORDER BY created_at DESC LIMIT 1`);
-  return res.rows[0]?.cookie || null;
-}
-
-async function getFreshdeskCsrfToken() {
-  const res = await pool.query(`SELECT csrf_token FROM freshdesk_sessions ORDER BY created_at DESC LIMIT 1`);
-  return res.rows[0]?.csrf_token || null;
-}
+// Retired with Freshdesk (session 22): freshdesk_sessions, zoho_sessions,
+// ticket_summaries, agent_prompts, agent_macros. They are no longer created,
+// but any that already exist are left alone — dropping them is a separate,
+// deliberate migration, not a side effect of a code cleanup.
 
 // ─── Session ──────────────────────────────────────────────────────────────────
 async function storeSession(cookie) {
@@ -139,33 +60,6 @@ async function storeSession(cookie) {
 async function getSession() {
   const res = await pool.query(`SELECT cookie FROM ta_sessions ORDER BY created_at DESC LIMIT 1`);
   return res.rows[0]?.cookie || null;
-}
-
-// ─── Zoho Desk OAuth session ──────────────────────────────────────────────────
-// Single shared row, same pattern as ta_sessions/freshdesk_sessions: refresh_token
-// is durable (from the one-time self-client grant exchange), access_token/expires_at
-// are refreshed in place as they expire.
-async function storeZohoSession({ accessToken = null, refreshToken, expiresAt = null }) {
-  await pool.query(`DELETE FROM zoho_sessions`);
-  await pool.query(
-    `INSERT INTO zoho_sessions (access_token, refresh_token, expires_at) VALUES ($1, $2, $3)`,
-    [accessToken, refreshToken, expiresAt]
-  );
-}
-
-async function getZohoSession() {
-  const res = await pool.query(
-    `SELECT access_token, refresh_token, expires_at FROM zoho_sessions ORDER BY created_at DESC LIMIT 1`
-  );
-  return res.rows[0] || null;
-}
-
-async function updateZohoAccessToken(accessToken, expiresAt) {
-  await pool.query(
-    `UPDATE zoho_sessions SET access_token = $1, expires_at = $2
-     WHERE id = (SELECT id FROM zoho_sessions ORDER BY created_at DESC LIMIT 1)`,
-    [accessToken, expiresAt]
-  );
 }
 
 // ─── Booking cache ────────────────────────────────────────────────────────────
@@ -184,21 +78,6 @@ async function getCachedBooking(bookingId) {
     [bookingId]
   );
   return res.rows[0] || null;
-}
-
-// ─── Ticket summaries ─────────────────────────────────────────────────────────
-async function storeTicketSummary({ ticketId, bookingId, summary }) {
-  await pool.query(`
-    INSERT INTO ticket_summaries (ticket_id, booking_id, summary, processed_at)
-    VALUES ($1, $2, $3, NOW())
-    ON CONFLICT (ticket_id) DO UPDATE
-      SET booking_id = $2, summary = $3, processed_at = NOW()
-  `, [ticketId, bookingId, summary]);
-}
-
-async function getTicketSummaries() {
-  const res = await pool.query(`SELECT * FROM ticket_summaries ORDER BY processed_at DESC`);
-  return res.rows;
 }
 
 // ─── Ticket ↔ booking link ────────────────────────────────────────────────────
@@ -238,21 +117,9 @@ async function unlinkTicket(ticketId) {
   await pool.query(`DELETE FROM ticket_bookings WHERE ticket_id = $1`, [String(ticketId)]);
 }
 
-// ─── Agent prompts ────────────────────────────────────────────────────────────
-async function getPrompts() {
-  const res = await pool.query(`SELECT * FROM agent_prompts ORDER BY created_at ASC`);
-  return res.rows;
-}
-async function createPrompt({ label, text }) {
-  const res = await pool.query(`INSERT INTO agent_prompts (label, text) VALUES ($1, $2) RETURNING *`, [label, text]);
-  return res.rows[0];
-}
-async function updatePrompt(id, { label, text }) {
-  const res = await pool.query(`UPDATE agent_prompts SET label=$1, text=$2 WHERE id=$3 RETURNING *`, [label, text, id]);
-  return res.rows[0];
-}
-async function deletePrompt(id) {
-  await pool.query(`DELETE FROM agent_prompts WHERE id=$1`, [id]);
-}
-
-module.exports = { initDb, storeSession, getSession, cacheBooking, getCachedBooking, storeTicketSummary, getTicketSummaries, pool, getPrompts, createPrompt, updatePrompt, deletePrompt, storeFreshdeskSession, getFreshdeskSession, getFreshdeskCsrfToken, storeZohoSession, getZohoSession, updateZohoAccessToken, linkTicketBooking, getTicketBooking, getTicketsForBooking, unlinkTicket };
+module.exports = {
+  initDb, pool,
+  storeSession, getSession,
+  cacheBooking, getCachedBooking,
+  linkTicketBooking, getTicketBooking, getTicketsForBooking, unlinkTicket,
+};

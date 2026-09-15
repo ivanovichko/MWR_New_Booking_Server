@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MWR Zoho Tools
 // @namespace    https://traveladvantage.com
-// @version      0.12.1
+// @version      0.13.0
 // @description  TA booking tools for Zoho Desk — booking panel, duplicates, notes, supplier email, chat translation
 // @match        https://desk.zoho.com/agent/*
 // @grant        GM_xmlhttpRequest
@@ -25,8 +25,8 @@
 //   api.*        — GM_xmlhttpRequest to the Render backend (page-origin XHR to
 //                  Render is blocked by Desk's CSP).
 //
-// Everything TA-side (booking parse, note HTML, member profile) is unchanged from
-// the Freshdesk build — those backend routes were always helpdesk-agnostic.
+// Everything TA-side (booking parse, note HTML, member profile) is helpdesk-
+// agnostic on the backend; this overlay is now its only client.
 
 (function () {
   'use strict';
@@ -286,12 +286,14 @@
   const gmGet  = (url)       => gmRequest('GET', url);
   const gmPost = (url, data) => gmRequest('POST', url, data);
 
+  // Every backend route lives under /api and requires the shared secret, which
+  // gmRequest attaches as a bearer token.
   const api = {
-    extract:          (body)   => gmPost(`${BACKEND_URL}/zoho/extract`, body),
-    booking:          (id)     => gmGet(`${BACKEND_URL}/guided-prewarm/booking/${encodeURIComponent(id)}`),
-    findUser:         (query)  => gmPost(`${BACKEND_URL}/find-user`, { query }),
-    user:             (userId) => gmGet(`${BACKEND_URL}/user/${encodeURIComponent(userId)}`),
-    userReservations: (userId) => gmGet(`${BACKEND_URL}/user/${encodeURIComponent(userId)}/reservations`),
+    extract:          (body)   => gmPost(`${BACKEND_URL}/api/extract`, body),
+    booking:          (id)     => gmGet(`${BACKEND_URL}/api/booking/${encodeURIComponent(id)}`),
+    findUser:         (query)  => gmPost(`${BACKEND_URL}/api/find-user`, { query }),
+    user:             (userId) => gmGet(`${BACKEND_URL}/api/user/${encodeURIComponent(userId)}`),
+    userReservations: (userId) => gmGet(`${BACKEND_URL}/api/user/${encodeURIComponent(userId)}/reservations`),
     // Retried because it is idempotent and because Render's free tier sleeps: the
     // first call after an idle spell answers with a wake-up page rather than
     // JSON, which otherwise surfaces as a translation failure. Note, reply and
@@ -300,15 +302,15 @@
     translate: async (text, target = 'en') => {
       let last = null;
       for (let attempt = 0; attempt < 3; attempt++) {
-        last = await gmPost(`${BACKEND_URL}/translate`, { text, target });
+        last = await gmPost(`${BACKEND_URL}/api/translate`, { text, target });
         if (last.ok && last.data && last.data.text) return last;
         if (attempt < 2) await new Promise((r) => setTimeout(r, attempt === 0 ? 1500 : 4000));
       }
       return last;
     },
-    linkTicketBooking: (body)  => gmPost(`${BACKEND_URL}/zoho/ticket-booking`, body),
+    linkTicketBooking: (body)  => gmPost(`${BACKEND_URL}/api/ticket-booking`, body),
     bookingTickets:   (bookingId, exclude) =>
-      gmGet(`${BACKEND_URL}/zoho/booking-tickets/${encodeURIComponent(bookingId)}` +
+      gmGet(`${BACKEND_URL}/api/booking-tickets/${encodeURIComponent(bookingId)}` +
             (exclude ? `?exclude=${encodeURIComponent(exclude)}` : '')),
   };
 
@@ -613,8 +615,8 @@
     if (body) body.innerHTML = html;
   }
 
-  // TA's AI-reconfirmation status chip. Kept byte-identical to the Freshdesk and
-  // widget versions so all three panels read the same.
+  // TA's AI-reconfirmation status chip. Kept byte-identical to the
+  // TA_Zoho_beta widget version so both panels read the same.
   function renderAiReconfirmBadge(r) {
     if (!r) return '';
     if (typeof r === 'string') return r;
@@ -647,7 +649,7 @@
     return panelUserOverride || (cached && cached.user) || null;
   }
 
-  // Row-for-row mirror of the Freshdesk panel and TA_Zoho_beta/app/widget.js.
+  // Row-for-row mirror of TA_Zoho_beta/app/widget.js.
   function renderBookingPanel() {
     const body = panelBody();
     if (!body) return;
@@ -1182,7 +1184,7 @@
   // Zoho search matches loosely — a booking ref returns tickets that do not
   // contain it, and a short numeric string returns pure noise. Verification
   // against the ticket's own text is what makes the result trustworthy; it is
-  // the same guard freshdeskService.searchTicketsStrict applied.
+  // the same guard the retired freshdeskService.searchTicketsStrict applied.
   async function zdSearchTickets(term, { verify = true, limit = DUP_SEARCH_LIMIT } = {}) {
     if (!term) return [];
     try {
@@ -2025,10 +2027,10 @@
   }
 
   // ===== SUPPLIER (HOTEL) EMAIL =====
-  // Two phases, same as the Freshdesk flow: the backend resolves the hotel
-  // address and builds the body, then the agent confirms/edits and sends.
-  // The send itself goes through Desk's own sendReply from the agent's session,
-  // so the outbound mail is attributed to them — the backend never sends.
+  // Entirely client-side: the recipient comes from bookingData.supplier (the
+  // backend's SUPPLIER_MAP, already on the booking payload) and the body is
+  // built here. The agent confirms/edits, then the send goes through Desk's own
+  // sendReply from their session, so the mail is attributed to them.
 
   function getAgentName() {
     return GM_getValue('ta_agent_name', '');

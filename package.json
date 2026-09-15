@@ -1,7 +1,7 @@
 {
   "name": "new-booking-server",
   "version": "1.0.0",
-  "description": "TravelAdvantage new booking automation backend",
+  "description": "TravelAdvantage booking automation backend for the Zoho Desk overlay",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -12,9 +12,7 @@
     "dotenv": "^16.3.1",
     "node-fetch": "^2.7.0",
     "jsdom": "^24.0.0",
-    "pg": "^8.11.3",
-    "multer": "^1.4.5-lts.1",
-    "form-data": "^4.0.0"
+    "pg": "^8.11.3"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
